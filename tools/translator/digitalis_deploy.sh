@@ -1,6 +1,6 @@
 #!/bin/bash
 # Copies the freshly built Digitalis translator (tools/translator/digitalis_build_host.sh) into
-# third_party/digitalis-prebuilts, pushes it to the emulator and reboots Android. Run
+# prebuilts/digitalis, pushes it to the emulator and reboots Android. Run
 # scripts/ensure_tsc.ps1 afterwards. The previous prebuilt is kept as <name>.before-<tag>.
 # usage: digitalis_deploy.sh <tag>
 set -e
@@ -8,7 +8,7 @@ tag=${1:?usage: digitalis_deploy.sh <tag>}
 export MSYS_NO_PATHCONV=1
 adb=/c/Users/mixid/Android/Sdk/platform-tools/adb.exe
 serial=emulator-5582
-bundle=$(cd "$(dirname "$0")/../../third_party/digitalis-prebuilts" && pwd -W)
+bundle=$(cd "$(dirname "$0")/../../prebuilts/digitalis" && pwd -W)
 lib=$bundle/system/lib64/libberberis_arm64.so
 
 cp "$lib" "$bundle/libberberis_arm64.so.before-$tag"

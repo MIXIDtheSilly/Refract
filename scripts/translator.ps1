@@ -1,14 +1,14 @@
 param([Parameter(Mandatory)][ValidateSet('google', 'digitalis')][string]$Use,
       [string]$Serial = 'emulator-5582', [switch]$Refresh, [switch]$NoReboot)
 # Switches the emulator's ARM64 translator between Google's libndk_translation and Digitalis
-# (open-source berberis, built into ..\third_party\digitalis-prebuilts). Both sets live side by side on
+# (open-source berberis, prebuilt in ..\prebuilts\digitalis). Both sets live side by side on
 # /system: the active one is copied into /system/lib64/arm64, /system/bin/arm64 and
 # /system/etc/ld.config.arm64.txt, and ro.dalvik.vm.native.bridge picks the host library.
 # Google's original set is saved once as *.google (and pulled to scripts\stubs\google-translator).
 # -Refresh re-pushes the Digitalis bundle after a rebuild. Reboots Android unless -NoReboot.
 $ErrorActionPreference = 'Stop'
 $adb = 'C:\Users\mixid\Android\Sdk\platform-tools\adb.exe'
-$bundle = Join-Path (Split-Path $PSScriptRoot -Parent) 'third_party\digitalis-prebuilts\system'
+$bundle = Join-Path (Split-Path $PSScriptRoot -Parent) 'prebuilts\digitalis\system'
 $hostLib = @{ google = 'libndk_translation.so'; digitalis = 'libberberis_arm64.so' }
 
 function Sh([string]$command) {

@@ -64,3 +64,5 @@ launcher/dist/
 /tools/translator/backups/
 /tools/probes/**/*.exe
 /tools/probes/mic_probe/mic_probe
+/prebuilts/digitalis/*.before-*
+!/prebuilts/**/*.so

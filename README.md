@@ -32,6 +32,7 @@ host-bridge/          Host bridge to a PC OpenXR runtime
 launcher/             Electron desktop launcher (GPL-3.0)
 scripts/              Start the emulator and launch a game
 tools/                GPU layer, GLES layer, translator patches, probes, analysis
+prebuilts/digitalis/  Prebuilt ARM64-to-x86_64 translator (Digitalis/Berberis)
 tests/                Smoke tests and loader probes
 docs/                 Setup guides and design notes
 ```
@@ -62,12 +63,14 @@ Architecture, status and build details are in [docs/overview.md](docs/overview.m
 
 ## Not included
 
-This repository contains no game APKs, Meta SDKs, Horizon OS files or prebuilt translator
-binaries. You need to provide your own:
+This repository contains no game APKs, Meta SDKs or Horizon OS files. You need to provide your own:
 
 - The APKs of games you own.
-- The Digitalis/Berberis translator prebuilts, under `third_party/digitalis-prebuilts/`. `scripts/translator.ps1` uses them.
 - The OpenXR loader AAR, under `third_party/`.
+
+The ARM64 translator is included prebuilt in [prebuilts/digitalis/](prebuilts/digitalis/)
+(Digitalis/Berberis, Apache-2.0, with Refract's performance patch), so you don't have to build
+AOSP. `scripts\translator.ps1 -Use digitalis` installs it into the emulator.
 
 To pass the entitlement check with the Meta Platform SDK stand-in, list the games you own in
 `scripts/owned_games.txt`. [scripts/owned_games.example.txt](scripts/owned_games.example.txt) shows the format.

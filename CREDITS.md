@@ -23,4 +23,6 @@ Because of this, the launcher is distributed under GPL-3.0-or-later; see
 - [OculusGraphQLApiLib](https://github.com/ComputerElite/OculusGraphQLApiLib): API research
   for the launcher's store integration. No code from it is bundled.
 - [Berberis](https://android.googlesource.com/platform/frameworks/libs/binary_translation/)
-  (AOSP): the patches in [tools/translator/](tools/translator/) target this ARM64-to-x86_64 translator.
+  (AOSP) and Digitalis (Apache-2.0): the ARM64-to-x86_64 translator. Its prebuilt binaries are
+  redistributed in [prebuilts/digitalis/](prebuilts/digitalis/) (see its NOTICE), and the
+  patches in [tools/translator/](tools/translator/) target it.

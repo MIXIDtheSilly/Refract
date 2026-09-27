@@ -1,0 +1,11 @@
+Digitalis binary distribution (ARM64 -> x86_64 translator)
+build-date:        2026-09-24
+build-username:    digitalis-build
+target-product:    sdk_phone64_x86_64_digitalis
+binary_translation-sha: 9e7f4407
+digitalis-sha:     a6edb72
+artifact-count:    74
+
+refract-note:      system/lib64/libberberis_arm64.so was rebuilt by Refract with
+                   tools/translator/digitalis-performance-fix.patch applied
+                   (SHA-256 b4dc5a2998c93b96c749dabb4749cdf55415eb824cebfd5a8adb811ca24d14ff).
