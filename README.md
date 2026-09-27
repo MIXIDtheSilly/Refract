@@ -1,4 +1,6 @@
-# Refract
+<p align="center">
+  <img src="img/refract_banner.png" alt="Refract" width="720">
+</p>
 
 Refract runs Android (Meta Quest) OpenXR apps on a Windows PC and shows them in a PC VR
 headset. The app runs in the Android Emulator. Refract provides an Android OpenXR runtime inside the
