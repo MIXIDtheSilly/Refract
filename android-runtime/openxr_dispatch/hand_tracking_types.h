@@ -4,6 +4,17 @@
 using XrHandTrackerEXT = struct XrHandTrackerEXT_T*;
 using XrSpaceVelocityFlags = uint64_t;
 struct XrVector3f { float x, y, z; };
+// Core XrSpaceVelocity (extends XrSpaceLocation); declared here beside the joint velocities.
+constexpr XrStructureType XR_TYPE_SPACE_VELOCITY = static_cast<XrStructureType>(43);
+constexpr XrSpaceVelocityFlags XR_SPACE_VELOCITY_LINEAR_VALID_BIT = 0x00000001;
+constexpr XrSpaceVelocityFlags XR_SPACE_VELOCITY_ANGULAR_VALID_BIT = 0x00000002;
+typedef struct XrSpaceVelocity {
+    XrStructureType         type;
+    void*                   next;
+    XrSpaceVelocityFlags    velocityFlags;
+    XrVector3f              linearVelocity;
+    XrVector3f              angularVelocity;
+} XrSpaceVelocity;
 constexpr uint32_t XR_HAND_JOINT_COUNT_EXT = 26;
 constexpr XrStructureType XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT = static_cast<XrStructureType>(1000051000);
 constexpr XrStructureType XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT = static_cast<XrStructureType>(1000051001);

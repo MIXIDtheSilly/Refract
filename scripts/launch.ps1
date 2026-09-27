@@ -77,6 +77,14 @@ if ($phone) {
     # Digitalis' files live only in the /system overlay's upper layer; after a boot the first app to open
     # them gets EACCES until something else has looked them up, so read them once as shell first.
     & $adb -s $Serial shell 'cat /system/bin/arm64/app_process64 /system/bin/arm64/linker64 > /dev/null; ls /system/lib64/arm64 > /dev/null'
+    # Guest kernel tuning (root; adb root restarts adbd, so before the reverses). The emulator exposes every
+    # vCPU as its own package, so with TTWU_QUEUE each cross-CPU wake-up is an IPI, which is a slow
+    # exit under WHPX; NO_TTWU_QUEUE cut them ~3000/s -> ~200/s and gave Batman ~+5% fps. Batman's Meta XR
+    # Audio sink restarts every second and leaks ~280 16 KB blocks each time; once scudo's size class is full
+    # each block is its own mapping, which hit the 65530 max_map_count after ~5 min.
+    & $adb -s $Serial root | Out-Null
+    & $adb -s $Serial wait-for-device
+    & $adb -s $Serial shell 'echo 1048576 > /proc/sys/vm/max_map_count; mount | grep -q " /sys/kernel/debug " || mount -t debugfs debugfs /sys/kernel/debug; echo NO_TTWU_QUEUE > /sys/kernel/debug/sched/features'
 }
 & $adb -s $Serial reverse tcp:38490 tcp:38490 | Out-Null
 & $adb -s $Serial reverse tcp:38491 tcp:38491 | Out-Null

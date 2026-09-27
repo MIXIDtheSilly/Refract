@@ -49,6 +49,7 @@ private:
     }();
 #endif
     uint64_t next_connect_ns_ = 0;
+    uint64_t next_drain_ns_ = 0;
     refract::protocol::PoseStreamDecoder decoder_;
     uint32_t retry_countdown_ = 0;
     refract::protocol::PoseFrame latest_{

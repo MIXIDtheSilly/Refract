@@ -17,11 +17,13 @@
 # The guest microphone is the Windows default recording device. Without -allow-host-audio the emulator
 # opens it but feeds the guest zeros (voice chat silently sends nothing); -NoHostMic restores that.
 # Check with tools\mic_probe (adb shell /data/local/tmp/mic_probe while speaking).
+# -AudioLatencyMs is how much audio qemu keeps queued in DirectSound (qemu's default is 10 ms, the same as its
+# mixer timer period, so any late timer tick under load plays as a crackle; AC Nexus crackled). More = later sound.
 # qemu is pinned to the P-cores (i7-12700: logical processors 0-15; 16-19 are E-cores) so Windows can't move
 # the vCPU threads to E-cores, e.g. while the window is minimized. -AnyCore turns that off.
 param([switch]$NoGpuSharing, [switch]$Hidden, [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
       [ValidateRange(1, 6)][int]$Cores = 1, [string]$KernelArgs = 'tsc=nowatchdog idle=poll', [switch]$NoHostMic,
-      [switch]$AnyCore)
+      [switch]$AnyCore, [ValidateRange(10, 200)][int]$AudioLatencyMs = 50)
 $emulator = 'C:\Users\mixid\Android\Sdk\emulator'
 if (!$AnyCore) {
     Add-Type -TypeDefinition @'
@@ -57,11 +59,18 @@ if (!$NoGpuSharing) {
     $env:VK_LAYER_PATH = $layer
     $env:VK_INSTANCE_LAYERS = 'VK_LAYER_REFRACT_gpu_share'
 }
+# qemu 2.12 audio options come from the environment (QEMU_<driver>_<option>); inherited by the emulator.
+if ($Audio -eq 'dsound') {
+    $env:QEMU_DSOUND_LATENCY_MILLIS = $AudioLatencyMs
+    $env:QEMU_DSOUND_BUFSIZE_OUT = 65536  # ~340 ms of 48 kHz stereo; the default 16 KiB leaves little room above the latency.
+}
 $arguments = @('-avd', 'refract-google-api36', '-port', '5582', '-gpu', 'host', '-accel', 'on', '-no-snapshot',
                '-no-boot-anim', '-memory', '8192', '-writable-system', '-audio', $Audio)
 if (!$NoHostMic) { $arguments += '-allow-host-audio' }
 if ($KernelArgs) {
     # Must come last: everything after -qemu goes to qemu, whose -append the emulator adds to the kernel command line.
+    # (An extra -smp sockets=1,cores=N here has no effect: the guest still sees one package per vCPU with its own
+    # cache, so launch.ps1 sets the NO_TTWU_QUEUE scheduler feature instead.)
     $qemuArgs = @('-qemu', '-append', "`"$KernelArgs`"")
 } else {
     $qemuArgs = @()

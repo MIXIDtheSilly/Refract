@@ -89,7 +89,14 @@ refract::protocol::PoseFrame PoseClient::latest_pose_frame()
         return std::strcmp(value, "1") == 0;
     }();
     if (emulator_ || direct) {
-        if (ensure_emulator_connected()) { read_available_frames(); }
+        // Games query ~16 times a frame, and each recv costs a syscall (plus an ACK through the emulator's
+        // virtual NIC) on the game thread. The server sends at most every 4 ms, so drain at most once a ms.
+        const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        if (now >= next_drain_ns_ && ensure_emulator_connected()) {
+            read_available_frames();
+            next_drain_ns_ = now + 1'000'000;
+        }
         return latest_;
     }
 #endif

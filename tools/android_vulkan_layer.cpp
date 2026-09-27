@@ -122,11 +122,17 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplateKHR(VkDevice h,VkDes
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplateKHR(VkDevice h,VkDescriptorSet s,VkDescriptorUpdateTemplate t,const void* d){vkUpdateDescriptorSetWithTemplate(h,s,t,d);}
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance h,const char* name){
     if(auto f=intercept(name))return f;
-    if(!h)return nullptr;auto s=instance(h);return s.gipa(h,alias(name));
+    if(!h)return nullptr;auto s=instance(h);
+    // A Vulkan 1.1 instance can expose KHR_renderpass2 while its 1.2 core
+    // entry points are unavailable. Prefer the requested extension function.
+    if(auto f=s.gipa(h,name))return f;
+    auto promoted=alias(name);return promoted!=name?s.gipa(h,promoted):nullptr;
 }
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice h,const char* name){
     if(auto f=intercept(name))return f;
-    if(!h)return nullptr;auto s=device(h);return s.gdpa(h,alias(name));
+    if(!h)return nullptr;auto s=device(h);
+    if(auto f=s.gdpa(h,name))return f;
+    auto promoted=alias(name);return promoted!=name?s.gdpa(h,promoted):nullptr;
 }
 }
 namespace {

@@ -436,6 +436,31 @@ XrPosef inverse_pose(const XrPosef& pose)
     return normalize_pose(inverse);
 }
 
+// Hosts before protocol v5 send no LOCAL origin. Leaving LOCAL at the floor-level origin puts the
+// eye-level space on the floor, and games that read their eye height as "eye-level origin relative
+// to floor-level origin" get 0 (Batman: Arkham Shadow divides by it and its camera rig goes NaN).
+// Do what a Quest does after a recenter instead: LOCAL is the head's position and yaw, taken from
+// the first real pose frame (sequence 0 is the default, before any host frame arrived).
+XrPosef implicit_local_origin(const refract::protocol::PoseFrame& poseFrame)
+{
+    static std::mutex mutex;
+    static bool captured = false;
+    static XrPosef origin = identity_pose();
+    std::lock_guard lock(mutex);
+    if (!captured && poseFrame.sequence != 0) {
+        const XrPosef hmd = protocol_pose_to_xr(poseFrame.hmd);
+        origin.position = hmd.position;
+        origin.orientation = {0.0f, hmd.orientation.y, 0.0f, hmd.orientation.w};  // Twist about +Y.
+        origin = normalize_pose(origin);
+        captured = true;
+#if defined(__ANDROID__)
+        __android_log_print(ANDROID_LOG_INFO, "Refract.Space", "implicit LOCAL origin at (%.3f %.3f %.3f)",
+            origin.position.x, origin.position.y, origin.position.z);
+#endif
+    }
+    return origin;
+}
+
 XrPosef world_pose_for_space(const SpaceRecord& record, const refract::protocol::PoseFrame& poseFrame)
 {
     XrPosef base = identity_pose();
@@ -443,6 +468,8 @@ XrPosef world_pose_for_space(const SpaceRecord& record, const refract::protocol:
     case SpaceKind::Local:
         if (poseFrame.version >= 5 && (poseFrame.local_origin_flags & 3) == 3)
             base = protocol_pose_to_xr(poseFrame.local_origin);
+        else if (poseFrame.version < 5)
+            base = implicit_local_origin(poseFrame);
         break;
     case SpaceKind::View:
         base = protocol_pose_to_xr(poseFrame.hmd);
@@ -2914,6 +2941,19 @@ XrResult XRAPI_CALL xrLocateSpace_impl(
     const XrPosef spaceWorld = world_pose_for_space(*spaceRecord, poseFrame);
     const XrPosef baseWorld = world_pose_for_space(*baseRecord, poseFrame);
     location->pose = multiply_pose(inverse_pose(baseWorld), spaceWorld);
+    // OVRPlugin chains XrSpaceVelocity and extrapolates poses with it. Left unwritten, it reads
+    // whatever was in that memory (Batman: Arkham Shadow's head pose turned NaN). The pose bridge
+    // carries no velocities, so report a device at rest, valid wherever the pose is valid.
+    struct ChainHeader { XrStructureType type; void* next; };
+    for (auto* next = static_cast<ChainHeader*>(location->next); next; next = static_cast<ChainHeader*>(next->next)) {
+        if (next->type != XR_TYPE_SPACE_VELOCITY) continue;
+        auto* velocity = reinterpret_cast<XrSpaceVelocity*>(next);
+        velocity->linearVelocity = {0.0f, 0.0f, 0.0f};
+        velocity->angularVelocity = {0.0f, 0.0f, 0.0f};
+        velocity->velocityFlags =
+            ((location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ? XR_SPACE_VELOCITY_LINEAR_VALID_BIT : 0) |
+            ((location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) ? XR_SPACE_VELOCITY_ANGULAR_VALID_BIT : 0);
+    }
     return XR_SUCCESS;
 }
 
