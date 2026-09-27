@@ -1,0 +1,31 @@
+<!-- Stand-in for the Horizon package: Meta's Platform SDK loader in each game loads
+     com.oculus.platform.loader.EntryPoint from here (see native/ovr_platform.cpp).
+     Games must be able to see this package: Quest games query MAIN intents, which the activity
+     below answers; an adb install with the force-queryable option covers other games until the
+     next reboot. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.oculus.horizon"
+    android:versionCode="1"
+    android:versionName="0.1-refract">
+
+    <uses-sdk
+        android:minSdkVersion="29"
+        android:targetSdkVersion="29" />
+
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:hasCode="true"
+        android:label="Refract Platform Services">
+
+        <activity
+            android:name="com.oculus.platform.loader.VisibilityActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

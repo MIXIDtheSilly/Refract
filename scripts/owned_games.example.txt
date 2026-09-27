@@ -1,0 +1,5 @@
+# Copy this file to owned_games.txt and list the packages of Quest games you own, one per line.
+# launch.ps1 sets debug.refract.platform.owned.<package>=1 for each, and Refract's Platform SDK
+# stand-in then answers the game's entitlement check with "entitled". Unlisted games get
+# "not entitled". In-app purchases and DLC are never granted.
+com.meta.samples.NorthStar

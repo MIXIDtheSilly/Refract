@@ -1,0 +1,85 @@
+# Refract
+
+Refract runs Android (Meta Quest) OpenXR apps on a Windows PC and shows them in a PC VR
+headset. The app runs in the Android Emulator. Refract provides an Android OpenXR runtime inside the
+emulator, which sends frames to the PC and receives headset and controller poses back.
+
+> **Status:** experimental. It works for the setups documented below, but compatibility with arbitrary games is unfinished.
+
+## How it works
+
+```text
+Android OpenXR APK (in the Android Emulator)
+  -> Refract Android OpenXR runtime (com.refract.openxrruntime)
+  -> Refract protocol (poses, frames, input)
+  -> Refract viewer / host bridge (Windows)
+  -> PC OpenXR runtime (SteamVR)
+  -> headset
+```
+
+The eye images are shared through a Vulkan layer that is loaded into the emulator. A
+translator runs ARM64-only games on the x86_64 emulator image.
+
+## Repository layout
+
+```text
+android-runtime/      Android OpenXR runtime (native)
+android-runtime-apk/  Installable runtime APK and runtime broker
+platform-sdk/         Meta Platform SDK stand-in (package com.oculus.horizon)
+protocol/             Pose, image and input protocol and transports
+viewer/               Windows viewer: receives the shared eye textures and shows them
+host-bridge/          Host bridge to a PC OpenXR runtime
+launcher/             Electron desktop launcher (GPL-3.0)
+scripts/              Start the emulator and launch a game
+tools/                GPU layer, GLES layer, translator patches, probes, analysis
+tests/                Smoke tests and loader probes
+docs/                 Setup guides and design notes
+```
+
+## Getting started
+
+Requirements: Windows 11, an Nvidia GPU, the Android SDK with the Android Emulator and NDK,
+CMake and Ninja, and SteamVR.
+
+1. Build and set up the emulator path. See
+   [docs/windows_nvidia_emulator.md](docs/windows_nvidia_emulator.md).
+2. Build the viewer with `viewer\build.bat`.
+3. Start a game. [docs/yeeps_setup.md](docs/yeeps_setup.md) walks through a full working
+   configuration:
+
+   ```powershell
+   .\scripts\start_emulator.ps1 -Cores 6 -Hidden
+   .\scripts\ensure_tsc.ps1
+   .\scripts\launch.ps1 -Run my-run -TranslatorMode two-gear
+   ```
+
+   Logs for each run are written to `runs\<name>\`.
+
+Architecture, status and build details are in [docs/overview.md](docs/overview.md).
+
+> **Note:** several scripts still hardcode the author's Android SDK path
+> (`C:\Users\mixid\Android\Sdk`). Change it to match your machine.
+
+## Not included
+
+This repository contains no game APKs, Meta SDKs, Horizon OS files or prebuilt translator
+binaries. You need to provide your own:
+
+- The APKs of games you own.
+- The Digitalis/Berberis translator prebuilts, under `third_party/digitalis-prebuilts/`. `scripts/translator.ps1` uses them.
+- The OpenXR loader AAR, under `third_party/`.
+
+To pass the entitlement check with the Meta Platform SDK stand-in, list the games you own in
+`scripts/owned_games.txt`. [scripts/owned_games.example.txt](scripts/owned_games.example.txt) shows the format.
+
+Refract is meant for testing apps you own and open samples. Do not use it to bypass DRM,
+anti-cheat, platform security, store restrictions or application license terms.
+
+## Credits and license
+
+Refract is based on [AXRB](https://github.com/TheReal-Flo/AXRB) by Florian Reintgen, and
+much of its code comes from AXRB. See [CREDITS.md](CREDITS.md).
+
+Refract is released under the [MIT License](LICENSE), which keeps AXRB's MIT copyright
+notice. The launcher ([launcher/](launcher/)) is GPL-3.0-or-later because it includes code
+adapted from RiftLift.

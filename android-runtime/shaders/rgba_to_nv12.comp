@@ -1,0 +1,47 @@
+#version 450
+// Both eyes (RGBA8, read as UNORM bytes) -> one NV12 picture with the eyes side by side,
+// BT.601 limited range, same integer math as video_encoder.cpp's CPU path.
+// One invocation converts a 4x2 pixel block: two luma words and one chroma word.
+// Rebuild the header: python tools/compile_shaders.py (uses the NDK's glslc).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D leftEye;
+layout(binding = 1) uniform sampler2D rightEye;
+layout(std430, binding = 2) writeonly buffer Picture { uint words[]; };
+layout(push_constant) uniform Layout {
+    uint eyeWidth;   // Even.
+    uint height;     // Even.
+    uint stride;     // Bytes per row of both planes, a multiple of 4.
+    uint uvOffset;   // Byte offset of the interleaved UV plane, a multiple of 4.
+} layout_;
+
+ivec3 fetch(uint x, uint y)
+{
+    vec4 c = x < layout_.eyeWidth ? texelFetch(leftEye, ivec2(x, y), 0)
+                                  : texelFetch(rightEye, ivec2(x - layout_.eyeWidth, y), 0);
+    return ivec3(round(c.rgb * 255.0));
+}
+
+uint luma(ivec3 c) { return uint(clamp(((66 * c.r + 129 * c.g + 25 * c.b + 128) >> 8) + 16, 0, 255)); }
+
+void main()
+{
+    const uint x0 = gl_GlobalInvocationID.x * 4, y0 = gl_GlobalInvocationID.y * 2;
+    if (x0 >= layout_.eyeWidth * 2 || y0 >= layout_.height) return;
+    uint row0 = 0, row1 = 0, uv = 0;
+    for (uint pair = 0; pair < 2; ++pair) {
+        ivec3 sum = ivec3(0);
+        for (uint i = 0; i < 2; ++i) {
+            const uint x = x0 + pair * 2 + i, shift = 8 * (pair * 2 + i);
+            const ivec3 a = fetch(x, y0), b = fetch(x, y0 + 1);
+            row0 |= luma(a) << shift;
+            row1 |= luma(b) << shift;
+            sum += a + b;
+        }
+        const uint u = uint(clamp(((-38 * sum.r - 74 * sum.g + 112 * sum.b + 512) >> 10) + 128, 0, 255));
+        const uint v = uint(clamp(((112 * sum.r - 94 * sum.g - 18 * sum.b + 512) >> 10) + 128, 0, 255));
+        uv |= (u | (v << 8)) << (16 * pair);
+    }
+    words[(y0 * layout_.stride + x0) / 4] = row0;
+    words[((y0 + 1) * layout_.stride + x0) / 4] = row1;
+    words[(layout_.uvOffset + (y0 / 2) * layout_.stride + x0) / 4] = uv;
+}

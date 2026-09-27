@@ -1,0 +1,224 @@
+# Refract overview
+
+Architecture, status and build notes. For setup, start with the [README](../README.md).
+
+Refract is an experimental bridge for running Android OpenXR applications inside a Linux Android container and forwarding their OpenXR runtime calls, tracking, and frame output to a PC OpenXR runtime such as SteamVR or Monado.
+
+The current prototype proves loader/runtime integration and stereo frame transport. The native Windows branch renders GLES and Vulkan samples on Nvidia hardware, including translated ARM64 applications. It is not production-ready.
+
+## Native Windows / Nvidia branch
+
+The Windows desktop launcher is in [launcher/](../launcher/README.md). Run
+`powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1` for a local game
+library, Meta Quest storefront, APK/content downloads, and Refract install/play controls.
+
+An experimental Android Emulator / Gfxstream path uses native Windows host GPU
+rendering, with no WSL. PowerShell build, launch and GPU-verification scripts
+are described in [Windows Nvidia setup](windows_nvidia_emulator.md).
+The ARM64-only GLES sample also runs through the emulator's bundled ARM64
+translator with Nvidia rendering and stereo frame delivery; see
+[ARM64 build and verification](windows_nvidia_emulator.md#arm64-translation).
+GLES and Vulkan color swapchains work with both x86_64 and translated ARM64
+samples. See [Vulkan setup and limits](windows_nvidia_emulator.md#vulkan-rendering).
+Frame transport still uses CPU readback; arbitrary game compatibility remains
+unfinished.
+
+## Goal
+
+```text
+Android OpenXR APK
+  -> Android OpenXR loader
+  -> Refract Android OpenXR runtime APK
+  -> Refract bridge protocol
+  -> Refract host bridge
+  -> PC OpenXR runtime
+  -> headset
+```
+
+Primary development target:
+
+- Linux host
+- Waydroid or custom LXC Android container
+- Monado or SteamVR as the host OpenXR runtime
+- Vulkan external memory and dma-buf for the real frame path
+
+Current Windows branch test environment:
+
+- Windows host running SteamVR
+- Native Android Emulator with WHPX and Gfxstream/Nvidia rendering
+- x86_64 and translated ARM64 GLES/Vulkan samples
+- TCP stereo image transport with CPU readback for proof of concept
+
+## Current Status
+
+Implemented:
+
+- Android installable OpenXR runtime package: `com.refract.openxrruntime`
+- Runtime discovery through Android OpenXR runtime broker provider
+- Minimal OpenXR runtime entry points for `hello_xr`
+- HMD and controller pose forwarding from a host OpenXR runtime
+- Windows host bridge using `XR_KHR_D3D11_enable`
+- SteamVR projection layer submission
+- CPU image readback from Android GLES swapchain images
+- Android local socket image proxy in the runtime APK
+- TCP image receiver on the host bridge
+- 512x512 proof-of-concept frame upload into SteamVR
+- Linux dma-buf frame descriptor and Unix FD-passing transport foundation
+- UDP encoded-video transport foundation for the Windows/WSL fallback path
+
+Known limitations:
+
+- CPU readback and socket transport are slow.
+- The current image path is for validation, not low-latency VR.
+- The Windows/WSL path is useful for development, but it is not the right target for zero-copy frame transport.
+- WSL/Waydroid currently reports Android Vulkan through SwiftShader/CPU on the tested setup, not hardware Vulkan.
+- The native Windows sample can approach 90 fps delivery, but low-latency zero-copy transport still needs GPU sharing or encoding with explicit synchronization.
+
+## Repository Layout
+
+```text
+android-runtime/       Native Android OpenXR runtime implementation
+android-runtime-apk/   Installable Android runtime APK and runtime broker
+host-bridge/           Native host bridge talking to PC OpenXR
+protocol/              Pose/image protocol structures and transports
+container/             Waydroid/WSL helper scripts
+tests/                 Runtime smoke tests and Android loader probes
+```
+
+## Build
+
+Native host/WSL build:
+
+```sh
+cmake -S . -B build-wsl
+cmake --build build-wsl
+ctest --test-dir build-wsl --output-on-failure
+```
+
+Windows host bridge build:
+
+```powershell
+cmake --build build --config Debug
+```
+
+Android runtime APK:
+
+```sh
+bash android-runtime-apk/build_apk.sh
+```
+
+The Android APK build expects an Android SDK/NDK available from the environment used to run the script.
+
+## Running The Prototype
+
+Start the Windows host bridge:
+
+```powershell
+.\build\host-bridge\Debug\refract-host-bridge.exe --serve-openxr 38490
+```
+
+Install the Android runtime APK:
+
+```sh
+adb install -r build-android-runtime-apk/refract-openxr-runtime-debug.apk
+```
+
+Forward the prototype ports when using adb/Waydroid:
+
+```sh
+adb reverse tcp:38490 tcp:38490
+adb reverse tcp:38491 tcp:38491
+```
+
+Launch an Android OpenXR app, for example Khronos `hello_xr`:
+
+```sh
+adb shell am start -n org.khronos.openxr.hello_xr.opengles/android.app.NativeActivity
+```
+
+Useful logs:
+
+```sh
+adb logcat -s Refract.Image Refract.ImageProxy Refract.PoseBroker OpenXR-Loader
+```
+
+Host logs are written to stderr by `refract-host-bridge`.
+
+Check whether Waydroid exposes hardware Vulkan to Android:
+
+```sh
+tools/waydroid_vulkan_probe.sh
+```
+
+On native Linux with a real DRM render node, configure Waydroid explicitly:
+
+```sh
+sudo tools/waydroid_vulkan_probe.sh --configure-waydroid-dri /dev/dri/renderD128
+```
+
+See `docs/hardware_vulkan_waydroid.md` for the WSL versus native Linux hardware
+Vulkan findings.
+
+Linux dma-buf descriptor receiver:
+
+```sh
+./build-wsl/host-bridge/refract-host-bridge --serve-gpu-fds /tmp/refract-gpu-frame.sock
+```
+
+This mode currently validates and logs dma-buf descriptors passed over a Unix domain socket. Vulkan import and OpenXR submission are the next steps for this path.
+
+Synthetic encoded-video UDP transport test:
+
+```powershell
+.\build\host-bridge\Debug\refract-host-bridge.exe --video-recv-udp 38492 180
+```
+
+```sh
+./build-wsl/host-bridge/refract-host-bridge --video-send-synthetic "$(ip route | awk '/default/ {print $3; exit}')" 38492 180 90
+```
+
+Visible UDP video feed into the Windows OpenXR/SteamVR bridge:
+
+```powershell
+.\build\host-bridge\Debug\refract-host-bridge.exe --serve-openxr 38490
+```
+
+```sh
+./build-wsl/host-bridge/refract-host-bridge --video-send-rgba "$(ip route | awk '/default/ {print $3; exit}')" 38492 900 90 160 90
+```
+
+This currently uses Refract's debug RGBA video codec over the same UDP transport. It proves the transport and headset submission path, but it is not the final H.264/HEVC hardware encode/decode path yet.
+
+## Performance Direction
+
+The CPU path currently does this:
+
+```text
+GLES texture
+  -> glReadPixels
+  -> native local socket
+  -> runtime APK Java proxy
+  -> TCP
+  -> host receive buffer
+  -> D3D11 texture upload
+  -> OpenXR projection layer
+```
+
+This is intentionally simple and debuggable, but it will not reach headset-rate rendering.
+
+The intended high-performance Linux path is:
+
+```text
+Android/Waydroid Vulkan image
+  -> exported dma-buf / external memory
+  -> explicit sync
+  -> host Vulkan import
+  -> OpenXR compositor submission
+```
+
+That path should avoid CPU copies and is the correct next major milestone for low-latency rendering.
+See `docs/linux_gpu_transport.md` for the current implementation breakdown.
+
+## Legal And Compatibility Notes
+
+Refract is intended for first-party tests, open samples, and owned development APKs. Do not use it to bypass DRM, anti-cheat, platform security, store restrictions, or application license terms.
