@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <initializer_list>
 #include "pose_frame.h"
 
@@ -98,17 +99,61 @@ inline bool valid_projection(const ImageProjection& projection) {
     return true;
 }
 
+inline bool valid_quad(const ImageQuad& q) {
+    const auto& p = q.pose;
+    for (float f : {p.x,p.y,p.z,p.qx,p.qy,p.qz,p.qw,q.width,q.height})
+        if (!std::isfinite(f)) return false;
+    const float norm = p.qx*p.qx+p.qy*p.qy+p.qz*p.qz+p.qw*p.qw;
+    return std::fabs(norm-1.0f)<=0.01f && q.width>0 && q.height>0 &&
+        q.eye_visibility<=2 && !(q.layer_flags & ~7u);
+}
+
 inline bool valid_quads(const ImageProjection& composition) {
     const auto count = composition.quad_count();
     if (count < 1 || count > 2 || composition.layer_flags) return false;
-    for (uint32_t i = 0; i < count; ++i) {
-        const auto& q = composition.quads[i];
-        const auto& p = q.pose;
-        for (float f : {p.x,p.y,p.z,p.qx,p.qy,p.qz,p.qw,q.width,q.height})
-            if (!std::isfinite(f)) return false;
-        const float norm = p.qx*p.qx+p.qy*p.qy+p.qz*p.qz+p.qw*p.qw;
-        if (std::fabs(norm-1.0f)>0.01f || q.width<=0 || q.height<=0 ||
-            q.eye_visibility>2 || (q.layer_flags & ~7u)) return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (!valid_quad(composition.quads[i])) return false;
+    return true;
+}
+
+// Version 10: a whole frame (scene and every quad panel) in one shared GPU texture pair used as
+// an atlas. Texture 0 holds the left eye's scene and the panels both eyes (or the left) see,
+// texture 1 the right eye's scene and right-only panels; the scene, if any, is at (0, 0).
+// The ImageProjection carries both eye views (the scene's, else the head's) so the viewer
+// can draw each panel where the app placed it. Payload: WindowsGpuFrame, CompositeHeader,
+// then quad_count CompositeQuads in the app's layer order (back to front).
+constexpr uint16_t kCompositeGpuFrameVersion = 10;
+constexpr uint32_t kMaxCompositeQuads = 15;
+struct CompositeHeader {
+    uint32_t scene_width = 0, scene_height = 0;  // Zero: no scene layer (panels over black).
+    uint32_t quad_count = 0;
+    uint32_t reserved = 0;
+};
+// CompositeQuad::texture bit: the panel's rows are stored bottom-up (the app set
+// XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB); the viewer flips it while sampling.
+constexpr uint32_t kCompositeQuadFlipped = 2;
+struct CompositeQuad {
+    ImageQuad quad;
+    uint32_t texture = 0;               // Atlas texture (bit 0: 0 or 1), plus kCompositeQuadFlipped.
+    uint32_t x = 0, y = 0, width = 0, height = 0;  // Atlas rectangle of the panel image.
+};
+static_assert(sizeof(CompositeHeader) == 16);
+static_assert(sizeof(CompositeQuad) == 64);
+
+// `table` is the payload after its WindowsGpuFrame; the atlas is atlasWidth x atlasHeight.
+inline bool valid_composite(const uint8_t* table, uint64_t size, uint32_t atlasWidth, uint32_t atlasHeight) {
+    if (size < sizeof(CompositeHeader)) return false;
+    CompositeHeader header;
+    std::memcpy(&header, table, sizeof(header));
+    if (header.quad_count > kMaxCompositeQuads || header.reserved ||
+        size != sizeof(CompositeHeader) + uint64_t(header.quad_count) * sizeof(CompositeQuad) ||
+        header.scene_width > atlasWidth || header.scene_height > atlasHeight ||
+        (header.scene_width == 0) != (header.scene_height == 0)) return false;
+    for (uint32_t i = 0; i < header.quad_count; ++i) {
+        CompositeQuad q;
+        std::memcpy(&q, table + sizeof(header) + i * sizeof(q), sizeof(q));
+        if (!valid_quad(q.quad) || (q.texture & ~kCompositeQuadFlipped) > 1 || !q.width || !q.height ||
+            uint64_t(q.x) + q.width > atlasWidth || uint64_t(q.y) + q.height > atlasHeight) return false;
     }
     return true;
 }

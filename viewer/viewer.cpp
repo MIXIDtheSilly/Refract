@@ -8,7 +8,7 @@
 //    Media Foundation and converted NV12 -> RGB on the GPU into the same eye textures.
 // Mouse/keys match live_view.py: right-drag look, left button = right trigger,
 // middle button = right grip, wheel = hand distance, Home recenter, F2 screenshot, F3 both eyes,
-// F5 flip image, F6 scene/panels, F11 fullscreen, F1 performance overlay. Mouse state goes to pose_input_server.py over UDP.
+// F5 flip image, F6 scene/panels, F7 hide composited panels, F11 fullscreen, F1 performance overlay. Mouse state goes to pose_input_server.py over UDP.
 #include "android_stats.h"
 #include "h264_decoder.h"
 #include "image_transport.h"
@@ -38,6 +38,7 @@
 #include <ctime>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -51,6 +52,13 @@ namespace {
 
 constexpr wchar_t kTitle[] = L"Refract Viewer";  // pose_input_server.py matches "Refract Viewer" for keyboard focus.
 
+// A composite frame's layout (AXRI v10): the slot's slices are its two atlas textures.
+struct Composite {
+    proto::ImageProjection projection{};  // Both eye views.
+    proto::CompositeHeader header{};
+    std::vector<proto::CompositeQuad> quads;  // Back to front.
+};
+
 // One displayable image: a 2-slice array (eyes, or two UI panels).
 struct Slot {
     ComPtr<ID3D11Texture2D> texture;
@@ -61,6 +69,7 @@ struct Slot {
     uint64_t sequence = 0;
     bool flip = false, valid = false;
     Clock::time_point at{};
+    std::shared_ptr<const Composite> composite;  // Set: draw the scene region and panels (see draw_composite).
 };
 
 struct Shared {
@@ -156,7 +165,8 @@ bool wait_copy(ID3D11Query* query)
 {
     static proto::PerfStats stats("viewer-copy-complete");
     proto::PerfScope scope(stats);
-    const auto deadline = Clock::now() + std::chrono::seconds(1);
+    // Under the runtime's 3 s acknowledgment timeout, but past ordinary hitches (a failed copy drops the stream).
+    const auto deadline = Clock::now() + std::chrono::milliseconds(2500);
     HRESULT result;
     while ((result = g_copyContext->GetData(query, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE) {
         if (Clock::now() > deadline) return false;
@@ -242,8 +252,10 @@ bool convert_nv12(Slot& slot, const H264Decoder::Picture& picture, UINT eyeWidth
 }
 
 // Called with g_shared.mutex held once a slot holds a new image.
-void publish(Slot& slot, uint64_t sequence, bool quads, bool flip, Clock::time_point copyStart)
+void publish(Slot& slot, uint64_t sequence, bool quads, bool flip, Clock::time_point copyStart,
+             std::shared_ptr<const Composite> composite = nullptr)
 {
+    slot.composite = std::move(composite);
     slot.flip = flip;
     slot.sequence = sequence;
     slot.valid = true;
@@ -274,6 +286,8 @@ public:
             copy = found->second;
         }
         const bool completed = wait_copy(copy.query.Get());
+        if (!completed) std::fprintf(stderr, "viewer: GPU copy of frame seq=%llu did not complete within 2.5 s\n",
+                                     static_cast<unsigned long long>(sequence));
         if (completed) {
             std::lock_guard lock(g_shared.mutex);
             Slot& slot = copy.quads ? g_shared.panels : g_shared.scene;
@@ -282,7 +296,7 @@ public:
                 handoff.latest = copy.index;
                 handoff.pending = true;
                 slot.layers = 2;
-                publish(slot, sequence, copy.quads, false, copy.started);
+                publish(slot, sequence, copy.quads, false, copy.started, copy.composite);
             }
         }
         {
@@ -293,13 +307,14 @@ public:
         return completed;
     }
 
-    bool on_frame(const proto::ImageFrameHeader& header, const proto::ImageProjection&, std::vector<uint8_t>&& payload)
+    bool on_frame(const proto::ImageFrameHeader& header, const proto::ImageProjection& projection, std::vector<uint8_t>&& payload)
     {
         g_shared.connected = true;
         const bool mixed = proto::mixed_gpu_version(header.version);
         const bool quads = header.version == proto::kQuadImageFrameVersion || header.version == proto::kQuadGpuFrameVersion ||
             header.version == proto::kMixedQuadGpuFrameVersion || header.version == proto::kQuadVideoImageFrameVersion;
-        const bool gpu = header.version == proto::kWindowsGpuFrameVersion || header.version == proto::kQuadGpuFrameVersion || mixed;
+        const bool composite = header.version == proto::kCompositeGpuFrameVersion;
+        const bool gpu = header.version == proto::kWindowsGpuFrameVersion || header.version == proto::kQuadGpuFrameVersion || mixed || composite;
         const bool video = proto::video_version(header.version);
         g_shared.gpu = gpu;
         g_shared.video = video;
@@ -340,11 +355,33 @@ public:
             // Copied on the receive device into the next hand-off texture; render() takes it from there.
             proto::WindowsGpuFrame frame{};
             std::memcpy(&frame, payload.data(), sizeof(frame));
+            std::shared_ptr<Composite> layout;
+            if (composite) {  // The transport validated the table.
+                layout = std::make_shared<Composite>();
+                layout->projection = projection;
+                std::memcpy(&layout->header, payload.data() + sizeof(frame), sizeof(layout->header));
+                layout->quads.resize(layout->header.quad_count);
+                if (!layout->quads.empty())
+                    std::memcpy(layout->quads.data(), payload.data() + sizeof(frame) + sizeof(layout->header),
+                                layout->quads.size() * sizeof(proto::CompositeQuad));
+                static uint32_t described = 0;
+                if (described++ % 600 == 0) {  // The layout, now and then, for debugging panel placement.
+                    const auto& v = projection.views[0];
+                    std::fprintf(stderr, "viewer: composite scene %ux%u, left eye at (%.2f %.2f %.2f) q(%.2f %.2f %.2f %.2f) fov(%.2f %.2f %.2f %.2f)\n",
+                        layout->header.scene_width, layout->header.scene_height, v.pose.x, v.pose.y, v.pose.z,
+                        v.pose.qx, v.pose.qy, v.pose.qz, v.pose.qw, v.angle_left, v.angle_right, v.angle_up, v.angle_down);
+                    for (const auto& q : layout->quads)
+                        std::fprintf(stderr, "viewer:   panel %.2fx%.2f m at (%.2f %.2f %.2f) q(%.2f %.2f %.2f %.2f) eyes=%u flags=%u atlas %u:%u,%u %ux%u\n",
+                            q.quad.width, q.quad.height, q.quad.pose.x, q.quad.pose.y, q.quad.pose.z, q.quad.pose.qx, q.quad.pose.qy,
+                            q.quad.pose.qz, q.quad.pose.qw, q.quad.eye_visibility, q.quad.layer_flags, q.texture, q.x, q.y, q.width, q.height);
+                }
+            }
             auto* textures = open_shared(frame.session);
-            if (!textures) return false;
+            if (!textures) return reject(header, "shared textures unavailable");
             D3D11_TEXTURE2D_DESC source{};
             (*textures)[0]->GetDesc(&source);
-            if (source.Width != header.width || source.Height != header.height) return false;
+            if (source.Width != header.width || source.Height != header.height)
+                return reject(header, "shared texture is %ux%u", source.Width, source.Height);
             const DXGI_FORMAT typeless = bgra_group(source.Format) ? DXGI_FORMAT_B8G8R8A8_TYPELESS :
                 rgba_group(source.Format) ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_UNKNOWN;
             auto& handoff = g_handoff[quads ? 1 : 0];
@@ -353,11 +390,12 @@ public:
                 std::unique_lock lock(copyMutex_);
                 copyDone_.wait(lock, [&] { return pendingCopies_.empty(); });
             }
-            if (typeless == DXGI_FORMAT_UNKNOWN || !ensure_handoff(handoff, header.width, header.height, source.Format)) return false;
+            if (typeless == DXGI_FORMAT_UNKNOWN || !ensure_handoff(handoff, header.width, header.height, source.Format))
+                return reject(header, "unsupported shared format %d", int(source.Format));
             // The receive thread can submit another copy while an earlier one completes.
             const int index = (handoff.submitted + 1) % static_cast<int>(handoff.entries.size());
             auto& entry = handoff.entries[index];
-            if (entry.copyLock->AcquireSync(0, 1000) != S_OK) return false;
+            if (entry.copyLock->AcquireSync(0, 1000) != S_OK) return reject(header, "hand-off texture busy");
             for (UINT eye = 0; eye < 2; ++eye)
                 g_copyContext->CopySubresourceRegion(entry.copy.Get(), 0, eye * header.width, 0, 0, (*textures)[eye].Get(), 0, nullptr);
             entry.copyLock->ReleaseSync(0);
@@ -369,7 +407,8 @@ public:
             handoff.submitted = index;
             {
                 std::lock_guard lock(copyMutex_);
-                pendingCopies_.emplace(header.sequence, PendingCopy{query, quads, index, header.width, header.height, typeless, copyStart});
+                pendingCopies_.emplace(header.sequence,
+                    PendingCopy{query, quads, index, header.width, header.height, typeless, copyStart, std::move(layout)});
             }
             return true;
         }
@@ -388,6 +427,20 @@ public:
     }
 
 private:
+    // Rejected GPU frames are acknowledged as UINT64_MAX, which makes the runtime drop the connection.
+    template <typename... Args>
+    static bool reject(const proto::ImageFrameHeader& header, const char* reason, Args... args)
+    {
+        static std::atomic<int> reported{0};
+        if (reported++ < 20) {
+            std::fprintf(stderr, "viewer: rejected frame seq=%llu %ux%u version=%u part=%u: ",
+                static_cast<unsigned long long>(header.sequence), header.width, header.height, header.version, header.reserved);
+            std::fprintf(stderr, reason, args...);
+            std::fputc('\n', stderr);
+        }
+        return false;
+    }
+
     struct PendingCopy {
         ComPtr<ID3D11Query> query;
         bool quads = false;
@@ -395,6 +448,7 @@ private:
         UINT width = 0, height = 0;
         DXGI_FORMAT typeless = DXGI_FORMAT_UNKNOWN;
         Clock::time_point started{};
+        std::shared_ptr<const Composite> composite;
     };
     std::mutex copyMutex_;
     std::condition_variable copyDone_;
@@ -430,7 +484,7 @@ private:
 const char kShader[] = R"(
 Texture2DArray image : register(t0);
 SamplerState linearSampler : register(s0);
-cbuffer Params : register(b0) { float slice; float flip; float2 unused; };
+cbuffer Params : register(b0) { float slice; float flip; float2 uvScale; };
 struct VsOut { float4 position : SV_Position; float2 uv : TEXCOORD0; };
 VsOut vs(uint id : SV_VertexID) {
     VsOut o;
@@ -442,7 +496,28 @@ VsOut vs(uint id : SV_VertexID) {
 float4 ps(VsOut i) : SV_Target {
     float2 uv = i.uv;
     if (flip > 0.5) uv.y = 1 - uv.y;
-    return float4(image.Sample(linearSampler, float3(uv, slice)).rgb, 1);
+    return float4(image.Sample(linearSampler, float3(uv * uvScale, slice)).rgb, 1);
+}
+)";
+
+// A composite frame's UI panel: one quad whose corners arrive in clip space, textured from its
+// atlas rectangle, blended as OpenXR composites quad layers (premultiplied by default).
+const char kPanelShader[] = R"(
+Texture2DArray image : register(t0);
+SamplerState linearSampler : register(s0);
+cbuffer Panel : register(b0) { float4 corners[4]; float4 uvRect; float4 uvClamp; float slice; float blend; float unpremultiplied; float unused; };
+struct VsOut { float4 position : SV_Position; float2 uv : TEXCOORD0; };
+VsOut vs(uint id : SV_VertexID) {
+    VsOut o;
+    o.position = corners[id];
+    o.uv = lerp(uvRect.xy, uvRect.zw, float2(id & 1, id >> 1));
+    return o;
+}
+float4 ps(VsOut i) : SV_Target {
+    float4 c = image.Sample(linearSampler, float3(clamp(i.uv, uvClamp.xy, uvClamp.zw), slice));
+    if (blend < 0.5) c.a = 1;
+    else if (unpremultiplied > 0.5) c.rgb *= c.a;
+    return c;
 }
 )";
 
@@ -463,9 +538,15 @@ struct App {
     ComPtr<ID3D11PixelShader> ps;
     ComPtr<ID3D11SamplerState> sampler;
     ComPtr<ID3D11Buffer> params;
+    ComPtr<ID3D11VertexShader> panelVs;
+    ComPtr<ID3D11PixelShader> panelPs;
+    ComPtr<ID3D11Buffer> panelParams;
+    ComPtr<ID3D11BlendState> panelBlend;
+    ComPtr<ID3D11RasterizerState> panelRaster;
     UINT width = 0, height = 0;
     bool resized = true, both = false, flipOverride = false, closed = false;
     bool saveRequested = false;
+    bool hidePanels = false;  // F7: composite frames show the scene alone.
     // Performance overlay (Direct2D text over the swap chain).
     bool overlay = true;
     float gameFps = 0, shownFps = 0;
@@ -537,6 +618,19 @@ bool create_pipeline()
     if (FAILED(g_device->CreateSamplerState(&sampler, &g_app.sampler))) return false;
     D3D11_BUFFER_DESC buffer{16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
     if (FAILED(g_device->CreateBuffer(&buffer, nullptr, &g_app.params))) return false;
+    ComPtr<ID3DBlob> panelVsBlob, panelPsBlob;
+    D3D11_BUFFER_DESC panelBuffer{112, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    D3D11_BLEND_DESC blend{};
+    blend.RenderTarget[0] = {TRUE, D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD,
+                             D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_ALL};
+    D3D11_RASTERIZER_DESC raster{};
+    raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE; raster.DepthClipEnable = TRUE;
+    if (!compile("vs", "vs_5_0", panelVsBlob, kPanelShader) || !compile("ps", "ps_5_0", panelPsBlob, kPanelShader) ||
+        FAILED(g_device->CreateVertexShader(panelVsBlob->GetBufferPointer(), panelVsBlob->GetBufferSize(), nullptr, &g_app.panelVs)) ||
+        FAILED(g_device->CreatePixelShader(panelPsBlob->GetBufferPointer(), panelPsBlob->GetBufferSize(), nullptr, &g_app.panelPs)) ||
+        FAILED(g_device->CreateBuffer(&panelBuffer, nullptr, &g_app.panelParams)) ||
+        FAILED(g_device->CreateBlendState(&blend, &g_app.panelBlend)) ||
+        FAILED(g_device->CreateRasterizerState(&raster, &g_app.panelRaster))) return false;
     // Video conversion runs on the receive thread; it gets its own objects.
     ComPtr<ID3DBlob> yuvBlob;
     g_yuv.vs = g_app.vs;
@@ -635,6 +729,21 @@ void save_png(const Slot& slot)
             out[x * 4 + 3] = 255;
         }
     }
+    if (slot.composite) {  // The PNG is opaque; report what the panels' alpha really is (left-eye texture).
+        for (const auto& panel : slot.composite->quads) {
+            if (panel.texture & 1) continue;
+            int low = 255, high = 0, rgbHigh = 0;
+            for (UINT y = panel.y; y < panel.y + panel.height; ++y) {
+                const auto* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
+                for (UINT x = panel.x; x < panel.x + panel.width; ++x) {
+                    low = std::min<int>(low, row[x * 4 + 3]); high = std::max<int>(high, row[x * 4 + 3]);
+                    rgbHigh = std::max<int>({rgbHigh, row[x * 4], row[x * 4 + 1], row[x * 4 + 2]});
+                }
+            }
+            std::fprintf(stderr, "viewer: panel %ux%u at %u,%u: alpha %d..%d, max color %d\n",
+                         panel.width, panel.height, panel.x, panel.y, low, high, rgbHigh);
+        }
+    }
     g_context->Unmap(staging.Get(), 0);
 
     std::filesystem::create_directories(g_app.shots);
@@ -706,7 +815,11 @@ void draw_overlay(const Slot& slot)
     swprintf_s(line, L"Viewer   %5.0f fps shown   copy %.2f ms   %ls\n", g_app.shownFps, g_shared.copyMs,
         !g_shared.connected ? L"waiting for game" : g_shared.gpu ? L"GPU shared textures" : g_shared.video ? L"H.264 stream (copy = decode)" : L"pixel stream");
     text += line;
-    swprintf_s(line, L"Render   %u x %u per eye%ls\n", slot.width, slot.height, &slot == &g_shared.panels ? L" (UI panel)" : L"");
+    if (slot.composite)
+        swprintf_s(line, L"Render   %u x %u per eye + %zu UI panel(s)\n", slot.composite->header.scene_width,
+            slot.composite->header.scene_height, slot.composite->quads.size());
+    else
+        swprintf_s(line, L"Render   %u x %u per eye%ls\n", slot.width, slot.height, &slot == &g_shared.panels ? L" (UI panel)" : L"");
     text += line;
     if (android.valid) {
         swprintf_s(line, L"Android  CPU %3.0f%% of %d cores (%.1f cores busy)\nThreads ", android.cpuPercent, android.cores,
@@ -744,6 +857,91 @@ void draw_overlay(const Slot& slot)
     d2d.EndDraw();
 }
 
+struct Vec3 { float x, y, z; };
+Vec3 operator+(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+Vec3 operator-(Vec3 a, Vec3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+Vec3 operator*(Vec3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
+Vec3 cross(Vec3 a, Vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+// Rotates v by the unit quaternion (qx, qy, qz, qw); `inverse` rotates by its conjugate.
+Vec3 rotate(const proto::Pose& q, Vec3 v, bool inverse = false)
+{
+    const Vec3 u{inverse ? -q.qx : q.qx, inverse ? -q.qy : q.qy, inverse ? -q.qz : q.qz};
+    return v + cross(u, cross(u, v) + v * q.qw) * 2.0f;
+}
+
+// Width / height of an eye's field of view.
+float view_aspect(const proto::ImageProjectionView& view)
+{
+    return (std::tan(view.angle_right) - std::tan(view.angle_left)) / (std::tan(view.angle_up) - std::tan(view.angle_down));
+}
+
+// Draws one eye of a composite frame into the current viewport: the scene region of the atlas,
+// then every panel that eye sees, projected with the eye's pose and field of view.
+// The scene pipeline (g_app.vs/ps, sampler, slot view) is bound on entry and on return.
+void draw_composite(const Slot& slot, const Composite& composite, UINT eye)
+{
+    const auto& header = composite.header;
+    if (header.scene_width) {
+        const float params[4] = {float(eye), 0, float(header.scene_width) / slot.width, float(header.scene_height) / slot.height};
+        g_context->UpdateSubresource(g_app.params.Get(), 0, nullptr, params, 0, 0);
+        g_context->Draw(3, 0);
+    }
+    if (composite.quads.empty() || g_app.hidePanels) return;
+    const auto& view = composite.projection.views[eye];
+    const Vec3 eyePosition{view.pose.x, view.pose.y, view.pose.z};
+    const float left = std::tan(view.angle_left), right = std::tan(view.angle_right);
+    const float up = std::tan(view.angle_up), down = std::tan(view.angle_down);
+    constexpr float kNear = 0.01f, kFar = 1000.0f;
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    g_context->VSSetShader(g_app.panelVs.Get(), nullptr, 0);
+    g_context->PSSetShader(g_app.panelPs.Get(), nullptr, 0);
+    g_context->VSSetConstantBuffers(0, 1, g_app.panelParams.GetAddressOf());
+    g_context->PSSetConstantBuffers(0, 1, g_app.panelParams.GetAddressOf());
+    g_context->OMSetBlendState(g_app.panelBlend.Get(), nullptr, 0xffffffff);
+    g_context->RSSetState(g_app.panelRaster.Get());
+    for (const auto& panel : composite.quads) {
+        const auto& quad = panel.quad;
+        if (quad.eye_visibility && quad.eye_visibility != eye + 1) continue;  // 1 = left only, 2 = right only.
+        struct { float corners[4][4]; float uvRect[4]; float uvClamp[4]; float slice, blend, unpremultiplied, unused; } params{};
+        const Vec3 center{quad.pose.x, quad.pose.y, quad.pose.z};
+        bool inFront = false;
+        for (int corner = 0; corner < 4; ++corner) {
+            // Top-left, top-right, bottom-left, bottom-right: image row 0 is the panel's top (+Y).
+            const Vec3 local{(corner & 1 ? 0.5f : -0.5f) * quad.width, (corner & 2 ? -0.5f : 0.5f) * quad.height, 0};
+            const Vec3 world = center + rotate(quad.pose, local);
+            const Vec3 e = rotate(view.pose, world - eyePosition, true);  // OpenXR eye space: -Z forward.
+            const float w = -e.z;
+            inFront = inFront || w > kNear;
+            float* out = params.corners[corner];
+            out[0] = (2 * e.x - w * (right + left)) / (right - left);
+            out[1] = (2 * e.y - w * (up + down)) / (up - down);
+            out[2] = (w - kNear) * kFar / (kFar - kNear);
+            out[3] = w;
+        }
+        if (!inFront) continue;
+        const float texelU = 1.0f / slot.width, texelV = 1.0f / slot.height;
+        params.uvRect[0] = panel.x * texelU; params.uvRect[1] = panel.y * texelV;
+        params.uvRect[2] = (panel.x + panel.width) * texelU; params.uvRect[3] = (panel.y + panel.height) * texelV;
+        // Half a texel in, so filtering never reads a neighbouring panel.
+        params.uvClamp[0] = params.uvRect[0] + texelU / 2; params.uvClamp[1] = params.uvRect[1] + texelV / 2;
+        params.uvClamp[2] = params.uvRect[2] - texelU / 2; params.uvClamp[3] = params.uvRect[3] - texelV / 2;
+        if (panel.texture & proto::kCompositeQuadFlipped) std::swap(params.uvRect[1], params.uvRect[3]);  // Rows bottom-up.
+        params.slice = float(panel.texture & 1);
+        params.blend = (quad.layer_flags & 2) ? 1.0f : 0.0f;            // XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
+        params.unpremultiplied = (quad.layer_flags & 4) ? 1.0f : 0.0f;  // XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT
+        g_context->UpdateSubresource(g_app.panelParams.Get(), 0, nullptr, &params, 0, 0);
+        g_context->Draw(4, 0);
+    }
+    g_context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+    g_context->RSSetState(nullptr);
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->VSSetShader(g_app.vs.Get(), nullptr, 0);
+    g_context->PSSetShader(g_app.ps.Get(), nullptr, 0);
+    ID3D11Buffer* none = nullptr;
+    g_context->VSSetConstantBuffers(0, 1, &none);
+    g_context->PSSetConstantBuffers(0, 1, g_app.params.GetAddressOf());
+}
+
 void render()
 {
     std::lock_guard lock(g_shared.mutex);  // Direct2D shares the D3D context with the receive thread.
@@ -778,13 +976,20 @@ void render()
             g_context->PSSetSamplers(0, 1, g_app.sampler.GetAddressOf());
             g_context->PSSetConstantBuffers(0, 1, g_app.params.GetAddressOf());
             const UINT count = g_app.both && slot.layers >= 2 ? 2 : 1;
-            const float aspect = float(slot.width) / float(slot.height);
+            const Composite* composite = slot.composite.get();
+            const float aspect = !composite ? float(slot.width) / float(slot.height) :
+                composite->header.scene_width ? float(composite->header.scene_width) / float(composite->header.scene_height) :
+                view_aspect(composite->projection.views[0]);
             for (UINT i = 0; i < count; ++i) {
                 const float cellWidth = float(g_app.width) / count;
                 const auto viewport = fit(cellWidth * i, 0, cellWidth, float(g_app.height), aspect);
-                const float params[4] = {float(i), (slot.flip != g_app.flipOverride) ? 1.0f : 0.0f, 0, 0};
-                g_context->UpdateSubresource(g_app.params.Get(), 0, nullptr, params, 0, 0);
                 g_context->RSSetViewports(1, &viewport);
+                if (composite) {
+                    draw_composite(slot, *composite, i);
+                    continue;
+                }
+                const float params[4] = {float(i), (slot.flip != g_app.flipOverride) ? 1.0f : 0.0f, 1, 1};
+                g_context->UpdateSubresource(g_app.params.Get(), 0, nullptr, params, 0, 0);
                 g_context->Draw(3, 0);
             }
             ID3D11ShaderResourceView* none = nullptr;
@@ -853,6 +1058,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM w, LPARAM l)
         if (w == VK_F3) g_app.both = !g_app.both;
         if (w == VK_F5) g_app.flipOverride = !g_app.flipOverride;
         if (w == VK_F6) g_shared.wantPanels = !g_shared.wantPanels;
+        if (w == VK_F7) g_app.hidePanels = !g_app.hidePanels;
         if (w == VK_HOME) mouse.yaw = mouse.pitch = 0;
         if (w == VK_F11 || (w == VK_ESCAPE && !(GetWindowLongW(window, GWL_STYLE) & WS_OVERLAPPEDWINDOW))) toggle_fullscreen();
         SetEvent(g_shared.newFrame);  // Redraw with the new setting.

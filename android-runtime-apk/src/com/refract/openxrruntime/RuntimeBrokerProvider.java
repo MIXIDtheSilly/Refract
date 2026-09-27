@@ -6,11 +6,13 @@ import android.content.pm.ApplicationInfo;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.DataInputStream;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -99,6 +101,31 @@ public final class RuntimeBrokerProvider extends ContentProvider {
     public boolean onCreate() {
         ImageProxy.ensureStarted();
         return true;
+    }
+
+    @Override
+    public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+        if ("/openxr/1/pose/stream".equals(uri.getPath()) && "rw".equals(mode)) {
+            try {
+                ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
+                PoseProxy.relayFileDescriptor(pair[1]);
+                return pair[0];
+            } catch (IOException ex) {
+                throw new FileNotFoundException("Cannot create pose stream: " + ex);
+            }
+        }
+        if (!"/openxr/1/image/stream".equals(uri.getPath()) || !"rw".equals(mode)) {
+            throw new FileNotFoundException("Unknown Refract stream");
+        }
+        // SELinux denies apps each other's TCP sockets, so relay over a Unix socket pair. The runtime
+        // holds a stable provider client while streaming, which keeps this process from being frozen.
+        try {
+            ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
+            ImageProxy.relayFileDescriptor(pair[1]);
+            return pair[0];
+        } catch (IOException ex) {
+            throw new FileNotFoundException("Cannot create image stream: " + ex);
+        }
     }
 
     @Override

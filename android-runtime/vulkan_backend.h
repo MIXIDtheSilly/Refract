@@ -89,7 +89,33 @@ public:
     int export_async(const VulkanSwapchain* const swapchains[2], const uint32_t indices[2],
                      const XrSwapchainSubImage* const subimages[2], uint32_t width, uint32_t height);
     bool export_wait(int index, refract::protocol::WindowsGpuMarker* marker);
+    // One region of a swapchain image, copied (scaled) into atlas texture `texture` at (x, y, width, height).
+    struct AtlasBlit {
+        const VulkanSwapchain* swapchain = nullptr;
+        uint32_t index = 0;
+        XrSwapchainSubImage sub{};
+        uint32_t texture = 0;
+        int32_t x = 0, y = 0, width = 0, height = 0;
+    };
+    // export_async for a composite frame (scene and panels): blits every region into a width x height
+    // sRGB atlas pair, then exports that pair through the same ring; export_wait as usual.
+    int export_atlas_async(const AtlasBlit* blits, uint32_t count, uint32_t width, uint32_t height);
 private:
+    // Takes the next export ring slot of `configuration` (width, height, two formats), records the
+    // copies with `record(markerBuffer, marker)` (which must write the marker before the two export
+    // blits) and submits them. Returns the slot index, or -1.
+    template <typename Record>
+    int export_ring(const std::array<uint32_t, 4>& configuration, Record&& record);
+    bool ensure_atlas(uint32_t width, uint32_t height);
+    struct AtlasImage {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        bool initialized = false;  // Recorded into a layout at least once.
+    };
+    // Atlas textures 0 and 1, then a sink: the export blits' nominal destination, written only
+    // if the host layer declines to redirect them.
+    AtlasImage atlas_[3];
+    uint32_t atlasWidth_ = 0, atlasHeight_ = 0;
     struct ReadbackSlot {
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
@@ -113,12 +139,14 @@ private:
     bool ensure_buffer(VkDeviceSize bytes);
     uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags flags);
     bool allocate_image(VkImage& image, VkDeviceMemory& memory, VkFormat format,
-                        uint32_t width, uint32_t height, uint32_t layers, VkImageUsageFlags usage, VkImageCreateFlags flags = 0);
+                        uint32_t width, uint32_t height, uint32_t layers, VkImageUsageFlags usage,
+                        VkImageCreateFlags flags = 0, uint32_t mipLevels = 1);
     bool begin();
     bool finish();
     void barrier(VkImage image, uint32_t layers, VkImageLayout before, VkImageLayout after,
                  VkAccessFlags src, VkAccessFlags dst,
-                 uint32_t srcFamily = VK_QUEUE_FAMILY_IGNORED, uint32_t dstFamily = VK_QUEUE_FAMILY_IGNORED);
+                 uint32_t srcFamily = VK_QUEUE_FAMILY_IGNORED, uint32_t dstFamily = VK_QUEUE_FAMILY_IGNORED,
+                 uint32_t mipLevels = 1);
     VkInstance ownedInstance_ = VK_NULL_HANDLE;  // initialize_private() created instance and device_.
     uint32_t queueFamily_ = 0;
     bool gpuExportEnabled_ = false;

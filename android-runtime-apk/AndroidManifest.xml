@@ -17,7 +17,7 @@
 
         <provider
             android:name=".RuntimeBrokerProvider"
-            android:authorities="org.khronos.openxr.system_runtime_broker"
+            android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker"
             android:exported="true" />
     </application>
 </manifest>

@@ -10,6 +10,9 @@
 #include "controller_input.h"
 #include "openxr_dispatch/hand_tracking_types.h"
 #include "openxr_dispatch/foveation_types.h"
+#include "openxr_dispatch/recommended_layer_resolution_types.h"
+#include "game_patches.h"
+#include "openxr_dispatch/image_layout_types.h"
 #include "windows_gpu_frame.h"
 
 #include <array>
@@ -144,7 +147,8 @@ struct SwapchainRecord {
     uint32_t currentImage = 0;
     uint32_t releasedImage = 0;
 };
-std::array<SwapchainRecord, 16> g_swapchains{};
+// Menus can hold dozens of panel swapchains at once (AC Nexus creates ~20).
+std::array<SwapchainRecord, 64> g_swapchains{};
 SwapchainRecord* g_lastReleasedSwapchain = nullptr;
 uint32_t g_actionCount = 0;
 uint64_t g_nextPath = 1;
@@ -652,6 +656,38 @@ public:
         return true;
     }
 
+    // A composite GPU frame (v10): an atlas pair plus its panel table. Acknowledged like the other
+    // GPU frames; the caller waits for that with await_acks.
+    bool send_composite_frame(uint64_t sequence, uint32_t width, uint32_t height,
+        const refract::protocol::ImageProjection& projection, const refract::protocol::WindowsGpuFrame& gpu,
+        const std::vector<uint8_t>& table)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ensure_connected() || !directWindows_) return false;
+        refract::protocol::ImageFrameHeader header{};
+        header.version = refract::protocol::kCompositeGpuFrameVersion;
+        header.type = refract::protocol::kWindowsGpuFrameType;
+        header.header_size += sizeof(projection);
+        header.width = width;
+        header.height = height;
+        header.layers = 2;
+        header.sequence = sequence;
+        header.monotonic_time_ns = static_cast<uint64_t>(monotonic_time_ns());
+        header.payload_size = sizeof(gpu) + table.size();
+        std::vector<uint8_t> message(sizeof(header) + sizeof(projection) + header.payload_size);
+        std::memcpy(message.data(), &header, sizeof(header));
+        std::memcpy(message.data() + sizeof(header), &projection, sizeof(projection));
+        std::memcpy(message.data() + sizeof(header) + sizeof(projection), &gpu, sizeof(gpu));
+        std::memcpy(message.data() + sizeof(header) + sizeof(projection) + sizeof(gpu), table.data(), table.size());
+        if (!send_all(message.data(), message.size())) {
+            __android_log_print(ANDROID_LOG_INFO, "Refract.Image", "composite send failed");
+            close_socket();
+            return false;
+        }
+        unacked_.push_back(sequence);
+        return true;
+    }
+
     // Waits until at most `outstanding` GPU frames are unacknowledged; false (and disconnected)
     // if the viewer went away or acknowledged something else.
     bool await_acks(size_t outstanding)
@@ -712,26 +748,47 @@ private:
             // Stock Android SELinux separates the app and broker's Unix sockets.
             // Use adb reverse's native emulator pipe rather than its slow NAT.
             int candidate = ::socket(AF_INET, SOCK_STREAM, 0);
-            if (candidate < 0) { return false; }
-            int noDelay = 1;
-            setsockopt(candidate, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
-            int sendBuffer = 4 * 1024 * 1024;
-            setsockopt(candidate, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
-            timeval timeout{3, 0};
-            setsockopt(candidate, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-            setsockopt(candidate, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-            sockaddr_in address{};
-            address.sin_family = AF_INET;
-            address.sin_port = htons(38491);
-            inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
-            if (::connect(candidate, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
-                socket_ = candidate;
+            if (candidate >= 0) {
+                int noDelay = 1;
+                setsockopt(candidate, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+                int sendBuffer = 4 * 1024 * 1024;
+                setsockopt(candidate, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
+                timeval timeout{3, 0};
+                setsockopt(candidate, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+                setsockopt(candidate, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+                sockaddr_in address{};
+                address.sin_family = AF_INET;
+                address.sin_port = htons(38491);
+                inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+                if (::connect(candidate, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) {
+                    socket_ = candidate;
+                    directWindows_ = true;
+                    ++connections_;
+                    __android_log_print(ANDROID_LOG_INFO, "Refract.Image", "connected to Windows image stream via adb reverse :38491");
+                    return true;
+                }
+            }
+            const int tcpError = errno;
+            if (candidate >= 0) ::close(candidate);
+            if (!reportedConnectFailure_) {
+                __android_log_print(ANDROID_LOG_INFO, "Refract.Image",
+                                    "direct TCP unavailable errno=%d; trying provider FD", tcpError);
+                reportedConnectFailure_ = true;
+            }
+            const int providerFd = pose_client().open_image_transport_fd();
+            if (providerFd >= 0) {
+                int sendBuffer = 4 * 1024 * 1024;
+                setsockopt(providerFd, SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
+                // A stalled peer must fail the frame and reconnect, not block xrEndFrame forever.
+                timeval timeout{3, 0};
+                setsockopt(providerFd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+                setsockopt(providerFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+                socket_ = providerFd;
                 directWindows_ = true;
                 ++connections_;
-                __android_log_print(ANDROID_LOG_INFO, "Refract.Image", "connected to Windows image stream via adb reverse :38491");
+                __android_log_print(ANDROID_LOG_INFO, "Refract.Image", "connected to Windows image stream through provider FD");
                 return true;
             }
-            ::close(candidate);
             return false;
         }
 
@@ -1237,6 +1294,261 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc,
 void maybe_send_swapchain_image(const SwapchainRecord&) {}
 #endif
 
+#if defined(__ANDROID__)
+// Pipelined shared export: submit this frame's copy, then publish the previous frame,
+// whose copy has normally finished by now. The viewer shows each frame one frame later,
+// but the app's render thread no longer waits for the GPU copy and the viewer's
+// acknowledgment (~5 ms per frame, and the app's main thread often waits on this thread).
+// Scene-only (v3) and composite (v10) frames share this one ordered pipeline.
+struct PendingExport {
+    int slot = -1;
+    uint32_t width = 0, height = 0;
+    refract::protocol::ImageProjection projection{};
+    std::vector<uint8_t> composite;  // Composite table (after the WindowsGpuFrame); empty for v3.
+};
+PendingExport g_pendingExport;
+// Shared export stops when its consumer goes away (e.g. the viewer restarts);
+// resume it once the image stream has connected again.
+bool g_gpuConsumerLost = false;
+uint64_t g_gpuLostAtConnection = 0;
+
+void resume_gpu_export_if_reconnected()
+{
+    if (g_gpuConsumerLost && g_vulkan.active() && image_transport_client().connections() != g_gpuLostAtConnection) {
+        g_gpuConsumerLost = false;
+        if (g_vulkan.reenable_gpu_export())
+            __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "image stream reconnected; resuming shared GPU export");
+    }
+}
+
+void gpu_consumer_lost()
+{
+    // Never reuse shared images after an uncertain consumer completion.
+    g_vulkan.disable_gpu_export();
+    g_gpuConsumerLost = true;
+    g_gpuLostAtConnection = image_transport_client().connections();
+    g_pendingExport.slot = -1;
+    __android_log_print(ANDROID_LOG_WARN, "Refract.GPU", "GPU consumer unavailable; disabling shared export for this session");
+}
+
+bool publish_pending_export()
+{
+    auto& pending = g_pendingExport;
+    if (pending.slot < 0) return true;
+    refract::protocol::WindowsGpuMarker marker{};
+    if (!g_vulkan.export_wait(std::exchange(pending.slot, -1), &marker)) return false;
+    refract::protocol::WindowsGpuFrame gpu{marker.session, {marker.formats[0], marker.formats[1]}};
+    const uint64_t sequence = g_imageFrameSequence++;
+    const bool sent = pending.composite.empty()
+        ? image_transport_client().send_frame(sequence, pending.width, pending.height, 2,
+              reinterpret_cast<const uint8_t*>(&gpu), sizeof(gpu), &pending.projection, true, 0, false)
+        : image_transport_client().send_composite_frame(sequence, pending.width, pending.height, pending.projection, gpu,
+              pending.composite);
+    if (!sent) return false;
+    if (sequence % 90 == 0) __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "shared GPU %s seq=%llu %ux%u; pipelined, no pixel readback",
+        pending.composite.empty() ? "eyes" : "composite", static_cast<unsigned long long>(sequence), pending.width, pending.height);
+    return true;
+}
+
+bool valid_subimage(const XrSwapchainSubImage& sub, SwapchainRecord*& sc)
+{
+    sc = find_swapchain(sub.swapchain);
+    const auto& rect = sub.imageRect;
+    return sc && sc->hasReleasedImage && sc->vulkan.images[sc->releasedImage] && rect.offset.x >= 0 && rect.offset.y >= 0 &&
+        rect.extent.width > 0 && rect.extent.height > 0 &&
+        static_cast<uint64_t>(rect.offset.x) + rect.extent.width <= sc->width &&
+        static_cast<uint64_t>(rect.offset.y) + rect.extent.height <= sc->height && sub.imageArrayIndex < sc->arraySize;
+}
+
+// Frames with UI panels (quad layers), optionally over a projection scene, go out as one
+// pipelined composite frame (AXRI v10): every layer is blitted into a shared atlas pair and
+// the viewer draws each panel at its pose. Returns false, having sent nothing, when the frame
+// cannot take this path (no panels, no shared GPU export, other layer types, bad input);
+// the other paths then handle it (and report errors).
+// XR_FB_composition_layer_image_layout: OVRPlugin marks layers whose texture has a bottom-left
+// origin (e.g. some of AC Nexus's UI panels); without the flag they show upside down.
+bool layer_vertically_flipped(const XrCompositionLayerBaseHeader* layer)
+{
+    for (auto* next = static_cast<const XrCompositionLayerBaseHeader*>(layer->next); next;
+         next = static_cast<const XrCompositionLayerBaseHeader*>(next->next)) {
+        if (next->type == XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB)
+            return (reinterpret_cast<const XrCompositionLayerImageLayoutFB*>(next)->flags &
+                    XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB) != 0;
+    }
+    return false;
+}
+
+bool submit_composite_frame(const XrFrameEndInfo& info, XrResult& result)
+{
+    namespace proto = refract::protocol;
+    if (!g_vulkanSession || !direct_to_host() || !info.layers) return false;
+    // After a lost consumer nothing else reconnects for panel frames (the batch path needs export
+    // on), so try here; a new connection turns shared export back on.
+    if (g_gpuConsumerLost && image_transport_client().connected()) resume_gpu_export_if_reconnected();
+    if (!g_vulkan.gpu_export_enabled()) return false;
+    const XrCompositionLayerProjection* scene = nullptr;
+    std::vector<const XrCompositionLayerQuad*> quads;
+    for (uint32_t i = 0; i < info.layerCount; ++i) {
+        const auto* base = static_cast<const XrCompositionLayerBaseHeader*>(info.layers[i]);
+        if (!base) return false;
+        if (i == 0 && base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION)
+            scene = reinterpret_cast<const XrCompositionLayerProjection*>(base);
+        else if (base->type == XR_TYPE_COMPOSITION_LAYER_QUAD)
+            quads.push_back(reinterpret_cast<const XrCompositionLayerQuad*>(base));
+        else
+            return false;
+    }
+    if (quads.empty()) return false;
+
+    proto::ImageProjection projection{};
+    projection.view_count = 2;
+    std::vector<VulkanBackend::AtlasBlit> blits;
+    uint32_t sceneWidth = 0, sceneHeight = 0;
+    if (scene) {
+        if (scene->viewCount != 2 || !scene->views || (scene->layerFlags & ~uint64_t{7})) return false;
+        const auto* space = find_space(scene->space);
+        if (!space) return false;
+        const XrPosef spaceWorld = world_pose_for_space(*space, g_lastViewPoseFrame);
+        projection.layer_flags = static_cast<uint32_t>(scene->layerFlags);
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            const auto& view = scene->views[eye];
+            SwapchainRecord* sc = nullptr;
+            if (view.type != XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW || !valid_subimage(view.subImage, sc)) return false;
+            // Scaled to the recommended size, like the scene-only path.
+            const uint32_t w = std::min<uint32_t>(g_renderWidth, view.subImage.imageRect.extent.width);
+            const uint32_t h = std::min<uint32_t>(g_renderHeight, view.subImage.imageRect.extent.height);
+            if (eye == 0) { sceneWidth = w; sceneHeight = h; }
+            if (w != sceneWidth || h != sceneHeight) return false;
+            blits.push_back({&sc->vulkan, sc->releasedImage, view.subImage, eye, 0, 0, int32_t(w), int32_t(h)});
+            const auto pose = multiply_pose(spaceWorld, view.pose);
+            projection.views[eye] = {{pose.position.x, pose.position.y, pose.position.z,
+                pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w},
+                view.fov.angleLeft, view.fov.angleRight, view.fov.angleUp, view.fov.angleDown};
+        }
+    } else {
+        // Panels only (menus, loading screens): place them with the views the app was given.
+        const XrPosef head = protocol_pose_to_xr(g_lastViewPoseFrame.hmd);
+        float halfWidth = 0, halfHeight = 0;
+        view_half_angles(halfWidth, halfHeight);
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            XrPosef offset = identity_pose();
+            offset.position.x = eye == 0 ? -kEyeHalfIpdMeters : kEyeHalfIpdMeters;
+            const auto pose = multiply_pose(head, offset);
+            projection.views[eye] = {{pose.position.x, pose.position.y, pose.position.z,
+                pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w},
+                -halfWidth, halfWidth, halfHeight, -halfHeight};
+        }
+    }
+    if (!proto::valid_projection(projection)) return false;
+
+    // Atlas: the scene at (0, 0) in both textures, panels packed to its right and below it.
+    constexpr uint32_t kPanelArea = 2048, kPad = 2, kMaxPanelSide = 2048;
+    const uint32_t atlasWidth = sceneWidth + kPanelArea;
+    const uint32_t atlasHeight = std::max(sceneHeight, kPanelArea);
+    struct Panel {
+        const XrCompositionLayerQuad* layer;
+        SwapchainRecord* sc;
+        proto::CompositeQuad entry;
+        bool placed;
+    };
+    std::vector<Panel> panels;
+    for (const auto* quad : quads) {
+        if (panels.size() == proto::kMaxCompositeQuads) break;
+        SwapchainRecord* sc = nullptr;
+        const auto* quadSpace = find_space(quad->space);
+        if (!quadSpace || !valid_subimage(quad->subImage, sc)) continue;
+        const auto pose = multiply_pose(world_pose_for_space(*quadSpace, g_lastViewPoseFrame), quad->pose);
+        Panel panel{quad, sc, {}, false};
+        panel.entry.quad = {{pose.position.x, pose.position.y, pose.position.z,
+            pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w},
+            quad->size.width, quad->size.height, static_cast<uint32_t>(quad->eyeVisibility), static_cast<uint32_t>(quad->layerFlags & 7)};
+        if (!proto::valid_quad(panel.entry.quad)) continue;
+        panel.entry.texture = quad->eyeVisibility == 2 ? 1 : 0;  // XR_EYE_VISIBILITY_RIGHT
+        panels.push_back(panel);
+    }
+    // Shelf packing per texture; shrink every panel until they fit (a few tries), then drop the rest.
+    struct Region { uint32_t left, top, right, bottom; };
+    const Region regions[] = {{sceneWidth ? sceneWidth + kPad : 0, 0, atlasWidth, atlasHeight},
+                              {0, sceneHeight ? sceneHeight + kPad : atlasHeight, sceneWidth, atlasHeight}};
+    std::vector<size_t> order(panels.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        return panels[a].layer->subImage.imageRect.extent.height > panels[b].layer->subImage.imageRect.extent.height;
+    });
+    float scale = 1.0f;
+    for (int attempt = 0; attempt < 6; ++attempt, scale *= 0.75f) {
+        bool all = true;
+        for (auto& panel : panels) panel.placed = false;
+        for (uint32_t texture = 0; texture < 2; ++texture) {
+            size_t region = 0;
+            uint32_t x = regions[0].left, y = regions[0].top, shelf = 0;
+            for (size_t i : order) {
+                auto& panel = panels[i];
+                if (panel.entry.texture != texture) continue;
+                const auto& extent = panel.layer->subImage.imageRect.extent;
+                const float fit = std::min(1.0f, float(kMaxPanelSide) / float(std::max(extent.width, extent.height)));
+                const uint32_t w = std::max<uint32_t>(1, uint32_t(extent.width * fit * scale));
+                const uint32_t h = std::max<uint32_t>(1, uint32_t(extent.height * fit * scale));
+                panel.placed = false;
+                while (region < 2) {
+                    const auto& r = regions[region];
+                    if (x + w > r.right) { x = r.left; y += shelf + kPad; shelf = 0; }
+                    if (x + w <= r.right && y + h <= r.bottom) break;
+                    if (++region < 2) { x = regions[region].left; y = regions[region].top; shelf = 0; }
+                }
+                if (region >= 2) { all = false; break; }
+                panel.entry.x = x; panel.entry.y = y; panel.entry.width = w; panel.entry.height = h;
+                panel.placed = true;
+                x += w + kPad;
+                shelf = std::max(shelf, h);
+            }
+        }
+        if (all) break;
+    }
+
+    proto::CompositeHeader table{sceneWidth, sceneHeight, 0, 0};
+    std::vector<proto::CompositeQuad> entries;
+    for (const auto& panel : panels) {  // Back to front, as the app ordered them.
+        if (!panel.placed) continue;
+        entries.push_back(panel.entry);
+        // Flipped panels are copied as stored and flipped by the viewer while sampling: a blit with
+        // reversed destination rows made the host GPU copies several times slower.
+        if (layer_vertically_flipped(reinterpret_cast<const XrCompositionLayerBaseHeader*>(panel.layer)))
+            entries.back().texture |= proto::kCompositeQuadFlipped;
+        blits.push_back({&panel.sc->vulkan, panel.sc->releasedImage, panel.layer->subImage, panel.entry.texture,
+                         int32_t(panel.entry.x), int32_t(panel.entry.y), int32_t(panel.entry.width), int32_t(panel.entry.height)});
+    }
+    static size_t loggedFlipped = 0;
+    const size_t flipped = static_cast<size_t>(std::count_if(entries.begin(), entries.end(),
+        [](const proto::CompositeQuad& q) { return (q.texture & proto::kCompositeQuadFlipped) != 0; }));
+    if (flipped != loggedFlipped) {
+        loggedFlipped = flipped;
+        __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "composite: %zu of %zu panels stored bottom-up", flipped, entries.size());
+    }
+    table.quad_count = static_cast<uint32_t>(entries.size());
+    std::vector<uint8_t> tableBytes(sizeof(table) + entries.size() * sizeof(proto::CompositeQuad));
+    std::memcpy(tableBytes.data(), &table, sizeof(table));
+    if (!entries.empty()) std::memcpy(tableBytes.data() + sizeof(table), entries.data(), entries.size() * sizeof(proto::CompositeQuad));
+
+    resume_gpu_export_if_reconnected();
+    // The ring pair about to be refilled carried the frame sent kExportRing - 1 frames ago.
+    if (!image_transport_client().await_acks(VulkanBackend::kExportRing - 2)) { gpu_consumer_lost(); result = XR_SUCCESS; return true; }
+    const int slot = g_vulkan.export_atlas_async(blits.data(), static_cast<uint32_t>(blits.size()), atlasWidth, atlasHeight);
+    if (slot < 0) return false;
+    static bool reported = false;
+    if (!reported) {
+        __android_log_print(ANDROID_LOG_INFO, "Refract.Layer", "composite: scene %ux%u + %zu panel(s) in %ux%u atlas",
+                            sceneWidth, sceneHeight, entries.size(), atlasWidth, atlasHeight);
+        reported = true;
+    }
+    const bool published = publish_pending_export();
+    g_pendingExport = {slot, atlasWidth, atlasHeight, projection, std::move(tableBytes)};
+    if (!published) gpu_consumer_lost();
+    result = XR_SUCCESS;
+    return true;
+}
+#endif
+
 XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart = 0, bool validateOnly = false)
 {
     auto invalid = [&](const char* reason) {
@@ -1266,6 +1578,39 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart 
         reportedLayers = true;
     }
     if (info.layerCount == 0) { return XR_SUCCESS; }
+    // Some Oculus builds submit equirect backgrounds even when the runtime did
+    // not advertise XR_KHR_composition_layer_equirect2. Preserve the scene and
+    // panels that this transport can display, in their original layer order.
+    if (!batchPart && info.layerCount <= refract::protocol::kMaxCompositionLayers && info.layers) {
+        const void* supported[refract::protocol::kMaxCompositionLayers]{};
+        uint32_t supportedCount = 0;
+        for (uint32_t i = 0; i < info.layerCount; ++i) {
+            const auto* layer = static_cast<const XrCompositionLayerBaseHeader*>(info.layers[i]);
+            if (layer && layer->type == XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR) continue;
+            supported[supportedCount++] = info.layers[i];
+        }
+        if (supportedCount != info.layerCount && supportedCount > 0) {
+#if defined(__ANDROID__)
+            static bool reportedEquirectFallback = false;
+            if (!reportedEquirectFallback) {
+                __android_log_print(ANDROID_LOG_WARN, "Refract.Layer",
+                                    "skipping %u unsupported equirect background layers",
+                                    info.layerCount - supportedCount);
+                reportedEquirectFallback = true;
+            }
+#endif
+            auto filtered = info;
+            filtered.layerCount = supportedCount;
+            filtered.layers = supported;
+            return submit_projection_frame(filtered);
+        }
+    }
+#if defined(__ANDROID__)
+    if (!batchPart && !validateOnly) {
+        XrResult result = XR_SUCCESS;
+        if (submit_composite_frame(info, result)) return result;
+    }
+#endif
     // Mixed scene/panel frames are transferred as an atomic GPU batch. Validate
     // every member before publishing any part; preserve application layer order.
     if (!batchPart && info.layerCount >= 2 && info.layerCount <= refract::protocol::kMaxCompositionLayers && info.layers && info.layers[0] &&
@@ -1418,15 +1763,7 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart 
     }
     static std::vector<uint8_t> eyes[2];
     const size_t eyeBytes = static_cast<size_t>(width) * height * 4;
-    // Shared export stops when its consumer goes away (e.g. the viewer restarts);
-    // resume it once the image stream has connected again.
-    static bool gpuConsumerLost = false;
-    static uint64_t gpuLostAtConnection = 0;
-    if (gpuConsumerLost && g_vulkan.active() && image_transport_client().connections() != gpuLostAtConnection) {
-        gpuConsumerLost = false;
-        if (g_vulkan.reenable_gpu_export())
-            __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "image stream reconnected; resuming shared GPU export");
-    }
+    resume_gpu_export_if_reconnected();
     if (useVulkan) {
         const VulkanSwapchain* vkSwapchains[] = {g_vulkanSession ? &swapchains[0]->vulkan : &glesMirrors[0],
                                                  g_vulkanSession ? &swapchains[1]->vulkan : &glesMirrors[1]};
@@ -1445,36 +1782,9 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart 
             if (slot >= 0) async_frame_sender().submit_readback(slot, nv12, g_imageFrameSequence++, width, height, streamLayers, projection);
             return XR_SUCCESS;
         }
-        // Pipelined shared export: submit this frame's copy, then publish the previous frame,
-        // whose copy has normally finished by now. The viewer shows each frame one frame later,
-        // but the app's render thread no longer waits for the GPU copy and the viewer's
-        // acknowledgment (~5 ms per frame, and the app's main thread often waits on this thread).
-        struct PendingExport {
-            int slot = -1;
-            uint32_t width = 0, height = 0;
-            refract::protocol::ImageProjection projection{};
-        };
-        static PendingExport pending;
-        const auto consumerLost = [&] {
-            // Never reuse shared images after an uncertain consumer completion.
-            g_vulkan.disable_gpu_export();
-            gpuConsumerLost = true;
-            gpuLostAtConnection = image_transport_client().connections();
-            pending.slot = -1;
-            __android_log_print(ANDROID_LOG_WARN, "Refract.GPU", "GPU consumer unavailable; disabling shared export for this session");
-        };
-        const auto publishPending = [&] {
-            if (pending.slot < 0) return true;
-            refract::protocol::WindowsGpuMarker marker{};
-            if (!g_vulkan.export_wait(std::exchange(pending.slot, -1), &marker)) return false;
-            refract::protocol::WindowsGpuFrame gpu{marker.session, {marker.formats[0], marker.formats[1]}};
-            const uint64_t sequence = g_imageFrameSequence++;
-            if (!image_transport_client().send_frame(sequence, pending.width, pending.height, 2,
-                    reinterpret_cast<const uint8_t*>(&gpu), sizeof(gpu), &pending.projection, true, 0, false)) return false;
-            if (sequence % 90 == 0) __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "shared GPU eyes seq=%llu %ux%u; pipelined, no pixel readback",
-                static_cast<unsigned long long>(sequence), pending.width, pending.height);
-            return true;
-        };
+        auto& pending = g_pendingExport;
+        const auto consumerLost = gpu_consumer_lost;
+        const auto publishPending = publish_pending_export;
         if (!batchPart) {
             // The ring pair about to be refilled carried the frame sent kExportRing - 1 frames ago.
             if (!image_transport_client().await_acks(VulkanBackend::kExportRing - 2)) { consumerLost(); return XR_SUCCESS; }
@@ -1504,8 +1814,8 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart 
             }
             // Never reuse shared images after an uncertain consumer completion.
             g_vulkan.disable_gpu_export();
-            gpuConsumerLost = true;
-            gpuLostAtConnection = image_transport_client().connections();
+            g_gpuConsumerLost = true;
+            g_gpuLostAtConnection = image_transport_client().connections();
             if (batchPart) return XR_ERROR_RUNTIME_FAILURE;
             __android_log_print(ANDROID_LOG_WARN, "Refract.GPU", "GPU consumer unavailable; disabling shared export for this session");
             if (!g_vulkan.readback(vkSwapchains, indices, subimages, width, height, eyes)) return XR_ERROR_RUNTIME_FAILURE;
@@ -1528,6 +1838,7 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart 
 XrResult XRAPI_CALL xrCreateInstance_impl(const XrInstanceCreateInfo* createInfo, XrInstance* instance)
 {
     log_call("xrCreateInstance");
+    refract::runtime::apply_game_patches();
     if (createInfo == nullptr || instance == nullptr) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -1620,6 +1931,7 @@ XrResult XRAPI_CALL xrEnumerateInstanceExtensionProperties_impl(
         "XR_KHR_opengl_es_enable",
         "XR_KHR_vulkan_enable",
         "XR_FB_display_refresh_rate",
+        "XR_META_recommended_layer_resolution",
         "XR_EXT_hand_tracking",
         "XR_EXT_hand_tracking_data_source",
 #if defined(__ANDROID__) || defined(REFRACT_INPUT_FIXTURE)
@@ -1633,6 +1945,7 @@ XrResult XRAPI_CALL xrEnumerateInstanceExtensionProperties_impl(
         "XR_FB_foveation",
         "XR_FB_foveation_configuration",
         "XR_FB_swapchain_update_state",
+        "XR_FB_composition_layer_image_layout",  // Honored for quad layers by the composite path.
 #endif
     };
 
@@ -1844,6 +2157,7 @@ XrResult XRAPI_CALL xrCreateSession_impl(
     XrSession* session)
 {
     log_call("xrCreateSession");
+    refract::runtime::apply_game_patches();  // In case the game code loaded after the instance.
     if (!is_valid_instance(instance)) {
         return XR_ERROR_HANDLE_INVALID;
     }
@@ -3104,6 +3418,31 @@ XrResult XRAPI_CALL xrRequestDisplayRefreshRateFB_impl(XrSession session, float 
     return rate == 0.0f || std::abs(rate - activeRate) < 0.01f ? XR_SUCCESS : static_cast<XrResult>(-1000101000);
 }
 
+// XR_META_recommended_layer_resolution: the host isn't GPU-bound, so recommend the layer's full
+// swapchain size. OVRPlugin queries this every frame for dynamic resolution; without the extension
+// each query fails and logs an error (AC Nexus also logged two 0x0 RenderTexture errors per frame).
+XrResult XRAPI_CALL xrGetRecommendedLayerResolutionMETA_impl(
+    XrSession session, const XrRecommendedLayerResolutionGetInfoMETA* info, XrRecommendedLayerResolutionMETA* resolution) {
+    log_call("xrGetRecommendedLayerResolutionMETA");
+    if (!is_valid_session(session)) return XR_ERROR_HANDLE_INVALID;
+    if (!info || !resolution || info->type != XR_TYPE_RECOMMENDED_LAYER_RESOLUTION_GET_INFO_META ||
+        resolution->type != XR_TYPE_RECOMMENDED_LAYER_RESOLUTION_META || !info->layer) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    const XrSwapchainSubImage* sub = nullptr;
+    if (info->layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(info->layer);
+        if (projection->viewCount > 0 && projection->views) sub = &projection->views[0].subImage;
+    } else if (info->layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+        sub = &reinterpret_cast<const XrCompositionLayerQuad*>(info->layer)->subImage;
+    }
+    const SwapchainRecord* sc = sub ? find_swapchain(sub->swapchain) : nullptr;
+    resolution->isValid = sc ? 1u : 0u;
+    resolution->recommendedImageDimensions = sc
+        ? XrExtent2Di{static_cast<int32_t>(sc->width), static_cast<int32_t>(sc->height)} : XrExtent2Di{0, 0};
+    return XR_SUCCESS;
+}
+
 #if defined(__ANDROID__)
 // XR_FB_foveation profiles carry no runtime state: every swapchain is rendered
 // and forwarded at full density, so a profile is only a validated token.
@@ -3175,6 +3514,10 @@ XrResult XRAPI_CALL xrGetInstanceProcAddr_impl(
     }
     if (requested == "xrRequestDisplayRefreshRateFB") {
         *function = cast_function(xrRequestDisplayRefreshRateFB_impl);
+        return XR_SUCCESS;
+    }
+    if (requested == "xrGetRecommendedLayerResolutionMETA") {
+        *function = cast_function(xrGetRecommendedLayerResolutionMETA_impl);
         return XR_SUCCESS;
     }
 
@@ -3379,3 +3722,10 @@ XrResult negotiate_loader_runtime_interface(
 }
 
 } // namespace refract::runtime
+
+#if defined(__ANDROID__)
+extern "C" void refract_set_android_context(JavaVM* vm, jobject context)
+{
+    refract::runtime::pose_client().set_android_context(vm, context);
+}
+#endif

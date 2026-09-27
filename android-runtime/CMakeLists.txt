@@ -2,6 +2,7 @@ add_library(openxr_runtime SHARED
   openxr_dispatch/runtime_entry.cpp
   session.cpp
   pose_client.cpp
+  game_patches.cpp
   swapchain.cpp
   input.cpp
   vulkan_backend.cpp

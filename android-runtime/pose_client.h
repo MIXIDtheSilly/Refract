@@ -18,6 +18,7 @@ public:
     refract::protocol::PoseFrame latest_pose_frame();
 #if defined(__ANDROID__)
     void set_android_context(JavaVM* vm, jobject context);
+    int open_image_transport_fd();
 #endif
 
 private:
@@ -25,12 +26,17 @@ private:
     bool query_pose_broker();
     bool ensure_connected();
     bool ensure_emulator_connected();
+    bool open_relayed_pose_stream_locked();
     void read_available_frames();
     void close_socket();
 
 #if defined(__ANDROID__)
     JavaVM* java_vm_ = nullptr;
     jobject android_context_ = nullptr;
+    int open_provider_stream_locked(const char* uri, jobject& heldClient);
+    jobject image_provider_client_ = nullptr;  // Held while streaming; see open_image_transport_fd().
+    jobject pose_provider_client_ = nullptr;
+    bool socket_permitted_ = true;  // False once socket() is denied (app without INTERNET permission).
     uint32_t broker_retry_countdown_ = 0;
 #endif
     int socket_ = -1;

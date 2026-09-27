@@ -56,13 +56,30 @@ private:
         HANDLE read = nullptr, write = nullptr;
         if (!CreatePipe(&read, &write, &inherit, 0)) return false;
         SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
-        STARTUPINFOA startup{sizeof(startup)};
-        startup.dwFlags = STARTF_USESTDHANDLES;
-        startup.hStdOutput = write;
-        startup.hStdError = write;
+        // Inherit only the output pipe. If this adb call starts the adb server, that server lives on and
+        // would otherwise keep every inheritable handle, including the viewer's port 38491 listener.
+        SIZE_T attributeSize = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeSize);
+        std::vector<char> attributeStorage(attributeSize);
+        auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
+        if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attributeSize) ||
+            !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &write, sizeof(write),
+                                       nullptr, nullptr)) {
+            CloseHandle(read);
+            CloseHandle(write);
+            return false;
+        }
+        STARTUPINFOEXA startup{};
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdOutput = write;
+        startup.StartupInfo.hStdError = write;
+        startup.lpAttributeList = attributes;
         PROCESS_INFORMATION process{};
-        const bool started = CreateProcessA(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                                            nullptr, nullptr, &startup, &process);
+        const bool started = CreateProcessA(nullptr, command.data(), nullptr, nullptr, TRUE,
+                                            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                                            &startup.StartupInfo, &process);
+        DeleteProcThreadAttributeList(attributes);
         CloseHandle(write);
         if (started) {
             char buffer[4096];

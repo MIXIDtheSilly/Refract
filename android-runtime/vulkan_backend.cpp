@@ -247,6 +247,7 @@ void VulkanBackend::shutdown() {
         if (scaled.image) vkDestroyImage(device_, scaled.image, nullptr);
         if (scaled.memory) vkFreeMemory(device_, scaled.memory, nullptr);
     }
+    for (auto& atlas : atlas_) destroy_image(atlas.image, atlas.memory);
     if (fence_) vkDestroyFence(device_, fence_, nullptr);
     if (pool_) vkDestroyCommandPool(device_, pool_, nullptr);
     if (ownedInstance_) {
@@ -256,11 +257,12 @@ void VulkanBackend::shutdown() {
     *this = {};
 }
 bool VulkanBackend::allocate_image(VkImage& image, VkDeviceMemory& memory, VkFormat format,
-                                  uint32_t width, uint32_t height, uint32_t layers, VkImageUsageFlags usage, VkImageCreateFlags flags) {
+                                  uint32_t width, uint32_t height, uint32_t layers, VkImageUsageFlags usage,
+                                  VkImageCreateFlags flags, uint32_t mipLevels) {
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     info.flags = flags;
     info.imageType = VK_IMAGE_TYPE_2D; info.format = format; info.extent = {width, height, 1};
-    info.mipLevels = 1; info.arrayLayers = layers; info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.mipLevels = mipLevels; info.arrayLayers = layers; info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL; info.usage = usage;
     if (!ok(vkCreateImage(device_, &info, nullptr, &image), "create image")) return false;
     VkMemoryRequirements req{}; vkGetImageMemoryRequirements(device_, image, &req);
@@ -284,11 +286,12 @@ bool VulkanBackend::finish() {
         ok(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "wait fence");
 }
 void VulkanBackend::barrier(VkImage image, uint32_t layers, VkImageLayout before, VkImageLayout after,
-                            VkAccessFlags src, VkAccessFlags dst, uint32_t srcFamily, uint32_t dstFamily) {
+                            VkAccessFlags src, VkAccessFlags dst, uint32_t srcFamily, uint32_t dstFamily,
+                            uint32_t mipLevels) {
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.oldLayout = before; b.newLayout = after; b.srcAccessMask = src; b.dstAccessMask = dst;
     b.srcQueueFamilyIndex = srcFamily; b.dstQueueFamilyIndex = dstFamily;
-    b.image = image; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+    b.image = image; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, layers};
     vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 XrResult VulkanBackend::create(VulkanSwapchain& sc, const XrSwapchainCreateInfo& info) {
@@ -296,7 +299,7 @@ XrResult VulkanBackend::create(VulkanSwapchain& sc, const XrSwapchainCreateInfo&
     if (info.format != VK_FORMAT_R8G8B8A8_UNORM && info.format != VK_FORMAT_R8G8B8A8_SRGB) return XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
     constexpr XrFlags64 supportedUsage = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
         XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
-    if (info.sampleCount != 1 || info.mipCount != 1 || info.faceCount != 1 || (info.createFlags & ~XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) ||
+    if (info.sampleCount != 1 || info.faceCount != 1 || (info.createFlags & ~XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) ||
         info.width > 16384 || info.height > 16384 || info.arraySize > 4 || (info.usageFlags & ~supportedUsage)) return XR_ERROR_FEATURE_UNSUPPORTED;
     sc.format = static_cast<VkFormat>(info.format); sc.layers = info.arraySize;
     VkFormatProperties props{}; vkGetPhysicalDeviceFormatProperties(physical_, sc.format, &props);
@@ -311,12 +314,14 @@ XrResult VulkanBackend::create(VulkanSwapchain& sc, const XrSwapchainCreateInfo&
     if (info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT) usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     const uint32_t imageCount = (info.createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) ? 1 : 3;
     for (uint32_t i = 0; i < imageCount; ++i) {
-        if (!allocate_image(sc.images[i], sc.memory[i], sc.format, info.width, info.height, sc.layers, usage)) { destroy(sc); return XR_ERROR_RUNTIME_FAILURE; }
+        if (!allocate_image(sc.images[i], sc.memory[i], sc.format, info.width, info.height, sc.layers,
+                            usage, 0, info.mipCount)) { destroy(sc); return XR_ERROR_RUNTIME_FAILURE; }
     }
     // Initialize before handing images to the app; xrWaitSwapchainImage never touches its queue.
     if (!begin()) { destroy(sc); return XR_ERROR_RUNTIME_FAILURE; }
     for (auto image : sc.images) if (image) barrier(image, sc.layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
-                                        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+                                        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, info.mipCount);
     if (!finish()) { destroy(sc); return XR_ERROR_RUNTIME_FAILURE; }
     return XR_SUCCESS;
 }
@@ -514,9 +519,80 @@ int VulkanBackend::export_async(const VulkanSwapchain* const swapchains[2], cons
                                 const XrSwapchainSubImage* const subimages[2], uint32_t width, uint32_t height) {
     static refract::protocol::PerfStats stats("export-submit");
     refract::protocol::PerfScope scope(stats);
-    if (!gpuExportEnabled_ || !refract::protocol::valid_render_extent(width, height)) return -1;
+    if (!gpuExportEnabled_ || !refract::protocol::valid_render_extent(width, height) || !ensure_scaled(swapchains, width, height)) return -1;
     const std::array<uint32_t, 4> configuration{width, height,
         static_cast<uint32_t>(swapchains[0]->format), static_cast<uint32_t>(swapchains[1]->format)};
+    return export_ring(configuration, [&](VkBuffer markerBuffer, const refract::protocol::WindowsGpuMarker& marker) {
+        vkCmdUpdateBuffer(cmd_, markerBuffer, 0, sizeof(marker), &marker);
+        record_eye_copies(swapchains, indices, subimages, width, height, VK_NULL_HANDLE, false);
+    });
+}
+bool VulkanBackend::ensure_atlas(uint32_t width, uint32_t height) {
+    if (atlas_[0].image && atlasWidth_ == width && atlasHeight_ == height) return true;
+    for (auto& atlas : atlas_) { destroy_image(atlas.image, atlas.memory); atlas = {}; }
+    atlasWidth_ = atlasHeight_ = 0;
+    for (uint32_t i = 0; i < 3; ++i) {
+        const VkImageUsageFlags usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | (i < 2 ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+        if (!allocate_image(atlas_[i].image, atlas_[i].memory, VK_FORMAT_R8G8B8A8_SRGB, width, height, 1, usage)) {
+            for (auto& atlas : atlas_) { destroy_image(atlas.image, atlas.memory); atlas = {}; }
+            return false;
+        }
+    }
+    atlasWidth_ = width; atlasHeight_ = height;
+    return true;
+}
+int VulkanBackend::export_atlas_async(const AtlasBlit* blits, uint32_t count, uint32_t width, uint32_t height) {
+    static refract::protocol::PerfStats stats("atlas-submit");
+    refract::protocol::PerfScope scope(stats);
+    if (!gpuExportEnabled_ || !refract::protocol::valid_render_extent(width, height) || !ensure_atlas(width, height)) return -1;
+    // sRGB: sRGB layers keep their bytes, linear (UNORM) layers are encoded, as a real compositor shows them.
+    constexpr uint32_t kFormat = VK_FORMAT_R8G8B8A8_SRGB;
+    return export_ring({width, height, kFormat, kFormat}, [&](VkBuffer markerBuffer, const refract::protocol::WindowsGpuMarker& marker) {
+        // The atlas is only read by the export blits, so its old contents can be discarded.
+        for (uint32_t t = 0; t < 2; ++t)
+            barrier(atlas_[t].image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    atlas_[t].initialized ? VK_ACCESS_TRANSFER_READ_BIT : 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        if (!atlas_[2].initialized)
+            barrier(atlas_[2].image, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        // Layer blits come before the marker: the host layer redirects the two blits after it.
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& b = blits[i];
+            const auto& sc = *b.swapchain;
+            const VkImageLayout home = sc.external ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            const uint32_t foreign = sc.external ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_IGNORED;
+            const uint32_t own = sc.external ? queueFamily_ : VK_QUEUE_FAMILY_IGNORED;
+            barrier(sc.images[b.index], sc.layers, home, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    sc.external ? 0 : VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, foreign, own);
+            VkImageBlit region{};
+            region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, b.sub.imageArrayIndex, 1};
+            region.srcOffsets[0] = {b.sub.imageRect.offset.x, b.sub.imageRect.offset.y, 0};
+            region.srcOffsets[1] = {b.sub.imageRect.offset.x + b.sub.imageRect.extent.width,
+                                    b.sub.imageRect.offset.y + b.sub.imageRect.extent.height, 1};
+            region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.dstOffsets[0] = {b.x, b.y, 0};
+            region.dstOffsets[1] = {b.x + b.width, b.y + b.height, 1};
+            vkCmdBlitImage(cmd_, sc.images[b.index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, atlas_[b.texture].image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
+            barrier(sc.images[b.index], sc.layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, home, VK_ACCESS_TRANSFER_READ_BIT,
+                    sc.external ? 0 : VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, own, foreign);
+        }
+        for (uint32_t t = 0; t < 2; ++t)
+            barrier(atlas_[t].image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        vkCmdUpdateBuffer(cmd_, markerBuffer, 0, sizeof(marker), &marker);
+        for (uint32_t t = 0; t < 2; ++t) {
+            VkImageBlit whole{};
+            whole.srcSubresource = whole.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            whole.srcOffsets[1] = whole.dstOffsets[1] = {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+            vkCmdBlitImage(cmd_, atlas_[t].image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, atlas_[2].image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &whole, VK_FILTER_NEAREST);
+        }
+        for (auto& atlas : atlas_) atlas.initialized = true;
+    });
+}
+template <typename Record>
+int VulkanBackend::export_ring(const std::array<uint32_t, 4>& configuration, Record&& record) {
+    const uint32_t width = configuration[0], height = configuration[1];
     auto found = exportRings_.find(configuration);
     if (found == exportRings_.end()) {
         if (exportRings_.size() >= 8) return -1;
@@ -536,8 +612,7 @@ int VulkanBackend::export_async(const VulkanSwapchain* const swapchains[2], cons
         if (!ok(vkAllocateCommandBuffers(device_, &alloc, &slot.cmd), "allocate export commands")) return -1;
         if (!ok(vkCreateFence(device_, &fence, nullptr, &slot.fence), "create export fence")) return -1;
     }
-    if (!host_buffer(slot.buffer, slot.memory, slot.mapped, slot.bytes, sizeof(refract::protocol::WindowsGpuMarker)) ||
-        !ensure_scaled(swapchains, width, height)) return -1;
+    if (!host_buffer(slot.buffer, slot.memory, slot.mapped, slot.bytes, sizeof(refract::protocol::WindowsGpuMarker))) return -1;
     auto& marker = exportMarkers_[index];
     marker = {};
     marker.session = found->second[index];
@@ -550,8 +625,7 @@ int VulkanBackend::export_async(const VulkanSwapchain* const swapchains[2], cons
     cmd_ = slot.cmd;  // begin()/barrier() record into cmd_.
     bool recorded = begin();
     if (recorded) {
-        vkCmdUpdateBuffer(cmd_, slot.buffer, 0, sizeof(marker), &marker);
-        record_eye_copies(swapchains, indices, subimages, width, height, VK_NULL_HANDLE, false);
+        record(slot.buffer, marker);
         VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
         host.srcQueueFamilyIndex = host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

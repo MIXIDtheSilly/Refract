@@ -139,8 +139,15 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
         return 1;
     }
 
+#if defined(_WIN32)
+    // Child processes (adb) must not inherit the listener: a long-lived adb server that holds a copy keeps
+    // accepting adb-reverse connections after the viewer restarts, so frames go nowhere. Windows SO_REUSEADDR
+    // would also let this bind share a port an orphaned listener still owns, so leave it off and fail loudly.
+    SetHandleInformation(reinterpret_cast<HANDLE>(server), HANDLE_FLAG_INHERIT, 0);
+#else
     int reuse = 1;
     setsockopt(server, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+#endif
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -148,7 +155,13 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
     address.sin_port = htons(port);
 
     if (bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+#if defined(_WIN32)
+        std::fprintf(stderr, "Refract Image TCP: bind failed on port %u (error %d); another process owns it "
+                     "(often an adb server that inherited an old viewer's socket: run adb kill-server)\n",
+                     static_cast<unsigned>(port), WSAGetLastError());
+#else
         std::fprintf(stderr, "Refract Image TCP: bind failed on port %u\n", static_cast<unsigned>(port));
+#endif
         close_socket(server);
         return 1;
     }
@@ -209,7 +222,8 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             const bool video = video_version(header.version);
             const bool quads = header.version == kQuadImageFrameVersion || header.version == kQuadGpuFrameVersion ||
                 header.version == kMixedQuadGpuFrameVersion || header.version == kQuadVideoImageFrameVersion;
-            const bool gpu = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion || mixed;
+            const bool composite = header.version == kCompositeGpuFrameVersion;
+            const bool gpu = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion || mixed || composite;
             const bool projected = header.version == kProjectionImageFrameVersion || gpu || quads || video;
             const uint32_t expectedHeaderSize = sizeof(ImageFrameHeader) + (projected ? sizeof(ImageProjection) : 0);
             if ((mixed ? !valid_mixed_part(header.version, header.reserved) : header.reserved > (video ? kVideoFrameKey : 0)) ||
@@ -226,7 +240,10 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
 
             const uint64_t expected =
                 gpu ? sizeof(WindowsGpuFrame) : static_cast<uint64_t>(header.width) * header.height * header.layers * header.bytes_per_pixel;
-            if ((video ? !header.payload_size || header.payload_size > kMaxVideoPayload : header.payload_size != expected) ||
+            const uint64_t maxComposite = sizeof(WindowsGpuFrame) + sizeof(CompositeHeader) + kMaxCompositeQuads * sizeof(CompositeQuad);
+            if ((video ? !header.payload_size || header.payload_size > kMaxVideoPayload :
+                 composite ? header.payload_size < sizeof(WindowsGpuFrame) + sizeof(CompositeHeader) || header.payload_size > maxComposite :
+                 header.payload_size != expected) ||
                 header.payload_size > 128ull * 1024ull * 1024ull) {
                 std::fprintf(stderr, "Refract Image TCP: invalid payload size %llu\n",
                     static_cast<unsigned long long>(header.payload_size));
@@ -243,6 +260,11 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             }
             if (!recv_payload(client, &payload, header.payload_size)) {
                 std::fprintf(stderr, "Refract Image TCP: client disconnected during payload\n");
+                break;
+            }
+            if (composite && !valid_composite(payload.data() + sizeof(WindowsGpuFrame), payload.size() - sizeof(WindowsGpuFrame),
+                                              header.width, header.height)) {
+                std::fprintf(stderr, "Refract Image TCP: invalid composite table\n");
                 break;
             }
 

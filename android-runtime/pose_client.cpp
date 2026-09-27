@@ -122,6 +122,90 @@ void PoseClient::set_android_context(JavaVM* vm, jobject context)
     android_context_ = env->NewGlobalRef(context);
     log_pose_client("captured Android context for pose broker");
 }
+
+int PoseClient::open_image_transport_fd()
+{
+    std::lock_guard lock(mutex_);
+    return open_provider_stream_locked(
+        "content://org.khronos.openxr.system_runtime_broker/openxr/1/image/stream", image_provider_client_);
+}
+
+// Opens a relayed stream FD from the runtime's broker provider and keeps the provider client until
+// the next stream of the same kind replaces it. Called with mutex_ held.
+int PoseClient::open_provider_stream_locked(const char* uriString, jobject& heldClient)
+{
+    if (!java_vm_ || !android_context_) return -1;
+    JNIEnv* env = nullptr;
+    bool detach = false;
+    const jint status = java_vm_->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (status == JNI_EDETACHED) {
+        if (java_vm_->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return -1;
+        detach = true;
+    } else if (status != JNI_OK || !env) {
+        return -1;
+    }
+
+    int fd = -1;
+    jclass contextClass = env->GetObjectClass(android_context_);
+    jclass uriClass = env->FindClass("android/net/Uri");
+    jstring uriText = env->NewStringUTF(uriString);
+    jstring mode = env->NewStringUTF("rw");
+    if (!env->ExceptionCheck() && contextClass && uriClass && uriText && mode) {
+        jmethodID getResolver = env->GetMethodID(contextClass, "getContentResolver", "()Landroid/content/ContentResolver;");
+        jmethodID parse = env->GetStaticMethodID(uriClass, "parse", "(Ljava/lang/String;)Landroid/net/Uri;");
+        if (!env->ExceptionCheck() && getResolver && parse) {
+            jobject resolver = env->CallObjectMethod(android_context_, getResolver);
+            jobject uri = env->CallStaticObjectMethod(uriClass, parse, uriText);
+            if (!env->ExceptionCheck() && resolver && uri) {
+                // A stable provider client (unlike a one-off openFileDescriptor) makes Android rank the
+                // relaying runtime process with this foreground app instead of freezing it as cached.
+                jclass resolverClass = env->GetObjectClass(resolver);
+                jmethodID acquire = env->GetMethodID(resolverClass, "acquireContentProviderClient",
+                    "(Landroid/net/Uri;)Landroid/content/ContentProviderClient;");
+                jobject client = !env->ExceptionCheck() && acquire ? env->CallObjectMethod(resolver, acquire, uri) : nullptr;
+                if (!env->ExceptionCheck() && client) {
+                    jclass clientClass = env->GetObjectClass(client);
+                    jmethodID open = env->GetMethodID(clientClass, "openFile",
+                        "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;");
+                    jmethodID close = env->GetMethodID(clientClass, "close", "()V");
+                    jobject descriptor = !env->ExceptionCheck() && open ? env->CallObjectMethod(client, open, uri, mode) : nullptr;
+                    if (!env->ExceptionCheck() && descriptor) {
+                        jclass descriptorClass = env->GetObjectClass(descriptor);
+                        jmethodID detachFd = env->GetMethodID(descriptorClass, "detachFd", "()I");
+                        if (!env->ExceptionCheck() && detachFd) fd = env->CallIntMethod(descriptor, detachFd);
+                        env->DeleteLocalRef(descriptorClass);
+                        env->DeleteLocalRef(descriptor);
+                    }
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    if (fd >= 0 && close) {
+                        if (heldClient) {
+                            env->CallVoidMethod(heldClient, close);
+                            env->DeleteGlobalRef(heldClient);
+                        }
+                        heldClient = env->NewGlobalRef(client);
+                    } else if (close) {
+                        env->CallVoidMethod(client, close);
+                    }
+                    env->DeleteLocalRef(clientClass);
+                    env->DeleteLocalRef(client);
+                }
+                env->DeleteLocalRef(resolverClass);
+            }
+            if (uri) env->DeleteLocalRef(uri);
+            if (resolver) env->DeleteLocalRef(resolver);
+        }
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        __android_log_print(ANDROID_LOG_INFO, "Refract.PoseClient", "provider FD request failed: %s", uriString);
+    }
+    if (mode) env->DeleteLocalRef(mode);
+    if (uriText) env->DeleteLocalRef(uriText);
+    if (uriClass) env->DeleteLocalRef(uriClass);
+    if (contextClass) env->DeleteLocalRef(contextClass);
+    if (detach) java_vm_->DetachCurrentThread();
+    return fd;
+}
 #endif
 
 bool PoseClient::query_pose_broker()
@@ -317,8 +401,17 @@ bool PoseClient::ensure_emulator_connected()
     }
     if (now < next_connect_ns_) { return false; }
     next_connect_ns_ = now + 1'000'000'000;
+    if (!socket_permitted_) { return open_relayed_pose_stream_locked(); }
     socket_ = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if (socket_ < 0) { return false; }
+    if (socket_ < 0) {
+        if (errno == EPERM || errno == EACCES) {
+            // No INTERNET permission (e.g. AC Nexus): the runtime APK relays the stream instead.
+            socket_permitted_ = false;
+            log_pose_client("app may not open sockets; using the broker's relayed pose stream");
+            return open_relayed_pose_stream_locked();
+        }
+        return false;
+    }
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(kDefaultBridgePort);
@@ -327,6 +420,20 @@ bool PoseClient::ensure_emulator_connected()
     if (errno == EINPROGRESS) { connecting_ = true; return false; }
     close_socket();
     return false;
+#endif
+}
+
+bool PoseClient::open_relayed_pose_stream_locked()
+{
+#if !defined(__ANDROID__)
+    return false;
+#else
+    socket_ = open_provider_stream_locked(
+        "content://org.khronos.openxr.system_runtime_broker/openxr/1/pose/stream", pose_provider_client_);
+    if (socket_ < 0) { return false; }
+    connecting_ = false;
+    log_pose_client("relayed pose stream opened");
+    return true;
 #endif
 }
 

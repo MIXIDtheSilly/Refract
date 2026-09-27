@@ -2,10 +2,15 @@ package com.refract.openxrruntime;
 
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.net.Socket;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -39,6 +44,52 @@ final class ImageProxy {
         }, "Refract-ImageProxy");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    static void relayFileDescriptor(final ParcelFileDescriptor descriptor) {
+        Thread thread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                forwardFileDescriptor(descriptor);
+            }
+        }, "Refract-ImageFdRelay");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private static void forwardFileDescriptor(ParcelFileDescriptor descriptor) {
+        // Every frame waits on this hop and its acknowledgment, so relay at display priority.
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
+        try (ParcelFileDescriptor app = descriptor; Socket host = new Socket("127.0.0.1", 38491)) {
+            host.setTcpNoDelay(true);
+            Log.i(TAG, "relaying image stream through provider FD to Windows viewer");
+            Thread acknowledgments = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
+                    try {
+                        copy(host.getInputStream(), new FileOutputStream(app.getFileDescriptor()));
+                    } catch (IOException ex) {
+                        Log.i(TAG, "viewer acknowledgment relay ended: " + ex);
+                    } finally {
+                        try { app.close(); } catch (IOException ignored) {}
+                    }
+                }
+            }, "Refract-ImageTcpAck");
+            acknowledgments.setDaemon(true);
+            acknowledgments.start();
+            copy(new FileInputStream(app.getFileDescriptor()), host.getOutputStream());
+        } catch (IOException ex) {
+            Log.i(TAG, "image FD relay ended: " + ex);
+        }
+    }
+
+    private static void copy(InputStream source, OutputStream destination) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        int size;
+        while ((size = source.read(buffer)) != -1) {
+            destination.write(buffer, 0, size);
+        }
     }
 
     private static void serve() {

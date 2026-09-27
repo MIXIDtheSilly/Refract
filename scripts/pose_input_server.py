@@ -11,11 +11,17 @@ Streams v4 Refract pose records (fixed head, two active Touch controllers) on TC
       arrow keys -> right stick
       WASD -> walk (moves the tracked head and hands, like walking in your room;
       Yeeps has no stick locomotion), Shift = faster, Home = back to the start
+      T (hold) -> T-pose: look level, arms straight out to the sides (calibration
+      screens, e.g. AC Nexus's "look ahead and fully extend your arms")
+      C (hold) -> right controller to the centre of the view, `reach` meters out (scroll
+      wheel), to touch things you look at (e.g. AC Nexus's "touch the cube")
   * UDP text commands on 127.0.0.1:38495 for scripting, e.g.
       hold right a 3        (press right A for 3 s)
       hold left trigger 1.5
       stick right 0 1 2     (right stick up for 2 s)
       view <yaw> <pitch> <trigger> <grip> [<reach>]   (viewer mouse state; degrees, 0/1, meters)
+      tpose 3               (hold the T-pose for 3 s)
+      center 3              (right controller at the view centre for 3 s)
 """
 import argparse
 import ctypes
@@ -31,6 +37,7 @@ TRACKED = 15  # Orientation + position valid and tracked.
 PRIMARY, SECONDARY, MENU, STICK_CLICK = 1, 2, 4, 8
 PRIMARY_TOUCH, SECONDARY_TOUCH, TRIGGER_TOUCH, STICK_TOUCH = 16, 32, 64, 128
 DEFAULT_REACH, MIN_REACH, MAX_REACH = 0.4, 0.1, 1.0  # Hand distance in front of the camera, meters.
+TPOSE_HALF_SPAN, TPOSE_DROP = 0.8, -0.22  # T-pose controllers: meters beside and below the eyes.
 
 user32 = ctypes.windll.user32
 
@@ -96,13 +103,13 @@ def gamepad():
 
 
 def walk_keys(focus):
-    """(strafe, forward, fast, reset) from WASD/Shift/Home while the viewer has focus."""
+    """(strafe, forward, fast, reset, tpose, center) from WASD/Shift/Home/T/C while the viewer has focus."""
     if not focus.search(foreground_title()):
-        return 0.0, 0.0, False, False
+        return 0.0, 0.0, False, False, False, False
     down = lambda vk: bool(user32.GetAsyncKeyState(vk) & 0x8000)
     strafe = float(down(ord('D'))) - float(down(ord('A')))
     forward = float(down(ord('W'))) - float(down(ord('S')))
-    return strafe, forward, down(0x10), down(0x24)
+    return strafe, forward, down(0x10), down(0x24), down(ord('T')), down(ord('C'))
 
 
 def foreground_title():
@@ -142,6 +149,7 @@ class Scripted:
         self.yaw = self.pitch = 0.0
         self.reach = DEFAULT_REACH
         self.mouse_trigger = self.mouse_grip = 0.0
+        self.tpose_until = self.center_until = 0.0
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('127.0.0.1', port))
         threading.Thread(target=self.listen, args=(sock,), daemon=True).start()
@@ -160,6 +168,16 @@ class Scripted:
                     self.mouse_trigger, self.mouse_grip = trigger, grip
                     if reach:
                         self.reach = max(MIN_REACH, min(MAX_REACH, reach[0]))
+                continue
+            if words[:1] in (['tpose'], ['center']) and len(words) == 2:
+                try:
+                    until = time.monotonic() + float(words[1])
+                except ValueError:
+                    continue
+                print(f'command {" ".join(words)}', flush=True)
+                with self.lock:
+                    if words[0] == 'tpose': self.tpose_until = until
+                    else: self.center_until = until
                 continue
             try:
                 command, hand = words[0], ('left', 'right').index(words[1])
@@ -195,6 +213,14 @@ class Scripted:
         with self.lock:
             return self.yaw, self.pitch, self.reach
 
+    def tpose(self):
+        with self.lock:
+            return time.monotonic() < self.tpose_until
+
+    def center(self):
+        with self.lock:
+            return time.monotonic() < self.center_until
+
 
 def rotate(q, v):
     """Rotate vector v by unit quaternion q (x, y, z, w)."""
@@ -213,15 +239,21 @@ def look_rotation(yaw_deg, pitch_deg):
 
 
 def record(sequence, t, hands, yaw=0.0, pitch=0.0, reach=DEFAULT_REACH, offset=(0.0, 0.0), eye_size=(1024, 1024),
-           refresh_rate=90.0):
+           refresh_rate=90.0, tpose=False, center=False):
     head_pos = (offset[0] + math.sin(t) * 0.02, 1.65, offset[1] - 0.05)
-    rotation = look_rotation(yaw, pitch)
+    rotation = look_rotation(yaw, 0.0 if tpose else pitch)  # T-pose: look straight ahead.
     head = (*head_pos, *rotation)
 
     def hand_pose(side, bob):
+        if tpose:
+            # Arms straight out to the sides at shoulder height, controllers pointing forward
+            # (about 1.6 m between the controllers, like a 1.75 m adult's arm span).
+            dx, dy, dz = rotate(rotation, (TPOSE_HALF_SPAN * side, TPOSE_DROP, 0.0))
+            return (head_pos[0] + dx, head_pos[1] + dy, head_pos[2] + dz, *rotation)
         # Hands are fixed in the camera's frame (they turn and tilt with it), `reach` meters
-        # in front, and aim where the camera looks.
-        dx, dy, dz = rotate(rotation, (0.22 * side, -0.28 + bob, -reach))
+        # in front, and aim where the camera looks. `center` puts the right one on the view axis.
+        local = (0.0, 0.0, -reach) if center and side > 0 else (0.22 * side, -0.28 + bob, -reach)
+        dx, dy, dz = rotate(rotation, local)
         return (head_pos[0] + dx, head_pos[1] + dy, head_pos[2] + dz, *rotation)
 
     left_pose = hand_pose(-1, math.sin(t * 2) * 0.02)
@@ -285,7 +317,9 @@ def main():
                     now = time.monotonic()
                     dt, last = min(now - last, 0.1), now
                     yaw, pitch, reach = scripted.view()
-                    strafe, forward, fast, reset = walk_keys(focus)
+                    strafe, forward, fast, reset, tpose_key, center_key = walk_keys(focus)
+                    tpose = tpose_key or scripted.tpose()
+                    center = center_key or scripted.center()
                     if reset:
                         position = [0.0, 0.0]
                     if strafe or forward:
@@ -295,7 +329,7 @@ def main():
                         position[0] += (strafe * math.cos(r) - forward * math.sin(r)) * step
                         position[1] += (-strafe * math.sin(r) - forward * math.cos(r)) * step
                     client.sendall(record(sequence, sequence / 90.0, hands, yaw, pitch, reach, position,
-                                                (args.eye_width, args.eye_height), args.refresh_rate))
+                                                (args.eye_width, args.eye_height), args.refresh_rate, tpose, center))
                     sequence += 1
                     time.sleep(1.0 / args.refresh_rate)
             except OSError as error:
