@@ -162,7 +162,7 @@ select.field-input option { background: var(--panel); }
 .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 /* Games without artwork: black with the logo in white. */
 .cover-art { position: absolute; inset: 0; background: #000; }
-.cover-art .ring { position: absolute; right: -12%; top: -30%; width: 75%; color: #fff; }
+.cover-art .ring { position: absolute; right: -20%; top: -30%; width: 75%; color: #fff; }
 
 /* Empty state */
 .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 90px 20px; color: var(--muted); }
