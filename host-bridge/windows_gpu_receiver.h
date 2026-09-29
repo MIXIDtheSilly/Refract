@@ -1,12 +1,78 @@
 #pragma once
 #if defined(_WIN32)
-#include <d3d11_1.h>
+#include <d3d11_4.h>
+#include <cstdio>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <chrono>
 #include "windows_gpu_frame.h"
 
 namespace refract::host {
+// Waits for copies submitted on one immediate context. A D3D11 fence lets the thread sleep until
+// the GPU is done; the event query it replaces was polled with SwitchToThread, keeping a host core
+// busy that the emulator's vCPUs could use. Without ID3D11Device5 the reused query is still polled.
+class CopyCompletion {
+public:
+    CopyCompletion() = default;
+    CopyCompletion(const CopyCompletion&) = delete;
+    CopyCompletion& operator=(const CopyCompletion&) = delete;
+    ~CopyCompletion() { if (event_) CloseHandle(event_); }
+    bool wait(ID3D11Device* device, ID3D11DeviceContext* context) {
+        if (device != device_.Get() || context != context_.Get()) bind(device, context);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        if (fence_ && SUCCEEDED(context4_->Signal(fence_.Get(), ++value_))) {
+            context->Flush();
+            // The auto-reset event can carry a stale wakeup from an earlier timed-out wait,
+            // so the fence value decides, not the wakeup.
+            for (;;) {
+                const uint64_t completed = fence_->GetCompletedValue();
+                if (completed == UINT64_MAX) return false;  // Device removed.
+                if (completed >= value_) return true;
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now()).count();
+                if (left <= 0 || FAILED(fence_->SetEventOnCompletion(value_, event_))) return false;
+                WaitForSingleObject(event_, static_cast<DWORD>(left));
+            }
+        }
+        D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
+        if (!query_ && FAILED(device->CreateQuery(&desc, &query_))) return false;
+        context->End(query_.Get()); context->Flush();
+        HRESULT result;
+        while ((result = context->GetData(query_.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE) {
+            if (std::chrono::steady_clock::now() > deadline) { query_.Reset(); return false; }
+            SwitchToThread();
+        }
+        return SUCCEEDED(result);
+    }
+private:
+    void bind(ID3D11Device* device, ID3D11DeviceContext* context) {
+        device_ = device; context_ = context;
+        query_.Reset(); fence_.Reset(); context4_.Reset(); value_ = 0;
+        Microsoft::WRL::ComPtr<ID3D11Device5> device5;
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device5))) &&
+            SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&context4_))) &&
+            SUCCEEDED(device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_))) &&
+            (event_ || (event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr)))) {
+            report("fence event");
+            return;
+        }
+        fence_.Reset(); context4_.Reset();
+        report("polled query (no D3D11 fence)");
+    }
+    // Once per method: every mixed-layer part has its own receiver.
+    static void report(const char* method) {
+        static const char* reported = nullptr;
+        if (reported != method) std::fprintf(stderr, "Refract GPU receiver: copy completion via %s\n", reported = method);
+    }
+    Microsoft::WRL::ComPtr<ID3D11Device> device_;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> context4_;
+    Microsoft::WRL::ComPtr<ID3D11Fence> fence_;
+    Microsoft::WRL::ComPtr<ID3D11Query> query_;
+    HANDLE event_ = nullptr;
+    uint64_t value_ = 0;
+};
+
 class WindowsGpuReceiver {
 public:
     ~WindowsGpuReceiver() { if (cacheHandle_) CloseHandle(cacheHandle_); }
@@ -44,7 +110,7 @@ public:
             session_ = frame.session; width_ = width; height_ = height;
         }
         for (UINT eye = 0; eye < 2; ++eye) context->CopySubresourceRegion(cached_.Get(), eye, 0, 0, 0, shared_[eye].Get(), 0, nullptr);
-        if (!wait_copy(device, context, receiveCompletion_)) return false;
+        if (!receiveCompletion_.wait(device, context)) return false;
         sequence_ = sequence; return true;
     }
     bool copy_to(ID3D11DeviceContext* context, ID3D11Texture2D* destination, UINT firstSlice = 0, UINT sliceCount = 2) {
@@ -60,30 +126,14 @@ public:
         for (UINT eye = 0; eye < sliceCount; ++eye) context->CopySubresourceRegion(destination, firstSlice + eye, 0, 0, 0, renderCache_.Get(), eye, nullptr);
         // The caller holds the cache mutex until this cross-device read is
         // finished. The receiver may then safely overwrite the shared cache.
-        return wait_copy(device.Get(), context, renderCompletion_);
+        return renderCompletion_.wait(device.Get(), context);
     }
 private:
-    static bool wait_copy(ID3D11Device* device, ID3D11DeviceContext* context,
-                          Microsoft::WRL::ComPtr<ID3D11Query>& completion) {
-        Microsoft::WRL::ComPtr<ID3D11Device> queryDevice;
-        if (completion) completion->GetDevice(&queryDevice);
-        if (queryDevice.Get() != device) completion.Reset();
-        D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
-        if (!completion && FAILED(device->CreateQuery(&desc, &completion))) return false;
-        context->End(completion.Get()); context->Flush();
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-        HRESULT result;
-        while ((result = context->GetData(completion.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE) {
-            if (std::chrono::steady_clock::now() > deadline) { completion.Reset(); return false; }
-            SwitchToThread();
-        }
-        return SUCCEEDED(result);
-    }
     uint64_t session_ = 0, sequence_ = UINT64_MAX;
     UINT width_ = 0, height_ = 0;
     HANDLE cacheHandle_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_[2], cached_, renderCache_;
-    Microsoft::WRL::ComPtr<ID3D11Query> receiveCompletion_, renderCompletion_;
+    CopyCompletion receiveCompletion_, renderCompletion_;
 };
 }
 #endif
