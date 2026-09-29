@@ -17,6 +17,7 @@
 # -InstallPlatform installs Refract's Meta Platform SDK stand-in (package com.oculus.horizon, built by
 # Refract\platform-sdk\build_apk.ps1), which unmodified Quest APKs load instead of Horizon OS. A game is reported
 # as entitled only if its package is listed in owned_games.txt; -PlatformVerbose logs every ovr_* call.
+# platform_user_id.txt (optional) sets the Meta user id games see.
 # -TranslatorMode sets the ARM translator's (libndk_translation) berberis.mode until the next reboot; the default
 # two-gear measured fastest. Translator flags are ro.berberis.flags in /system/build.prop (reboot to apply).
 $ErrorActionPreference = 'Stop'
@@ -51,6 +52,11 @@ if (Test-Path $owned) {
     foreach ($game in Get-Content $owned | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }) {
         & $adb -s $Serial shell setprop "debug.refract.platform.owned.$game" 1
     }
+}
+$userIdFile = Join-Path $PSScriptRoot 'platform_user_id.txt'
+if (Test-Path $userIdFile) {
+    $userId = Get-Content $userIdFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') } | Select-Object -First 1
+    if ($userId) { & $adb -s $Serial shell setprop debug.refract.platform.user_id $userId }
 }
 & $adb -s $Serial shell setprop debug.refract.platform.verbose $(if ($PlatformVerbose) { '1' } else { '0' })
 & $adb -s $Serial shell setprop debug.refract.runtime_name Oculus

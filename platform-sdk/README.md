@@ -28,7 +28,7 @@ This APK is `com.oculus.horizon`. Its `EntryPoint` loads `librefract_ovrplatform
 | Property | Default |
 | --- | --- |
 | `owned.<package>` | unset. Only `1` makes the entitlement check succeed. `scripts/launch.ps1` sets it for each package in `scripts/owned_games.txt`. |
-| `user_id` | derived from the device's ANDROID_ID |
+| `user_id` | derived from the device's ANDROID_ID. `scripts/launch.ps1` sets it from `scripts/platform_user_id.txt` if that file exists. |
 | `user_name` / `display_name` | `Refract` |
 | `access_token` | `Refract<user id>` |
 | `verbose` | `0`. `1` logs every resolved name and message (`launch.ps1 -PlatformVerbose`). |

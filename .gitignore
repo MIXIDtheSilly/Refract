@@ -60,6 +60,7 @@ launcher/dist/
 # Local run output and machine-specific files
 /runs/
 /scripts/owned_games.txt
+/scripts/platform_user_id.txt
 /scripts/stubs/
 /tools/translator/backups/
 /tools/probes/**/*.exe
