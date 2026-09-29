@@ -1,15 +1,52 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ExternalLink, Loader2, Plus, RefreshCw, Search, Settings as SettingsIcon, X } from 'lucide-react';
+import { CircleAlert, Download, LayoutGrid, LoaderCircle, Settings as SettingsIcon, Square, Store as StoreIcon, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
-import { activeStatuses, call, Empty, GameGrid, IconButton } from './common';
+import { activeStatuses, call, Cover, Empty } from './common';
+import { Wordmark } from './logo';
+import { Library } from './library';
+import { Store } from './store';
 import { Settings } from './settings';
 import { Downloads } from './downloads';
 import { GameDetails } from './game-details';
 import './style.css';
+
+function NavItem({ id, label, icon: Icon, page, setPage, badge }) {
+  const current = page === id;
+  return <button data-nav={id} aria-current={current ? 'page' : undefined} onClick={() => setPage(id)}
+    className={cn('flex h-10 w-full items-center gap-3 rounded-full px-4 text-[14px] text-foreground/70 transition-colors hover:bg-white/[0.06] hover:text-foreground',
+      current && 'bg-white/[0.1] font-medium text-foreground hover:bg-white/[0.1]')}>
+    <Icon className="size-[18px]" strokeWidth={current ? 2.1 : 1.8} />{label}
+    {badge > 0 && <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-white px-1.5 text-[11px] font-semibold text-[#1c1c1c]">{badge}</span>}
+  </button>;
+}
+
+function Sidebar({ state, page, setPage, run, pending, notify, onOpen }) {
+  const activeDownloads = state?.jobs.filter(j => activeStatuses.includes(j.status)).length || 0;
+  const playing = state?.games.find(g => g.id === state.running);
+  return <aside className="flex w-60 shrink-0 flex-col gap-1 bg-sidebar px-3 pt-2 pb-3">
+    <nav aria-label="Main navigation" className="space-y-1">
+      <NavItem id="library" label="Library" icon={LayoutGrid} page={page} setPage={setPage} />
+      <NavItem id="store" label="Store" icon={StoreIcon} page={page} setPage={setPage} />
+      <NavItem id="downloads" label="Downloads" icon={Download} page={page} setPage={setPage} badge={activeDownloads} />
+    </nav>
+    <div className="flex-1" />
+    {playing && <div className="fade-up mb-2 rounded-2xl bg-white/[0.05] p-3 ring-1 ring-white/[0.06]">
+      <button className="flex w-full min-w-0 items-center gap-3 text-left" onClick={() => onOpen(playing.id)}>
+        <Cover game={playing} className="w-12 shrink-0 rounded-lg [&_span]:text-sm" />
+        <span className="min-w-0"><span className="flex items-center gap-1.5 text-[11px] font-medium tracking-[0.12em] text-white/55 uppercase"><span className="size-1.5 animate-pulse rounded-full bg-white" />Playing</span>
+          <span className="mt-0.5 block truncate font-medium">{playing.name}</span></span>
+      </button>
+      <Button size="sm" variant="outline" className="mt-3 w-full" disabled={pending.has(`game-${playing.id}`)} onClick={() => run(`game-${playing.id}`, async () => { await call('stop'); notify('Closing game'); })}><Square className="size-3 fill-current" />Stop game</Button>
+    </div>}
+    {state && (state.signedIn
+      ? <div className="mb-1 flex items-center gap-3 px-3 py-2"><span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white/[0.1] font-display text-[13px]">{(state.account || 'M')[0].toUpperCase()}</span>
+          <span className="min-w-0"><span className="block truncate text-[13px]">{state.account || 'Meta account'}</span><span className="block text-xs text-muted-foreground">Meta connected</span></span></div>
+      : <Button className="mb-2 w-full" disabled={pending.has('account')} onClick={() => run('account', () => call('login'))}>{pending.has('account') ? <><LoaderCircle className="animate-spin" />Connecting…</> : 'Connect Meta'}</Button>)}
+    <NavItem id="settings" label="Settings" icon={SettingsIcon} page={page} setPage={setPage} />
+  </aside>;
+}
 
 function App() {
   const [state, setState] = useState(null);
@@ -24,6 +61,7 @@ function App() {
   const pendingRef = useRef(new Set());
   const [notice, setNotice] = useState(null);
   const timer = useRef(null);
+  const content = useRef(null);
   const notify = useCallback((text, error = false) => {
     clearTimeout(timer.current); setNotice({ text, error });
     if (!error) timer.current = setTimeout(() => setNotice(null), 4000);
@@ -41,6 +79,7 @@ function App() {
     call('state').then(value => { if (active) setState(value); }).catch(error => notify(error.message, true));
     return () => { active = false; off(); offError(); clearTimeout(timer.current); };
   }, [notify]);
+  useEffect(() => { content.current?.scrollTo(0, 0); }, [page]);
   const refresh = () => run('sync', async () => {
     const info = await call('sync');
     if (info.meta?.partial) notify('Meta returned a partial library. Add other games from the store.');
@@ -50,28 +89,31 @@ function App() {
     run('search', async () => { const games = await call('search', text); setResults(games); setSearched(true); });
   };
   const game = state?.games.find(g => g.id === selected) || results.find(g => g.id === selected);
-  const games = state?.games.filter(g => (filter === 'all' || Boolean(g[filter])) && g.name.toLowerCase().includes(libraryQuery.toLowerCase())) || [];
-  const activeDownloads = state?.jobs.filter(j => activeStatuses.includes(j.status)).length || 0;
-  return <>
-    <header className="flex h-16 items-center gap-8 border-b px-8">
-      <button onClick={() => setPage('library')} aria-label="Refract library" className="text-base font-semibold tracking-wide">Refract</button>
-      <nav aria-label="Main navigation" className="flex h-full items-center gap-6">{[['library', 'Library'], ['store', 'Store'], ['downloads', 'Downloads']].map(([id, label]) => <button key={id} data-nav={id} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)} className={cn('relative flex h-full items-center gap-2 text-sm text-muted-foreground hover:text-foreground', page === id && 'text-foreground after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:bg-foreground')}>{label}{id === 'downloads' && activeDownloads > 0 && <span className="rounded bg-secondary px-1.5 text-xs">{activeDownloads}</span>}</button>)}</nav>
-      <div className="ml-auto flex items-center gap-2">{state && !state.signedIn && <Button variant="ghost" disabled={pending.has('account')} onClick={() => run('account', () => call('login'))}>{pending.has('account') ? 'Connecting…' : 'Connect Meta'}</Button>}<IconButton label="Settings" data-nav="settings" aria-pressed={page === 'settings'} onClick={() => setPage('settings')}><SettingsIcon /></IconButton></div>
-    </header>
-    <main id="content" className="mx-auto max-w-[1600px] p-8" aria-label={page}>
-      {!state ? <Empty><Button variant="ghost" onClick={() => run('state', async () => setState(await call('state')))}>Load library</Button></Empty> : <>
-        {page === 'library' && <><div className="mb-7 flex items-center gap-3"><div className="relative w-64"><Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground" /><Input id="library-search" type="search" placeholder="Search library" aria-label="Search library" className="pl-9" value={libraryQuery} onChange={e => setLibraryQuery(e.target.value)} /></div>
-          <Select value={filter} onValueChange={setFilter}><SelectTrigger aria-label="Filter library" className="w-36"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All games</SelectItem><SelectItem value="installed">Installed</SelectItem><SelectItem value="downloaded">Downloaded</SelectItem></SelectContent></Select>
-          <div className="flex-1" /><IconButton label="Refresh library" disabled={pending.has('sync')} onClick={refresh}><RefreshCw className={pending.has('sync') ? 'animate-spin' : ''} /></IconButton><Button variant="outline" disabled={state.busy || pending.has('import')} onClick={() => run('import', () => call('import'))}><Plus />Import APK</Button>
-        </div>{games.length ? <GameGrid games={games} onOpen={setSelected} /> : <Empty>{state.games.length ? 'No matching games' : 'No games yet'}</Empty>}</>}
-        {page === 'store' && <><form id="store-search" onSubmit={search} className="mb-7 flex items-center gap-3"><div className="relative w-full max-w-md"><Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground" /><Input id="store-query" type="search" aria-label="Search Quest store" placeholder="Search Quest games" className="pl-9" value={query} onChange={e => setQuery(e.target.value)} required minLength={2} /></div><Button disabled={pending.has('search')} type="submit">{pending.has('search') ? <Loader2 className="animate-spin" aria-label="Searching" /> : 'Search'}</Button><div className="flex-1" /><IconButton label="Open Meta store" onClick={() => run('store', () => call('openStore'))}><ExternalLink /></IconButton></form>{results.length ? <GameGrid games={results} onOpen={setSelected} store /> : searched && !pending.has('search') ? <Empty>No games found</Empty> : null}</>}
-        {page === 'downloads' && <Downloads jobs={state.jobs} run={run} pending={pending} />}
-        {page === 'settings' && <Settings state={state} run={run} pending={pending} notify={notify} />}
-      </>}
-    </main>
-    {notice && <div role={notice.error ? 'alert' : 'status'} className={cn('fixed right-6 bottom-6 z-[100] flex max-w-lg items-start gap-4 rounded-md border bg-popover px-4 py-3 shadow-lg', notice.error && 'text-destructive')}><span className="min-w-0 break-words">{notice.text}</span><button aria-label="Dismiss notification" onClick={() => setNotice(null)} className="mt-0.5 shrink-0"><X className="size-4" /></button></div>}
+  return <div className="flex h-full flex-col">
+    <div className="drag flex h-[var(--titlebar-height)] shrink-0 items-center bg-sidebar pr-[150px] pl-5">
+      <button onClick={() => setPage('library')} aria-label="Refract library" className="no-drag rounded-md text-[17px] text-foreground"><Wordmark /></button>
+      {state?.busy && <span className="ml-5 flex items-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-3.5 animate-spin" />Working…</span>}
+    </div>
+    <div className="flex min-h-0 flex-1">
+      <Sidebar state={state} page={page} setPage={setPage} run={run} pending={pending} notify={notify} onOpen={setSelected} />
+      <main ref={content} id="content" aria-label={page} className="min-w-0 flex-1 overflow-y-auto rounded-tl-2xl bg-background">
+        <div className="mx-auto max-w-[1480px] px-9 pt-8 pb-12">
+          {!state ? <Empty action={<Button variant="outline" onClick={() => run('state', async () => setState(await call('state')))}>Load library</Button>}>Loading library…</Empty> : <>
+            {page === 'library' && <Library state={state} run={run} pending={pending} notify={notify} filter={filter} setFilter={setFilter} query={libraryQuery} setQuery={setLibraryQuery} onOpen={setSelected} refresh={refresh} />}
+            {page === 'store' && <Store query={query} setQuery={setQuery} results={results} searched={searched} onSearch={search} pending={pending} run={run} onOpen={setSelected} running={state.running} />}
+            {page === 'downloads' && <Downloads jobs={state.jobs} games={state.games} run={run} pending={pending} />}
+            {page === 'settings' && <Settings state={state} run={run} pending={pending} notify={notify} />}
+          </>}
+        </div>
+      </main>
+    </div>
+    {notice && <div role={notice.error ? 'alert' : 'status'} className="fade-up fixed right-6 bottom-6 z-[100] flex max-w-md items-start gap-3 rounded-xl border border-white/10 bg-[#3a3a3a] py-3 pr-3 pl-4 shadow-[0_12px_32px_rgb(0_0_0/0.45)]">
+      {notice.error && <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />}
+      <span className="min-w-0 break-words">{notice.text}</span>
+      <button aria-label="Dismiss notification" onClick={() => setNotice(null)} className="shrink-0 rounded-full p-0.5 text-muted-foreground hover:text-foreground"><X className="size-4" /></button>
+    </div>}
     {game && state && <GameDetails key={game.id} game={game} state={state} local={state.games.some(g => g.id === game.id)} onClose={() => setSelected(null)} run={run} pending={pending} setPage={setPage} notify={notify} />}
-  </>;
+  </div>;
 }
 
 createRoot(document.getElementById('root')).render(<App />);

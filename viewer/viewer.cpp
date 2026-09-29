@@ -12,6 +12,7 @@
 #include "android_stats.h"
 #include "h264_decoder.h"
 #include "image_transport.h"
+#include "loading_screen.h"
 #include "perf_stats.h"
 #include "windows_gpu_frame.h"
 
@@ -585,6 +586,16 @@ struct App {
 
 App g_app;
 
+// Shown until the game's first image arrives; the same card as the host bridge's (host-bridge/loading_screen.h).
+struct Loading {
+    refract::host::LoadingScreen screen;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> view;
+    Clock::time_point start{};
+    bool started = false, uploaded = false;  // uploaded: the texture holds the whole card at full brightness.
+};
+Loading g_loading;
+
 bool compile(const char* entry, const char* profile, ComPtr<ID3DBlob>& blob, const char* source = kShader)
 {
     ComPtr<ID3DBlob> errors;
@@ -974,6 +985,62 @@ void draw_composite(const Slot& slot, const Composite& composite, UINT eye)
     g_context->PSSetConstantBuffers(0, 1, g_app.params.GetAddressOf());
 }
 
+// Draws the loading card letterboxed in the window. It is drawn at the size shown (up to 1920 wide),
+// so it stays sharp; its edges are black like the background around it.
+void draw_loading()
+{
+    if (g_app.width < 64 || g_app.height < 64) return;
+    const auto now = Clock::now();
+    if (!g_loading.started) {
+        g_loading.started = true;
+        g_loading.start = now;
+    }
+    const auto viewport = fit(0, 0, float(g_app.width), float(g_app.height), 1.6f);
+    const float scale = std::min(1.0f, 1920.0f / viewport.Width);
+    const UINT width = UINT(viewport.Width * scale), height = UINT(viewport.Height * scale);
+    auto& screen = g_loading.screen;
+    if (!screen.prepared() || screen.width() != width || screen.height() != height) {
+        screen.prepare(width, height);
+        g_loading.texture.Reset();
+        g_loading.view.Reset();
+        g_loading.uploaded = false;
+        const D3D11_TEXTURE2D_DESC desc{width, height, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
+        D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+        viewDesc.Format = desc.Format;
+        viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;  // The scene shader samples an array.
+        viewDesc.Texture2DArray.MipLevels = 1;
+        viewDesc.Texture2DArray.ArraySize = 1;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &g_loading.texture)) ||
+            FAILED(g_device->CreateShaderResourceView(g_loading.texture.Get(), &viewDesc, &g_loading.view))) {
+            g_loading.texture.Reset();
+            g_loading.view.Reset();
+        }
+    }
+    if (!g_loading.view) return;
+    screen.animate(std::chrono::duration<double>(now - g_loading.start).count());
+    // The whole card once (and while it fades in); after that only the bar moves.
+    const auto bar = screen.bar_rect();
+    const D3D11_BOX box = screen.fading() || !g_loading.uploaded ? D3D11_BOX{0, 0, 0, screen.width(), screen.height(), 1}
+                                                                 : D3D11_BOX{bar.left, bar.top, 0, bar.right, bar.bottom, 1};
+    g_context->UpdateSubresource(g_loading.texture.Get(), 0, &box,
+        screen.pixels() + size_t(box.top) * screen.stride() + box.left * 4, screen.stride(), 0);
+    g_loading.uploaded = !screen.fading();
+
+    g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_context->IASetInputLayout(nullptr);
+    g_context->VSSetShader(g_app.vs.Get(), nullptr, 0);
+    g_context->PSSetShader(g_app.ps.Get(), nullptr, 0);
+    g_context->PSSetShaderResources(0, 1, g_loading.view.GetAddressOf());
+    g_context->PSSetSamplers(0, 1, g_app.sampler.GetAddressOf());
+    g_context->PSSetConstantBuffers(0, 1, g_app.params.GetAddressOf());
+    const float params[4] = {0, 0, 1, 1};
+    g_context->UpdateSubresource(g_app.params.Get(), 0, nullptr, params, 0, 0);
+    g_context->RSSetViewports(1, &viewport);
+    g_context->Draw(3, 0);
+    ID3D11ShaderResourceView* none = nullptr;
+    g_context->PSSetShaderResources(0, 1, &none);
+}
+
 void render()
 {
     std::lock_guard lock(g_shared.mutex);  // Direct2D shares the D3D context with the receive thread.
@@ -992,10 +1059,14 @@ void render()
         entry.drawLock->ReleaseSync(0);
         handoff.pending = false;
     }
-    const float background[4] = {0.05f, 0.05f, 0.06f, 1};
+    const bool loading = !g_shared.scene.valid && !g_shared.panels.valid;
+    const float background[4] = {0.05f, 0.05f, 0.06f, 1}, black[4] = {0, 0, 0, 1};
     g_context->OMSetRenderTargets(1, g_app.target.GetAddressOf(), nullptr);
-    g_context->ClearRenderTargetView(g_app.target.Get(), background);
-    {
+    g_context->ClearRenderTargetView(g_app.target.Get(), loading ? black : background);
+    if (loading) {
+        draw_loading();
+        g_app.saveRequested = false;
+    } else {
         const bool sceneStale = !g_shared.scene.valid || Clock::now() - g_shared.scene.at > std::chrono::seconds(1);
         const Slot& slot = (g_shared.wantPanels || sceneStale) && g_shared.panels.valid ? g_shared.panels : g_shared.scene;
         if (slot.valid) {
@@ -1030,7 +1101,8 @@ void render()
         g_app.saveRequested = false;
         draw_overlay(slot);
     }
-    g_app.swapchain->Present(0, 0);
+    // The loading animation is paced by the display; game frames are shown as soon as they arrive.
+    g_app.swapchain->Present(loading ? 1 : 0, 0);
 }
 
 // Borderless fullscreen on the window's monitor; a second call restores the window.
@@ -1185,11 +1257,13 @@ int main(int argc, char** argv)
         }
 
         uint64_t updates;
+        bool loading;
         {
             std::lock_guard lock(g_shared.mutex);
             updates = g_shared.updates;
+            loading = !g_shared.scene.valid && !g_shared.panels.valid;
         }
-        if (bufferFree && (updates != shownUpdates || g_app.resized || g_app.saveRequested)) {
+        if (bufferFree && (updates != shownUpdates || loading || g_app.resized || g_app.saveRequested)) {
             render();
             bufferFree = false;
             shownUpdates = updates;

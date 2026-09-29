@@ -1,6 +1,8 @@
 #include "pose_stream_decoder.h"
 #include "controller_input.h"
+#include "space_velocity.h"
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -28,6 +30,7 @@ int main()
         frames[i].hands[1].joints[25] = {15, {0.1f, 0.2f, 0.3f}, 0.007f};
         frames[i].grip_flags[0] = 15; frames[i].aim_flags[1] = 3; frames[i].aim_active[1] = 1;
         frames[i].controllers[1] = {1, PrimaryClick, 0.75f, 0.5f, -0.2f, 0.3f};
+        frames[i].grip_velocity[1] = {3, {1.5f, 0, 0}, {0, 2.0f, 0}};
     }
     // Every possible split of a TCP record must preserve the incomplete tail,
     // then drain coalesced records through to the newest pose.
@@ -44,7 +47,9 @@ int main()
             latest.hands[1].source != 2 || latest.hands[1].joints[25].flags != 15 ||
             latest.hands[1].joints[25].radius != 0.007f || latest.hands[1].joints[25].pose.z != 0.3f ||
             latest.grip_flags[0] != 15 || latest.aim_flags[1] != 3 || latest.aim_active[1] != 1 ||
-            latest.controllers[1].buttons != PrimaryClick || latest.controllers[1].trigger != 0.75f) { return EXIT_FAILURE; }
+            latest.controllers[1].buttons != PrimaryClick || latest.controllers[1].trigger != 0.75f ||
+            latest.grip_velocity[1].flags != 3 || latest.grip_velocity[1].linear.x != 1.5f ||
+            latest.grip_velocity[1].angular.y != 2.0f) { return EXIT_FAILURE; }
     }
     PoseStreamDecoder decoder;
     PoseFrame latest{};
@@ -67,16 +72,40 @@ int main()
     legacy.version = 2;
     if (!decoder.append(&legacy, 160, latest) || latest.version != 2 || latest.controllers[1].active != 1 ||
         latest.aim_active[1] != 0 || !decoder.append(&frames[2], sizeof(PoseFrame), latest) ||
-        latest.version != 5 || latest.aim[0].x != 22.0f) return EXIT_FAILURE;
+        latest.version != kPoseFrameVersion || latest.aim[0].x != 22.0f) return EXIT_FAILURE;
     decoder.reset();
     legacy.version = 3;
     if (!decoder.append(&legacy, 2360, latest) || latest.version != 3 || latest.render_width || latest.render_height ||
         latest.display_period_ns != 13'888'889 || !decoder.append(&frames[2], sizeof(PoseFrame), latest) ||
-        latest.render_width != 2880 || latest.version != 5) return EXIT_FAILURE;
+        latest.render_width != 2880 || latest.version != kPoseFrameVersion) return EXIT_FAILURE;
     decoder.reset(); legacy.version = 4;
     if (!decoder.append(&legacy, 2368, latest) || latest.version != 4 || latest.local_origin_flags || latest.hmd_flags ||
         latest.local_origin.y != 0 || !decoder.append(&frames[2], sizeof(PoseFrame), latest) ||
-        latest.version != 5 || latest.local_origin.y != 1.6f) return EXIT_FAILURE;
+        latest.version != kPoseFrameVersion || latest.local_origin.y != 1.6f) return EXIT_FAILURE;
+    decoder.reset(); legacy.version = 5;  // v5 hosts: 2408 bytes, no velocities.
+    if (!decoder.append(&legacy, 2408, latest) || latest.version != 5 || latest.local_origin.y != 1.6f ||
+        !decoder.append(&frames[2], sizeof(PoseFrame), latest) || latest.version != kPoseFrameVersion ||
+        latest.grip_velocity[1].linear.x != 1.5f) return EXIT_FAILURE;
+
+    auto same = [](Vector3 a, Vector3 b) {
+        return std::fabs(a.x - b.x) < 1e-5f && std::fabs(a.y - b.y) < 1e-5f && std::fabs(a.z - b.z) < 1e-5f;
+    };
+    // A point 1 m along +x from a controller spinning at 2 rad/s about +y moves at 2 m/s along -z.
+    SpaceVelocity spin{3, {}, {0, 2.0f, 0}};
+    if (!same(offset_velocity(spin, {1, 0, 0}).linear, {0, 0, -2.0f})) return EXIT_FAILURE;
+    // Without angular velocity an offset point's linear velocity is unknown.
+    if (offset_velocity({1, {1, 0, 0}, {}}, {1, 0, 0}).flags != 0) return EXIT_FAILURE;
+    // Base turned 90 degrees about +y (its +x points along world -z): world +x motion is base +z motion...
+    const float h = std::sqrt(0.5f);
+    const Pose base{0, 0, 0, 0, h, 0, h}, still{};
+    SpaceVelocity moving{3, {1, 0, 0}, {}}, fixed{3, {}, {}};
+    if (!same(relative_velocity(moving, fixed, still, base).linear, {0, 0, 1})) return EXIT_FAILURE;
+    // ...and a still space 1 m in front of a base spinning about +y sweeps past it, seen from the base.
+    SpaceVelocity turning{3, {}, {0, 1.0f, 0}};
+    const auto seen = relative_velocity(fixed, turning, Pose{0, 0, -1, 0, 0, 0, 1}, still);
+    if (seen.flags != 3 || !same(seen.linear, {1, 0, 0}) || !same(seen.angular, {0, -1, 0})) return EXIT_FAILURE;
+    // Nonfinite input is dropped, not passed on.
+    if (clean_velocity({3, {NAN, 0, 0}, {}}).flags != 2) return EXIT_FAILURE;
     if (valid_render_extent(0, 3200) || valid_render_extent(8193, 3200) ||
         !valid_render_extent(2880, 3200)) return EXIT_FAILURE;
     return EXIT_SUCCESS;

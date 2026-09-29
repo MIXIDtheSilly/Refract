@@ -158,7 +158,9 @@ state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/
   memoryMB: 8192, downloadDir: path.join(app.getPath('downloads'), 'Refract'), ovrportCli: '', ...state.data.settings };
 runtime = new Runtime(root, state.data.settings);
 try { if (safeStorage.isEncryptionAvailable()) token = safeStorage.decryptString(await fs.readFile(path.join(state.directory, 'meta-session.bin'))); } catch {}
-window = new BrowserWindow({ width: 1320, height: 880, minWidth: 920, minHeight: 640, title: 'Refract', backgroundColor: '#141414',
+// The renderer draws the title bar; Windows overlays its caption buttons on the right.
+window = new BrowserWindow({ width: 1320, height: 880, minWidth: 920, minHeight: 640, title: 'Refract', backgroundColor: '#232323',
+  icon: path.join(root, 'img/Refract_logo.png'), titleBarStyle: 'hidden', titleBarOverlay: { color: '#232323', symbolColor: '#f5f5f5', height: 40 },
   autoHideMenuBar: true, webPreferences: { preload: path.join(directory, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false } });
 window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 window.webContents.on('will-navigate', event => event.preventDefault());

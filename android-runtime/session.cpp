@@ -3,6 +3,7 @@
 #include "image_frame.h"
 #include "openxr_dispatch/openxr_minimal.h"
 #include "pose_client.h"
+#include "space_velocity.h"
 #include "video_encoder.h"
 #include "perf_stats.h"
 #include "vulkan_backend.h"
@@ -492,6 +493,37 @@ XrPosef world_pose_for_space(const SpaceRecord& record, const refract::protocol:
         break;
     }
     return multiply_pose(base, record.offsetInParent);
+}
+
+refract::protocol::Pose xr_pose_to_protocol(const XrPosef& p)
+{
+    return {p.position.x, p.position.y, p.position.z, p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w};
+}
+
+// The space's velocity in the tracking world (v6 frames). Reference spaces are fixed in that world;
+// an offset space moves with its tracked parent, plus the parent's rotation swinging the offset around.
+refract::protocol::SpaceVelocity world_velocity_for_space(const SpaceRecord& record, const refract::protocol::PoseFrame& poseFrame)
+{
+    refract::protocol::SpaceVelocity velocity{};
+    switch (record.kind) {
+    case SpaceKind::Reference: velocity.flags = 3; break;
+    case SpaceKind::Local:
+        // LOCAL made up in the runtime (older hosts) never moves.
+        velocity = poseFrame.version >= 5 && (poseFrame.local_origin_flags & 3) == 3 ? poseFrame.local_origin_velocity
+                                                                                        : refract::protocol::SpaceVelocity{3};
+        break;
+    case SpaceKind::View: velocity = poseFrame.hmd_velocity; break;
+    case SpaceKind::LeftHand: velocity = poseFrame.grip_velocity[0]; break;
+    case SpaceKind::RightHand: velocity = poseFrame.grip_velocity[1]; break;
+    case SpaceKind::LeftAim: velocity = poseFrame.aim_velocity[0]; break;
+    case SpaceKind::RightAim: velocity = poseFrame.aim_velocity[1]; break;
+    default: break;
+    }
+    SpaceRecord parent = record;
+    parent.offsetInParent = identity_pose();
+    const auto parentPose = xr_pose_to_protocol(world_pose_for_space(parent, poseFrame));
+    const auto& offset = record.offsetInParent.position;
+    return refract::protocol::offset_velocity(velocity, refract::protocol::rotate(parentPose, {offset.x, offset.y, offset.z}));
 }
 
 XrTime monotonic_time_ns()
@@ -2947,17 +2979,34 @@ XrResult XRAPI_CALL xrLocateSpace_impl(
     const XrPosef baseWorld = world_pose_for_space(*baseRecord, poseFrame);
     location->pose = multiply_pose(inverse_pose(baseWorld), spaceWorld);
     // OVRPlugin chains XrSpaceVelocity and extrapolates poses with it. Left unwritten, it reads
-    // whatever was in that memory (Batman: Arkham Shadow's head pose turned NaN). The pose bridge
-    // carries no velocities, so report a device at rest, valid wherever the pose is valid.
+    // whatever was in that memory (Batman: Arkham Shadow's head pose turned NaN). Games also read it
+    // for gameplay (Batman's punches, throws). Hosts from v6 send the runtime's real velocities; older
+    // ones (pose_input_server.py) carry none, so those report a device at rest, valid wherever the pose is.
+    // debug.refract.space_velocity=0 reports rest for v6 hosts too.
+#if defined(__ANDROID__)
+    static const bool realVelocities = int_property("debug.refract.space_velocity", 1, 0, 1) != 0;
+#else
+    constexpr bool realVelocities = true;
+#endif
     struct ChainHeader { XrStructureType type; void* next; };
     for (auto* next = static_cast<ChainHeader*>(location->next); next; next = static_cast<ChainHeader*>(next->next)) {
         if (next->type != XR_TYPE_SPACE_VELOCITY) continue;
         auto* velocity = reinterpret_cast<XrSpaceVelocity*>(next);
-        velocity->linearVelocity = {0.0f, 0.0f, 0.0f};
-        velocity->angularVelocity = {0.0f, 0.0f, 0.0f};
-        velocity->velocityFlags =
-            ((location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ? XR_SPACE_VELOCITY_LINEAR_VALID_BIT : 0) |
-            ((location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) ? XR_SPACE_VELOCITY_ANGULAR_VALID_BIT : 0);
+        refract::protocol::SpaceVelocity v{};
+        if (realVelocities && poseFrame.version >= 6) {
+            if ((location->locationFlags & 3) == 3) {
+                v = space == baseSpace ? refract::protocol::SpaceVelocity{3}
+                    : refract::protocol::relative_velocity(world_velocity_for_space(*spaceRecord, poseFrame),
+                          world_velocity_for_space(*baseRecord, poseFrame),
+                          xr_pose_to_protocol(spaceWorld), xr_pose_to_protocol(baseWorld));
+            }
+        } else {
+            v.flags = ((location->locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ? XR_SPACE_VELOCITY_LINEAR_VALID_BIT : 0) |
+                      ((location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) ? XR_SPACE_VELOCITY_ANGULAR_VALID_BIT : 0);
+        }
+        velocity->velocityFlags = v.flags;
+        velocity->linearVelocity = {v.linear.x, v.linear.y, v.linear.z};
+        velocity->angularVelocity = {v.angular.x, v.angular.y, v.angular.z};
     }
     return XR_SUCCESS;
 }
@@ -3390,7 +3439,11 @@ XrResult XRAPI_CALL xrWaitFrame_impl(
     // the two frame loops, so the game renders with the newest pose and can finish in time for the host's
     // next frame. A free-running timer beat against the host's clock: poses waited up to a frame, finished
     // images up to another, and ~4 frames a second were missed. Without a live pose stream, pace by timer.
+#if defined(__ANDROID__)
     static const bool frameSync = int_property("debug.refract.frame_sync", 0, 0, 1) != 0;
+#else
+    constexpr bool frameSync = false;
+#endif
     if (frameSync) {
         static uint64_t lastSequence = UINT64_MAX;
         static XrTime lastNewPose = 0;

@@ -5,7 +5,7 @@
 namespace refract::protocol {
 
 constexpr uint32_t kPoseFrameMagic = 0x54434652; // RFCT, little-endian.
-constexpr uint16_t kPoseFrameVersion = 5;
+constexpr uint16_t kPoseFrameVersion = 6;
 constexpr uint32_t kMaxEyeDimension = 8192;
 constexpr uint16_t kPoseFrameType = 1;
 
@@ -42,6 +42,13 @@ struct HandSkeleton {
     HandJoint joints[26];
 };
 
+struct Vector3 { float x = 0, y = 0, z = 0; };
+// flags are XrSpaceVelocityFlags (1 linear valid, 2 angular valid); linear m/s, angular rad/s.
+struct SpaceVelocity {
+    uint64_t flags = 0;
+    Vector3 linear, angular;
+};
+
 struct PoseFrame {
     uint32_t magic = kPoseFrameMagic;
     uint16_t version = kPoseFrameVersion;
@@ -67,6 +74,11 @@ struct PoseFrame {
     uint32_t local_origin_flags = 0;
     uint32_t hmd_flags = 0;
     uint32_t reserved_v5 = 0;
+    // v6: velocities in the transmitted tracking world, at the same time as the poses.
+    SpaceVelocity hmd_velocity;
+    SpaceVelocity grip_velocity[2];
+    SpaceVelocity aim_velocity[2];
+    SpaceVelocity local_origin_velocity;
 };
 
 inline bool valid_render_extent(uint32_t width, uint32_t height) {
@@ -82,6 +94,7 @@ inline uint32_t display_period_or_default(const PoseFrame& frame) {
 
 static_assert(sizeof(Pose) == 28);
 static_assert(sizeof(ControllerInput) == 24);
-static_assert(sizeof(PoseFrame) == 2408);
+static_assert(sizeof(SpaceVelocity) == 32);
+static_assert(sizeof(PoseFrame) == 2600);
 
 } // namespace refract::protocol

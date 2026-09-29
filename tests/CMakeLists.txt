@@ -41,7 +41,7 @@ add_test(NAME refract_pose_stream_handles_fragmentation COMMAND refract_pose_str
 # Exercise real runtime dispatch/space transforms with deterministic host input.
 if(NOT ANDROID)
   add_executable(refract_runtime_input_smoke runtime_smoke.cpp runtime_input_fixture.cpp
-    ../android-runtime/session.cpp ../android-runtime/openxr_dispatch/runtime_entry.cpp)
+    ../android-runtime/session.cpp ../android-runtime/game_patches.cpp ../android-runtime/openxr_dispatch/runtime_entry.cpp)
   target_include_directories(refract_runtime_input_smoke PRIVATE ${PROJECT_SOURCE_DIR}/android-runtime)
   target_compile_definitions(refract_runtime_input_smoke PRIVATE REFRACT_INPUT_FIXTURE)
   target_link_libraries(refract_runtime_input_smoke PRIVATE refract_protocol)

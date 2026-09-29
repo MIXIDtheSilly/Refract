@@ -69,6 +69,9 @@ def main():
     run('shell', 'settings put global gpu_debug_app ' + args.package)
     run('shell', 'settings put global gpu_debug_layers VK_LAYER_REFRACT_runtime')
     run('shell', 'settings delete global gpu_debug_layer_app')
+    # CPU-written buffers get cached memory instead of gfxstream's slow uncached memory
+    # (Batman's heavy scene 41 -> 68 fps). Read by the layer when the game creates its Vulkan device.
+    run('shell', 'setprop debug.refract.cached_buffer_memory 1')
     run('shell', 'sync')
     print(json.dumps({'status': 'ready', 'max_map_count': limit, 'scheduler': scheduler, 'translator': 'digitalis',
                       'vulkan_layer': remote}))

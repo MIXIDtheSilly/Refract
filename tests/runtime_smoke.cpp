@@ -331,7 +331,7 @@ int main()
 
     uint32_t referenceSpaceCount = 0;
     if (xrEnumerateReferenceSpaces(session, 0, &referenceSpaceCount, nullptr) != XR_SUCCESS ||
-        referenceSpaceCount != 3) {
+        referenceSpaceCount != 4) {  // VIEW, LOCAL, STAGE, LOCAL_FLOOR
         return EXIT_FAILURE;
     }
 

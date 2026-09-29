@@ -31,7 +31,7 @@ export async function uiSmoke(window, directory, snapshot, errors) {
   async function capture(name) { await tick(); await fs.writeFile(path.join(directory, `${name}.png`), (await wc.capturePage()).toPNG()); }
 
   await check(`Boolean(document.querySelector('#library-search'))`, 'Library did not load');
-  if (await js(`Boolean(document.querySelector('h1, footer'))`)) throw new Error('Unexpected decorative heading/footer');
+  await check(`document.querySelector('h1')?.textContent === 'Library' && Boolean(document.querySelector('[aria-label="Refract library"] svg'))`, 'Library header or logo missing');
   await click('[data-nav="settings"]');
   await check(`Boolean(document.querySelector('#settings-form'))`, 'Settings did not render');
   await input('#downloadDir', 'C:\\Refract UI draft');

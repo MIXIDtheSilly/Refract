@@ -4,12 +4,14 @@
 #include <android/log.h>
 #include <sys/system_properties.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <vector>
 #include "vulkan_descriptor_template.h"
 
 namespace {
@@ -25,6 +27,8 @@ struct Device {
     PFN_vkDestroyDescriptorUpdateTemplate destroyTemplate = nullptr;
     PFN_vkUpdateDescriptorSetWithTemplate updateTemplate = nullptr;
     PFN_vkUpdateDescriptorSets updateSets = nullptr;
+    uint32_t cachedTypes = 0;    // HOST_VISIBLE + HOST_CACHED + HOST_COHERENT memory types.
+    uint32_t uncachedTypes = 0;  // HOST_VISIBLE types without HOST_CACHED.
 };
 // Lookups on the per-draw path take a shared lock; only create/destroy calls write.
 std::shared_mutex mutex;
@@ -81,6 +85,84 @@ const char* alias(const char* name){
     return name;
 }
 PFN_vkVoidFunction intercept(const char*);
+// debug.refract.cached_buffer_memory=1 (read once): gfxstream's uncached HOST_VISIBLE memory is very slow
+// for the CPU to touch, and Unity maps its dynamic vertex/uniform buffers there. When a buffer can also live
+// in a cached+coherent type, hide the uncached ones from its requirements so the game picks the cached one.
+// Images, allocations and flags are untouched; a buffer without a cached option keeps the driver's mask.
+// (From AXRB-BS PR #9: Batman went 57 -> 88 fps in the same room.)
+bool cachedBufferMemory(){
+    static const bool active=[] {char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.refract.cached_buffer_memory",value);
+        return !std::strcmp(value,"1");}();
+    return active;
+}
+void filterBufferMemory(const Device& d,VkMemoryRequirements* requirements){
+    const uint32_t before=requirements->memoryTypeBits;
+    if(!(before&d.cachedTypes))return;
+    requirements->memoryTypeBits=before&~d.uncachedTypes;
+    static std::atomic<unsigned> reports{0};
+    if(requirements->memoryTypeBits!=before&&reports.fetch_add(1,std::memory_order_relaxed)<8)
+        __android_log_print(ANDROID_LOG_INFO,"Refract.CachedBuffers","buffer size=%llu types %x -> %x",
+            (unsigned long long)requirements->size,before,requirements->memoryTypeBits);
+}
+// debug.refract.vram_stats=1 (read once): accounts live device memory per memory type and bound images per
+// format, logged under Refract.VRAM every 5 s while something changes. The sizes are what gfxstream reports,
+// so an emulated (ASTC/ETC2) image includes its decompressed copy; "raw" is what the texels would take natively.
+bool vramStats(){
+    static const bool active=[] {char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.refract.vram_stats",value);
+        return !std::strcmp(value,"1");}();
+    return active;
+}
+struct VramStats {
+    struct Image {VkFormat format;VkExtent3D extent;uint32_t mips,layers,samples;VkImageUsageFlags usage;
+        VkDeviceSize size=0;bool bound=false;};
+    struct Format {uint64_t count=0,bytes=0,raw=0,mipped=0;};
+    std::mutex lock;
+    std::map<VkImage,Image> images;
+    std::map<VkDeviceMemory,std::pair<VkDeviceSize,uint32_t>> memories;
+    uint64_t typeBytes[VK_MAX_MEMORY_TYPES]{};
+    uint64_t typeCount[VK_MAX_MEMORY_TYPES]{};
+    std::chrono::steady_clock::time_point last{};
+    bool dirty=false;
+    static bool astc(VkFormat f){return f>=VK_FORMAT_ASTC_4x4_UNORM_BLOCK&&f<=VK_FORMAT_ASTC_12x12_SRGB_BLOCK;}
+    static bool etc(VkFormat f){return f>=VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK&&f<=VK_FORMAT_EAC_R11G11_SNORM_BLOCK;}
+    // Block footprint and bytes of the compressed formats games upload; 0 for anything else.
+    static void block(VkFormat f,uint32_t& w,uint32_t& h,uint32_t& bytes){
+        static constexpr uint8_t astcDims[14][2]={{4,4},{5,4},{5,5},{6,5},{6,6},{8,5},{8,6},{8,8},{10,5},{10,6},{10,8},{10,10},{12,10},{12,12}};
+        w=h=bytes=0;
+        if(astc(f)){auto& d=astcDims[(f-VK_FORMAT_ASTC_4x4_UNORM_BLOCK)/2];w=d[0];h=d[1];bytes=16;}
+        else if(etc(f)){w=h=4;bytes=(f<=VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK||f==VK_FORMAT_EAC_R11_UNORM_BLOCK||f==VK_FORMAT_EAC_R11_SNORM_BLOCK)?8:16;}
+    }
+    static uint64_t rawBytes(const Image& i){
+        uint32_t bw,bh,bb;block(i.format,bw,bh,bb);if(!bb)return 0;
+        uint64_t total=0;
+        for(uint32_t m=0;m<i.mips;++m){uint64_t w=std::max(1u,i.extent.width>>m),h=std::max(1u,i.extent.height>>m);
+            total+=((w+bw-1)/bw)*((h+bh-1)/bh)*bb*std::max(1u,i.extent.depth>>m);}
+        return total*i.layers;
+    }
+    void changed(){
+        dirty=true;const auto now=std::chrono::steady_clock::now();
+        if(now-last<std::chrono::seconds(5))return;
+        last=now;dirty=false;
+        uint64_t total=0;for(auto b:typeBytes)total+=b;
+        __android_log_print(ANDROID_LOG_INFO,"Refract.VRAM","device memory %.1f MB in %zu allocations",total/1048576.0,memories.size());
+        for(uint32_t t=0;t<VK_MAX_MEMORY_TYPES;++t)if(typeCount[t])
+            __android_log_print(ANDROID_LOG_INFO,"Refract.VRAM","  type %u: %.1f MB, %llu allocations",t,typeBytes[t]/1048576.0,(unsigned long long)typeCount[t]);
+        std::map<VkFormat,Format> formats;Format attachments,sampled;
+        for(auto& [handle,i]:images){if(!i.bound)continue;
+            const bool target=i.usage&(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+            auto& f=formats[i.format];++f.count;f.bytes+=i.size;f.raw+=rawBytes(i);f.mipped+=i.mips>1;
+            auto& c=target?attachments:sampled;++c.count;c.bytes+=i.size;}
+        __android_log_print(ANDROID_LOG_INFO,"Refract.VRAM","images: render targets %.1f MB (%llu), other %.1f MB (%llu)",
+            attachments.bytes/1048576.0,(unsigned long long)attachments.count,sampled.bytes/1048576.0,(unsigned long long)sampled.count);
+        std::vector<std::pair<VkFormat,Format>> sorted(formats.begin(),formats.end());
+        std::sort(sorted.begin(),sorted.end(),[](auto& a,auto& b){return a.second.bytes>b.second.bytes;});
+        for(size_t n=0;n<sorted.size()&&n<16;++n){auto& [format,f]=sorted[n];
+            __android_log_print(ANDROID_LOG_INFO,"Refract.VRAM","  format %d: %.1f MB, %llu images (%llu mipmapped), raw %.1f MB",
+                format,f.bytes/1048576.0,(unsigned long long)f.count,(unsigned long long)f.mipped,f.raw/1048576.0);}
+    }
+} vram;
 }
 extern "C" {
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(uint32_t* count,VkLayerProperties* out){
@@ -134,6 +216,27 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,const Vk
         state.updateTemplate=function<PFN_vkUpdateDescriptorSetWithTemplate>(state,"vkUpdateDescriptorSetWithTemplate");
         if(!state.updateTemplate)state.updateTemplate=function<PFN_vkUpdateDescriptorSetWithTemplate>(state,"vkUpdateDescriptorSetWithTemplateKHR");
         state.updateSets=function<PFN_vkUpdateDescriptorSets>(state,"vkUpdateDescriptorSets");
+        if(cachedBufferMemory()){
+            VkPhysicalDeviceMemoryProperties props{};
+            function<PFN_vkGetPhysicalDeviceMemoryProperties>(s,"vkGetPhysicalDeviceMemoryProperties")(physical,&props);
+            constexpr VkMemoryPropertyFlags cachedCoherent=VK_MEMORY_PROPERTY_HOST_CACHED_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            for(uint32_t i=0;i<props.memoryTypeCount;++i){
+                auto flags=props.memoryTypes[i].propertyFlags;
+                if(!(flags&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))continue;
+                if((flags&cachedCoherent)==cachedCoherent)state.cachedTypes|=1u<<i;
+                else if(!(flags&VK_MEMORY_PROPERTY_HOST_CACHED_BIT))state.uncachedTypes|=1u<<i;
+            }
+            __android_log_print(ANDROID_LOG_INFO,"Refract.CachedBuffers","enabled: cached types %x, uncached %x",
+                state.cachedTypes,state.uncachedTypes);
+        }
+        if(vramStats()){
+            VkPhysicalDeviceMemoryProperties props{};
+            function<PFN_vkGetPhysicalDeviceMemoryProperties>(s,"vkGetPhysicalDeviceMemoryProperties")(physical,&props);
+            for(uint32_t i=0;i<props.memoryHeapCount;++i)__android_log_print(ANDROID_LOG_INFO,"Refract.VRAM","heap %u: %.0f MB flags %x",
+                i,props.memoryHeaps[i].size/1048576.0,props.memoryHeaps[i].flags);
+            for(uint32_t i=0;i<props.memoryTypeCount;++i)__android_log_print(ANDROID_LOG_INFO,"Refract.VRAM","type %u: heap %u flags %x",
+                i,props.memoryTypes[i].heapIndex,props.memoryTypes[i].propertyFlags);
+        }
         std::lock_guard lock(mutex);devices[key(*out)]=state;
     }
     return result;
@@ -141,6 +244,72 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,const Vk
 VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice h,const VkAllocationCallbacks* alloc){
     auto s=device(h);{std::lock_guard lock(mutex);devices.erase(key(h));for(auto it=templates.begin();it!=templates.end();)if(it->first.first==h)it=templates.erase(it);else ++it;}
     function<PFN_vkDestroyDevice>(s,"vkDestroyDevice")(h,alloc);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(VkDevice h,VkBuffer buffer,VkMemoryRequirements* out){
+    auto s=device(h);function<PFN_vkGetBufferMemoryRequirements>(s,"vkGetBufferMemoryRequirements")(h,buffer,out);
+    filterBufferMemory(s,out);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(VkDevice h,const VkBufferMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
+    auto s=device(h);auto next=function<PFN_vkGetBufferMemoryRequirements2>(s,"vkGetBufferMemoryRequirements2");
+    if(!next)next=function<PFN_vkGetBufferMemoryRequirements2>(s,"vkGetBufferMemoryRequirements2KHR");
+    next(h,info,out);filterBufferMemory(s,&out->memoryRequirements);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(VkDevice h,const VkBufferMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
+    vkGetBufferMemoryRequirements2(h,info,out);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(VkDevice h,const VkMemoryAllocateInfo* info,const VkAllocationCallbacks* alloc,VkDeviceMemory* out){
+    auto result=function<PFN_vkAllocateMemory>(device(h),"vkAllocateMemory")(h,info,alloc,out);
+    if(result==VK_SUCCESS){std::lock_guard lock(vram.lock);vram.memories[*out]={info->allocationSize,info->memoryTypeIndex};
+        vram.typeBytes[info->memoryTypeIndex]+=info->allocationSize;++vram.typeCount[info->memoryTypeIndex];vram.changed();}
+    return result;
+}
+VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice h,VkDeviceMemory memory,const VkAllocationCallbacks* alloc){
+    {std::lock_guard lock(vram.lock);auto it=vram.memories.find(memory);
+        if(it!=vram.memories.end()){vram.typeBytes[it->second.second]-=it->second.first;--vram.typeCount[it->second.second];
+            vram.memories.erase(it);vram.changed();}}
+    function<PFN_vkFreeMemory>(device(h),"vkFreeMemory")(h,memory,alloc);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(VkDevice h,const VkImageCreateInfo* info,const VkAllocationCallbacks* alloc,VkImage* out){
+    auto result=function<PFN_vkCreateImage>(device(h),"vkCreateImage")(h,info,alloc,out);
+    if(result==VK_SUCCESS){std::lock_guard lock(vram.lock);
+        vram.images[*out]={info->format,info->extent,info->mipLevels,info->arrayLayers,info->samples,info->usage};}
+    return result;
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroyImage(VkDevice h,VkImage image,const VkAllocationCallbacks* alloc){
+    {std::lock_guard lock(vram.lock);if(vram.images.erase(image))vram.changed();}
+    function<PFN_vkDestroyImage>(device(h),"vkDestroyImage")(h,image,alloc);
+}
+static void recordImageSize(VkImage image,VkDeviceSize size){
+    std::lock_guard lock(vram.lock);auto it=vram.images.find(image);if(it!=vram.images.end())it->second.size=size;
+}
+static void recordImageBind(VkImage image){
+    std::lock_guard lock(vram.lock);auto it=vram.images.find(image);if(it!=vram.images.end()){it->second.bound=true;vram.changed();}
+}
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(VkDevice h,VkImage image,VkMemoryRequirements* out){
+    function<PFN_vkGetImageMemoryRequirements>(device(h),"vkGetImageMemoryRequirements")(h,image,out);recordImageSize(image,out->size);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(VkDevice h,const VkImageMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
+    auto s=device(h);auto next=function<PFN_vkGetImageMemoryRequirements2>(s,"vkGetImageMemoryRequirements2");
+    if(!next)next=function<PFN_vkGetImageMemoryRequirements2>(s,"vkGetImageMemoryRequirements2KHR");
+    next(h,info,out);recordImageSize(info->image,out->memoryRequirements.size);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2KHR(VkDevice h,const VkImageMemoryRequirementsInfo2* info,VkMemoryRequirements2* out){
+    vkGetImageMemoryRequirements2(h,info,out);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice h,VkImage image,VkDeviceMemory memory,VkDeviceSize offset){
+    auto result=function<PFN_vkBindImageMemory>(device(h),"vkBindImageMemory")(h,image,memory,offset);
+    if(result==VK_SUCCESS)recordImageBind(image);
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory2(VkDevice h,uint32_t count,const VkBindImageMemoryInfo* infos){
+    auto s=device(h);auto next=function<PFN_vkBindImageMemory2>(s,"vkBindImageMemory2");
+    if(!next)next=function<PFN_vkBindImageMemory2>(s,"vkBindImageMemory2KHR");
+    auto result=next(h,count,infos);
+    if(result==VK_SUCCESS)for(uint32_t i=0;i<count;++i)recordImageBind(infos[i].image);
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory2KHR(VkDevice h,uint32_t count,const VkBindImageMemoryInfo* infos){
+    return vkBindImageMemory2(h,count,infos);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(VkDevice h,const VkDescriptorUpdateTemplateCreateInfo* info,const VkAllocationCallbacks* alloc,VkDescriptorUpdateTemplate* out){
     auto s=device(h);std::shared_ptr<const Layout> layout;
@@ -200,6 +369,14 @@ PFN_vkVoidFunction intercept(const char* name){
     ENTRY(vkCreateInstance);ENTRY(vkDestroyInstance);ENTRY(vkCreateDevice);ENTRY(vkDestroyDevice);
     ENTRY(vkEnumerateInstanceLayerProperties);ENTRY(vkEnumerateDeviceLayerProperties);ENTRY(vkEnumerateInstanceExtensionProperties);
     ENTRY(vkEnumerateDeviceExtensionProperties);
+    if(cachedBufferMemory()){
+        ENTRY(vkGetBufferMemoryRequirements);ENTRY(vkGetBufferMemoryRequirements2);ENTRY(vkGetBufferMemoryRequirements2KHR);
+    }
+    if(vramStats()){
+        ENTRY(vkAllocateMemory);ENTRY(vkFreeMemory);ENTRY(vkCreateImage);ENTRY(vkDestroyImage);
+        ENTRY(vkGetImageMemoryRequirements);ENTRY(vkGetImageMemoryRequirements2);ENTRY(vkGetImageMemoryRequirements2KHR);
+        ENTRY(vkBindImageMemory);ENTRY(vkBindImageMemory2);ENTRY(vkBindImageMemory2KHR);
+    }
     ENTRY(vkCreateDescriptorUpdateTemplate);ENTRY(vkDestroyDescriptorUpdateTemplate);ENTRY(vkUpdateDescriptorSetWithTemplate);
     ENTRY(vkCreateDescriptorUpdateTemplateKHR);ENTRY(vkDestroyDescriptorUpdateTemplateKHR);ENTRY(vkUpdateDescriptorSetWithTemplateKHR);
 #undef ENTRY
