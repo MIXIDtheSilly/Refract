@@ -2,11 +2,11 @@
 
 /* Refract: graphite grays, white controls, the thin round strokes of the logo. */
 :root {
-  --bg: #2b2b2e;
-  --panel: #232326;
-  --surface: #343438;
-  --surface-hover: #3d3d42;
-  --raised: #414146;
+  --bg: #212124;
+  --panel: #19191b;
+  --surface: #2a2a2d;
+  --surface-hover: #333337;
+  --raised: #39393d;
   --line: rgba(255, 255, 255, 0.08);
   --line-strong: rgba(255, 255, 255, 0.16);
   --text: #f5f5f6;
@@ -137,7 +137,7 @@ select.field-input option { background: var(--panel); }
 .hero { position: relative; display: flex; align-items: flex-end; min-height: 300px; margin-bottom: 40px; border-radius: 22px; overflow: hidden; background: var(--surface); isolation: isolate; }
 .hero .initials { display: none; }
 .hero .cover { position: absolute; inset: 0; border-radius: 0; aspect-ratio: auto; z-index: -2; }
-.hero::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, rgba(28, 28, 31, 0.92) 0%, rgba(28, 28, 31, 0.6) 45%, rgba(28, 28, 31, 0) 80%), linear-gradient(0deg, rgba(28, 28, 31, 0.6), transparent 60%); }
+.hero::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, rgba(22, 22, 24, 0.92) 0%, rgba(22, 22, 24, 0.6) 45%, rgba(22, 22, 24, 0) 80%), linear-gradient(0deg, rgba(22, 22, 24, 0.6), transparent 60%); }
 .hero-body { padding: 36px 40px; max-width: 560px; }
 .hero-kicker { font-size: 12.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
 .hero-title { margin: 8px 0 6px; font-size: 42px; font-weight: 400; line-height: 1.08; }

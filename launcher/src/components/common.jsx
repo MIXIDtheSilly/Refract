@@ -38,7 +38,7 @@ export function Cover({ game, className = '' }) {
   const hue = h % 360, angle = 120 + (h >> 9) % 90;
   return <div className={`cover ${className}`}>
     {src && !failed ? <img src={src} alt="" loading="lazy" draggable="false" onError={() => setFailed(true)} />
-      : <div className="cover-art" style={{ background: `linear-gradient(${angle}deg, hsl(${hue} 9% 31%), hsl(${(hue + 40) % 360} 6% 21%))` }}>
+      : <div className="cover-art" style={{ background: `linear-gradient(${angle}deg, hsl(${hue} 9% 26%), hsl(${(hue + 40) % 360} 6% 17%))` }}>
         <LogoMark className="ring" />
         <span className="initials" aria-hidden="true">{String(game.name || '?').split(/\s+/).filter(w => /\w/.test(w)).slice(0, 2).map(w => w[0]).join('')}</span>
       </div>}
