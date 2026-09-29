@@ -33,7 +33,6 @@ const send = message => write(`${JSON.stringify(message)}\n`);
 
 let state, runtime, token = '', account = '', busy = false, auth = null;
 const controllers = new Map();
-const searchResults = new Map();
 let artworkTask;
 function refreshArtwork() {
   if (artworkTask) return artworkTask;
@@ -148,9 +147,6 @@ const methods = {
   },
   logout: async () => { for (const controller of controllers.values()) controller.abort(); token = ''; account = ''; send({ event: 'secret', value: null }); changed(); },
   sync: async () => { const online = await syncInstalled(); const result = token ? await syncMeta() : null; return { online, meta: result }; },
-  search: async text => { const games = await new QuestStore(token).search(String(text)); for (const game of games) searchResults.set(game.id, game); return games; },
-  add: async id => { const game = searchResults.get(appId(id)); if (!game) throw new Error('Search for this app again.'); const existing = state.data.games.find(g => g.id === game.id); if (!existing) state.put(game); await persist(); return game.id; },
-  lookup: async input => { const game = await store().details(appId(input)); state.put(game); await persist(); return game.id; },
   builds: id => store().builds(appId(id)).then(items => items.map(b => ({ id: String(b.id), version: b.version, code: b.version_code ?? b.versionCode }))),
   download: (id, binaryId) => downloadGame(appId(id), binaryId),
   dlc: id => store().dlc(appId(id)).then(items => items.map(({ files, ...item }) => ({ ...item, fileCount: files.length, bytes: files.reduce((n, f) => n + f.size, 0) }))),
@@ -211,7 +207,7 @@ const methods = {
   },
   // The shell opens these after validating them.
   openFolder: async id => { const game = getGame(id); const target = game.apk ? path.dirname(game.apk) : state.data.settings.downloadDir; await fs.mkdir(target, { recursive: true }); return { openPath: target }; },
-  openStore: async id => ({ openUrl: id ? `https://www.meta.com/experiences/${appId(id)}/` : 'https://www.meta.com/experiences/' }),
+  openStore: async id => ({ openUrl: `https://www.meta.com/experiences/${appId(id)}/` }),
 };
 
 async function handle({ id, method, args }) {

@@ -17,7 +17,6 @@ export function ago(iso) {
   const days = Math.round(hours / 24);
   return days === 1 ? 'yesterday' : `${days} days ago`;
 }
-export const isFree = price => !price || parseFloat(String(price).replace(/[^\d.]/g, '')) === 0;
 
 // Artwork only from Meta's CDNs or icons the backend read from Android.
 function safeImage(value) {
@@ -30,7 +29,7 @@ function safeImage(value) {
 }
 function hash(text) { let h = 2166136261; for (const c of String(text)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
 
-export function Cover({ game, className = '', badge }) {
+export function Cover({ game, className = '' }) {
   const src = safeImage(game.image);
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
@@ -43,7 +42,6 @@ export function Cover({ game, className = '', badge }) {
         <LogoMark className="ring" />
         <span className="initials" aria-hidden="true">{String(game.name || '?').split(/\s+/).filter(w => /\w/.test(w)).slice(0, 2).map(w => w[0]).join('')}</span>
       </div>}
-    {badge && <span className="cover-badge">{badge}</span>}
   </div>;
 }
 

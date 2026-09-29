@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { Dialog } from 'radix-ui';
-import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, Play, Plus, RefreshCcw, X } from 'lucide-react';
+import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, Play, RefreshCcw, X } from 'lucide-react';
 import { call } from '../api';
-import { activeStatuses, ago, bytes, Cover, GameStatus, IconButton, isFree } from './common';
+import { activeStatuses, ago, bytes, Cover, GameStatus, IconButton } from './common';
 
-export function GameSheet({ game, state, local, onClose, run, pending, setPage, notify, connect }) {
+export function GameSheet({ game, state, onClose, run, pending, setPage, notify, connect }) {
   const [extra, setExtra] = useState(null);
   const [build, setBuild] = useState('');
   const key = `game-${game.id}`;
@@ -27,25 +27,23 @@ export function GameSheet({ game, state, local, onClose, run, pending, setPage, 
   else if (running) primary = <button type="button" className="btn btn-primary btn-lg" disabled={pending.has('stop')} onClick={() => run('stop', async () => { await call('stop'); notify('Closing game'); })}>Stop</button>;
   else if (game.installed) primary = <button type="button" className="btn btn-primary btn-lg" disabled={busy || Boolean(state.running)} onClick={() => operate(async () => { await call('play', game.id); onClose(); })}><Play fill="currentColor" />Play</button>;
   else if (game.apk) primary = <button type="button" className="btn btn-primary btn-lg" disabled={busy} onClick={install}><ArrowDownToLine />Install</button>;
-  else if (!local) primary = <button type="button" className="btn btn-primary btn-lg" disabled={busy} onClick={() => operate(async () => { await call('add', game.id); notify(`Added ${game.name} to your library`); })}><Plus />Add to library</button>;
   else if (!state.signedIn) primary = <button type="button" className="btn btn-primary btn-lg" disabled={pending.has('account')} onClick={connect}>Connect Meta to download</button>;
   else primary = <button type="button" className="btn btn-primary btn-lg" disabled={busy} onClick={download}><ArrowDownToLine />Download</button>;
 
   const manage = [];
-  if (local && game.source === 'meta') manage.push(
+  if (game.source === 'meta') manage.push(
     { icon: History, label: 'Versions', hint: 'Pick a Quest build', disabled: busy || !state.signedIn, onClick: () => loadExtra('builds') },
     { icon: PackagePlus, label: 'Add-ons', hint: 'DLC you own', disabled: busy || !state.signedIn, onClick: () => loadExtra('dlc') });
-  if (local && game.apk) manage.push(
+  if (game.apk) manage.push(
     { icon: FilePlus2, label: 'Add content files', hint: 'OBB / assets', disabled: busy, onClick: () => operate(async () => { await call('importAssets', game.id); notify('Install again to apply content files'); }) },
     ...(game.installed ? [{ icon: RefreshCcw, label: 'Update installation', hint: 'Reinstall, keeps saves', disabled: busy, onClick: install }] : []),
     { icon: FolderOpen, label: 'Open folder', disabled: false, onClick: () => operate(() => call('openFolder', game.id)) });
-  if (local && !game.apk && game.source !== 'meta') manage.push({ icon: FilePlus2, label: 'Import APK', disabled: busy, onClick: () => run('import', () => call('import')) });
+  if (!game.apk && game.source !== 'meta') manage.push({ icon: FilePlus2, label: 'Import APK', disabled: busy, onClick: () => run('import', () => call('import')) });
   if (game.source === 'meta') manage.push({ icon: ExternalLink, label: 'View on meta.com', disabled: false, onClick: () => operate(() => call('openStore', game.id)) });
 
   const meta = [
     game.publisher,
     game.version && `Version ${game.version}`,
-    !local && (isFree(game.price) ? 'Free' : game.price),
     game.lastPlayed && `Played ${ago(game.lastPlayed)}`,
   ].filter(Boolean);
 
@@ -59,7 +57,7 @@ export function GameSheet({ game, state, local, onClose, run, pending, setPage, 
           <div className="sheet-body">
             <Dialog.Title className="sheet-title">{game.name}</Dialog.Title>
             <div className="sheet-meta">
-              {local && <span className="status" style={{ textTransform: 'none', display: 'inline-flex', alignItems: 'center', gap: 7 }}><GameStatus game={game} running={running} /></span>}
+              <span className="status" style={{ textTransform: 'none', gap: 7 }}><GameStatus game={game} running={running} /></span>
               {meta.map(m => <span key={m}>{m}</span>)}
             </div>
             <div className="sheet-actions">{primary}</div>

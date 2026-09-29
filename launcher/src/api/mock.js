@@ -54,8 +54,6 @@ const methods = {
   sync: async () => { await wait(900); return { online: true, meta: state.signedIn ? { partial: false, count: state.games.length } : null }; },
   login: async () => { await wait(1200); state.signedIn = true; state.account = 'Quest player'; emit(); return { partial: false, count: state.games.length }; },
   logout: async () => { state.signedIn = false; state.account = ''; emit(); },
-  search: async text => { await wait(500); const q = String(text).toLowerCase(); return catalog.filter(g => g.name.toLowerCase().includes(q) || g.genres.some(x => x.toLowerCase().includes(q)) || q === 'all').map(g => ({ ...g, source: 'meta', description: describe(g.name) })); },
-  add: async id => { const item = catalog.find(g => g.id === id); if (!state.games.some(g => g.id === id)) state.games.push({ ...item, source: 'meta', description: describe(item.name) }); emit(); return id; },
   builds: async () => { await wait(400); return [{ id: '901', version: '1.42.0', code: 142 }, { id: '900', version: '1.41.3', code: 141 }, { id: '870', version: '1.38.0', code: 138 }]; },
   download: async id => {
     const game = find(id);

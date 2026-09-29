@@ -7,7 +7,6 @@ import { activeStatuses, Empty } from './components/common';
 import { GameSheet } from './components/game-sheet';
 import { LogoMark } from './components/logo';
 import { Library } from './pages/library';
-import { Store } from './pages/store';
 import { Downloads } from './pages/downloads';
 import { SettingsPage } from './pages/settings';
 import './styles.css';
@@ -16,7 +15,6 @@ function App() {
   const [state, setState] = useState(null);
   const [page, setPage] = useState('library');
   const [selected, setSelected] = useState(null);
-  const [results, setResults] = useState({});
   const [pending, setPending] = useState(new Set());
   const pendingRef = useRef(new Set());
   const [notice, setNotice] = useState(null);
@@ -46,9 +44,9 @@ function App() {
 
   const connect = () => run('account', async () => {
     const result = await call('login');
-    notify(result?.partial ? 'Connected. Meta returned a partial library; add other games from the store.' : 'Connected to Meta');
+    notify(result?.partial ? 'Connected. Meta returned only part of your library.' : 'Connected to Meta');
   });
-  const game = state?.games.find(g => g.id === selected) || results.games?.find(g => g.id === selected);
+  const game = state?.games.find(g => g.id === selected);
   const activeJobs = state?.jobs.filter(j => activeStatuses.includes(j.status)).length || 0;
   const running = state?.running && state.games.find(g => g.id === state.running);
   const shared = { state, run, pending, notify, setPage, connect, open: setSelected };
@@ -60,7 +58,6 @@ function App() {
       <main className="content" ref={content} aria-label={page}>
         {!state ? <Empty title="Loading library" action={<Loader2 className="spin" />} />
           : page === 'library' ? <Library {...shared} />
-          : page === 'store' ? <Store {...shared} results={results} setResults={setResults} />
           : page === 'downloads' ? <Downloads {...shared} />
           : <SettingsPage key={JSON.stringify(state.settings)} {...shared} />}
       </main>
@@ -75,7 +72,7 @@ function App() {
       <span className="toast-text">{notice.text}</span>
       <button type="button" aria-label="Dismiss notification" onClick={() => setNotice(null)}><X /></button>
     </div>}
-    {game && state && <GameSheet key={game.id} game={game} local={state.games.some(g => g.id === game.id)} onClose={() => setSelected(null)} {...shared} />}
+    {game && state && <GameSheet key={game.id} game={game} onClose={() => setSelected(null)} {...shared} />}
   </div>;
 }
 

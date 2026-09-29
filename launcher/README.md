@@ -1,7 +1,7 @@
 # Refract launcher
 
 A native Windows desktop frontend for the Refract runtime: your installed Android
-games, the live Quest storefront, owned-game downloads, expansion files and DLC.
+games, owned Quest game downloads, expansion files and DLC.
 
 ## Run
 
@@ -24,7 +24,7 @@ minutes); later runs rebuild only when the UI or shell sources changed.
 - `src-tauri/` is the native shell (Rust, Tauri 2). It owns the window, file
   dialogs, the Meta sign-in window, opening folders/links and the encrypted Meta
   session. The UI has one command, `call`, and only the main window may use it.
-- `backend/server.mjs` holds the launcher logic (library, Meta store, downloads,
+- `backend/server.mjs` holds the launcher logic (library, Meta account, downloads,
   install, play) on top of `core/`. The shell starts it with Node and
   talks to it with one JSON message per line over stdin/stdout. It is read from
   the repository, so backend changes need no rebuild.
@@ -47,10 +47,8 @@ in any browser without Windows, Android or a Meta account.
 - **Library:** Refresh imports launchable apps from the already-running selected
   AVD. It does not start the emulator just to scan. Cached games stay visible when
   Android is stopped. Install/play starts Android as needed.
-- **Store:** Search the live Meta catalog; open a listing and add it to the
-  library. Purchases open on Meta's site. Sign in to list your Quest entitlements
-  and access downloads; a Rift purchase is not a Quest entitlement.
-- **Connect Meta:** Sign in on Meta's hosted page, in a separate private window
+- **Connect Meta:** Sign in to list your Quest entitlements in the library and
+  download them; a Rift purchase is not a Quest entitlement. Sign in on Meta's hosted page, in a separate private window
   with no access to the launcher. Credentials are never sent to a Refract service.
   The account token is encrypted with Windows DPAPI and never sent to the
   launcher UI or written in logs.
@@ -90,8 +88,7 @@ backend errors. Downloads default to
 Five GB of free disk headroom is reserved before downloads to keep Android
 bootable. Meta APIs used by community launchers are undocumented and may change;
 API errors are shown rather than treating missing content as successful installs.
-Library pagination is reported if Meta returns a partial entitlement response;
-additional owned apps can be added from the store.
+Library pagination is reported if Meta returns a partial entitlement response.
 
 ## Verification
 
@@ -105,7 +102,7 @@ library persistence, shell argument handling, and the backend's stdio protocol
 (settings validation, unknown methods, the Meta token never appearing in UI state,
 clean shutdown). `cargo check` in `src-tauri` checks the shell.
 
-Meta login challenge creation, public storefront search and installed-game scan
+Meta login challenge creation and installed-game scan
 have been checked live. Account-specific downloads/install/DLC still need a
 signed-in account test; fixture coverage is not an end-to-end Meta download test.
 

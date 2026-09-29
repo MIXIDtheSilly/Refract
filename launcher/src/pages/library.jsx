@@ -5,7 +5,7 @@ import { ago, Cover, Empty, GameStatus, IconButton } from '../components/common'
 
 const filters = [['all', 'All'], ['installed', 'Installed'], ['downloaded', 'Downloaded']];
 
-export function Library({ state, run, pending, open, setPage, notify }) {
+export function Library({ state, run, pending, open, notify, connect }) {
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
   const games = state.games
@@ -17,7 +17,7 @@ export function Library({ state, run, pending, open, setPage, notify }) {
   const refresh = () => run('sync', async () => {
     const info = await call('sync');
     if (!info.online) notify('Android isn’t running, so installed games weren’t rescanned. It starts when you install or play a game.');
-    else if (info.meta?.partial) notify('Meta returned a partial library. Add other games from the store.');
+    else if (info.meta?.partial) notify('Meta returned only part of your library.');
     else notify('Library refreshed');
   });
   const play = game => run(`game-${game.id}`, () => call('play', game.id));
@@ -66,8 +66,8 @@ export function Library({ state, run, pending, open, setPage, notify }) {
       : state.games.length
         ? <Empty title="No matching games">Try another search or filter.</Empty>
         : <Empty title="Your library is empty" action={<div className="hero-actions">
-          <button type="button" className="btn btn-primary" onClick={() => setPage('store')}>Browse the store</button>
-          <button type="button" className="btn btn-outline" onClick={() => run('import', () => call('import'))}>Import APK</button>
+          {!state.signedIn && <button type="button" className="btn btn-primary" disabled={pending.has('account')} onClick={connect}>Connect Meta</button>}
+          <button type="button" className={`btn ${state.signedIn ? 'btn-primary' : 'btn-outline'}`} onClick={() => run('import', () => call('import'))}>Import APK</button>
         </div>}>Connect Meta to see the Quest games you own, or import an APK.</Empty>}
   </div>;
 }
