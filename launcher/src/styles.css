@@ -135,7 +135,6 @@ select.field-input option { background: var(--panel); }
 
 /* Hero */
 .hero { position: relative; display: flex; align-items: flex-end; min-height: 300px; margin-bottom: 40px; border-radius: 22px; overflow: hidden; background: var(--surface); isolation: isolate; }
-.hero .initials { display: none; }
 .hero .cover { position: absolute; inset: 0; border-radius: 0; aspect-ratio: auto; z-index: -2; }
 .hero::after { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, rgba(22, 22, 24, 0.92) 0%, rgba(22, 22, 24, 0.6) 45%, rgba(22, 22, 24, 0) 80%), linear-gradient(0deg, rgba(22, 22, 24, 0.6), transparent 60%); }
 .hero-body { padding: 36px 40px; max-width: 560px; }
@@ -161,9 +160,9 @@ select.field-input option { background: var(--panel); }
 /* Covers */
 .cover { position: relative; container-type: inline-size; aspect-ratio: 16 / 9; border-radius: var(--radius); overflow: hidden; background: var(--surface); }
 .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.cover-art { position: absolute; inset: 0; display: flex; align-items: flex-end; padding: 7cqw 8cqw; }
-.cover-art .ring { position: absolute; right: -12%; top: -30%; width: 75%; color: rgba(255, 255, 255, 0.1); }
-.cover-art .initials { font-size: 13cqw; font-weight: 300; letter-spacing: 0.02em; color: rgba(255, 255, 255, 0.82); }
+/* Games without artwork: black with the logo in white. */
+.cover-art { position: absolute; inset: 0; background: #000; }
+.cover-art .ring { position: absolute; right: -12%; top: -30%; width: 75%; color: #fff; }
 
 /* Empty state */
 .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 90px 20px; color: var(--muted); }

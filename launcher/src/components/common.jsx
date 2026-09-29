@@ -27,21 +27,14 @@ function safeImage(value) {
   } catch { /* Not a URL. */ }
   return '';
 }
-function hash(text) { let h = 2166136261; for (const c of String(text)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
 
 export function Cover({ game, className = '' }) {
   const src = safeImage(game.image);
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
-  const h = hash(game.name || game.id);
-  // Placeholder art: a muted tone per game with the logo's ring.
-  const hue = h % 360, angle = 120 + (h >> 9) % 90;
   return <div className={`cover ${className}`}>
     {src && !failed ? <img src={src} alt="" loading="lazy" draggable="false" onError={() => setFailed(true)} />
-      : <div className="cover-art" style={{ background: `linear-gradient(${angle}deg, hsl(${hue} 9% 26%), hsl(${(hue + 40) % 360} 6% 17%))` }}>
-        <LogoMark className="ring" />
-        <span className="initials" aria-hidden="true">{String(game.name || '?').split(/\s+/).filter(w => /\w/.test(w)).slice(0, 2).map(w => w[0]).join('')}</span>
-      </div>}
+      : <div className="cover-art"><LogoMark className="ring" /></div>}
   </div>;
 }
 
