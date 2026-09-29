@@ -22,7 +22,12 @@ param(
     # Boots that fail the kernel's TSC sync check fall back to HPET, whose reads exit to qemu (~22% of
     # UnityMain's time); reboot up to this many times until the clocksource is the TSC.
     [ValidateRange(0, 10)][int]$TscReboots = 3,
-    [switch]$AnyCore
+    [switch]$AnyCore,
+    # Audio as in scripts\start_emulator.ps1: the default winaudio backend plays silence on this PC, and
+    # qemu's 10 ms DirectSound queue crackles under load. Without -allow-host-audio the guest mic gets zeros.
+    [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
+    [ValidateRange(10, 200)][int]$AudioLatencyMs = 50,
+    [switch]$NoHostMic
 )
 $ErrorActionPreference = 'Stop'
 if ($Port % 2) { throw 'Emulator console port must be even.' }
@@ -140,7 +145,11 @@ switch ($Action) {
         New-Item -ItemType Directory -Force $logs | Out-Null
         Set-GlTransport
         $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB",
-                       '-writable-system')
+                       '-writable-system', '-audio', $Audio,
+                       # After a crash (e.g. gfxstream on North Star's exit) the next start otherwise waits
+                       # on a consent dialog for the pending report, which a hidden emulator never shows.
+                       '-crash-report-mode', 'never')
+        if (!$NoHostMic) { $arguments += '-allow-host-audio' }
         if (!$ShowWindow) { $arguments += '-no-window' }
         $affinity = $null
         if (!$AnyCore) {
@@ -163,6 +172,8 @@ switch ($Action) {
         $oldPath = $env:PATH
         $oldLauncherDir = $env:ANDROID_EMULATOR_LAUNCHER_DIR
         $oldAffinity = [Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity
+        $oldDsoundLatency = $env:QEMU_DSOUND_LATENCY_MILLIS
+        $oldDsoundBuffer = $env:QEMU_DSOUND_BUFSIZE_OUT
         $launchExe = $emulator
         $multicore = Join-Path $Sdk 'emulator/qemu/windows-x86_64/qemu-system-x86_64-multicore.exe'
         if ($GuestClock -eq 'TscCorrected') {
@@ -186,6 +197,11 @@ switch ($Action) {
         try {
             # qemu (and the process emulator.exe starts) inherits this affinity.
             if ($affinity) { [Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity = $affinity }
+            if ($Audio -eq 'dsound') {
+                # qemu 2.12 reads audio options from the environment (QEMU_<driver>_<option>).
+                $env:QEMU_DSOUND_LATENCY_MILLIS = $AudioLatencyMs
+                $env:QEMU_DSOUND_BUFSIZE_OUT = 65536  # ~340 ms of 48 kHz stereo, room above the latency.
+            }
             if ($launchExe -ne $emulator) {
                 $env:ANDROID_EMULATOR_LAUNCHER_DIR = Join-Path $Sdk 'emulator'
                 # What emulator.exe sets up before starting qemu itself (the windowed qemu also needs Qt).
@@ -200,6 +216,8 @@ switch ($Action) {
             $process = Start-Process $launchExe -ArgumentList $arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\emulator.stdout.log" -RedirectStandardError "$logs\emulator.stderr.log"
         } finally {
             [Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity = $oldAffinity
+            $env:QEMU_DSOUND_LATENCY_MILLIS = $oldDsoundLatency
+            $env:QEMU_DSOUND_BUFSIZE_OUT = $oldDsoundBuffer
             $env:VK_LAYER_PATH = $oldLayerPath
             $env:VK_INSTANCE_LAYERS = $oldLayers
             $env:PATH = $oldPath
