@@ -1,7 +1,7 @@
 import { call } from '../api';
 import { activeStatuses, bytes, Cover, Empty } from '../components/common';
 
-const labels = { queued: 'Queued', downloading: 'Downloading', installing: 'Installing', patching: 'Patching', complete: 'Done', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' };
+const labels = { queued: 'Queued', downloading: 'Downloading', installing: 'Installing', complete: 'Done', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' };
 
 export function Downloads({ state, run, pending, setPage }) {
   const games = new Map(state.games.map(g => [g.id, g]));

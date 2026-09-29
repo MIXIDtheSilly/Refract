@@ -20,7 +20,7 @@ const describe = name => `${name} is sample data used to preview the Refract lau
 const state = {
   signedIn: true, account: 'Quest player', running: null, busy: false,
   settings: { sdk: 'C:\\Users\\you\\AppData\\Local\\Android\\Sdk', avd: 'refract-google-api36', port: 5580, memoryMB: 8192,
-    downloadDir: 'C:\\Users\\you\\Downloads\\Refract', ovrportCli: '' },
+    downloadDir: 'C:\\Users\\you\\Downloads\\Refract' },
   games: [
     { ...catalog[0], source: 'meta', owned: true, installed: true, downloaded: true, apk: 'yeeps.apk', package: 'com.TrassGames.G2Companion', version: '1.42.0', lastPlayed: hours(3), description: describe('Yeeps') },
     { ...catalog[1], source: 'meta', owned: true, installed: true, downloaded: true, apk: 'pinball.apk', package: 'com.zenstudios.PFX', version: '2.1.4', lastPlayed: hours(30), description: describe('Pinball FX') },
@@ -80,7 +80,6 @@ const methods = {
     for (const stage of ['Starting Android', 'Installing APK', 'Copying expansion files']) { job.stage = stage; emit(); await wait(700); }
     game.installed = true; job.status = 'complete'; job.stage = 'Installed'; state.busy = false; emit();
   },
-  patch: async id => { await wait(1000); find(id).patched = true; emit(); },
   play: async id => { const game = find(id); if (!game.installed) throw new Error('Install the game first.'); await wait(400); state.running = id; game.lastPlayed = new Date().toISOString(); emit(); },
   stop: async () => { await wait(500); state.running = null; emit(); },
   settings: async values => {
@@ -88,7 +87,6 @@ const methods = {
     state.settings = { ...state.settings, ...values }; emit();
   },
   chooseFolder: async () => 'C:\\Games\\Refract',
-  chooseCli: async () => 'C:\\Tools\\ovrport\\ovrport-cli.exe',
   openFolder: async () => null,
   openStore: async () => null,
 };

@@ -20,7 +20,6 @@ def inspect(apk, sdk):
         'name': label[1] if label else package[1], 'version': version[1] if version else '', 'image': ''}
     with zipfile.ZipFile(apk) as archive:
         names = archive.namelist()
-        result['patched'] = any('overport' in n.lower() or 'ovrport' in n.lower() for n in names)
         result['nativeAbis'] = sorted({n.split('/')[1] for n in names if n.startswith('lib/') and n.endswith('.so')})
         icons = re.findall(r"^application-icon-\d+:'([^']+)'", output, re.M)
         for icon in reversed(icons):

@@ -41,7 +41,6 @@ async fn call(app: AppHandle, window: WebviewWindow, backend: State<'_, Backend>
             }
         }
         "chooseFolder" => Ok(pick(&window, Pick::Folder).await.and_then(|p| p.into_iter().next()).unwrap_or(Value::Null)),
-        "chooseCli" => Ok(pick(&window, Pick::Cli).await.and_then(|p| p.into_iter().next()).unwrap_or(Value::Null)),
         "openFolder" | "openStore" => {
             let target = backend.request(&method, args).await?;
             if let Some(path) = target.get("openPath").and_then(Value::as_str) {
@@ -60,7 +59,7 @@ async fn call(app: AppHandle, window: WebviewWindow, backend: State<'_, Backend>
     }
 }
 
-enum Pick { Apk, Assets, Folder, Cli }
+enum Pick { Apk, Assets, Folder }
 
 async fn pick(window: &WebviewWindow, kind: Pick) -> Option<Vec<Value>> {
     let (sender, receiver) = oneshot::channel::<Option<Vec<FilePath>>>();
@@ -69,7 +68,6 @@ async fn pick(window: &WebviewWindow, kind: Pick) -> Option<Vec<Value>> {
         Pick::Apk => dialog.set_title("Import an Android game").add_filter("Android APK", &["apk"]).pick_file(|f| { let _ = sender.send(f.map(|f| vec![f])); }),
         Pick::Assets => dialog.set_title("Add expansion files / DLC assets").pick_files(|f| { let _ = sender.send(f); }),
         Pick::Folder => dialog.set_title("Choose a folder").pick_folder(|f| { let _ = sender.send(f.map(|f| vec![f])); }),
-        Pick::Cli => dialog.set_title("Choose the ovrport CLI").add_filter("ovrport CLI", &["exe", "jar"]).pick_file(|f| { let _ = sender.send(f.map(|f| vec![f])); }),
     }
     let files = receiver.await.ok()??;
     Some(files.into_iter().filter_map(|f| f.into_path().ok()).map(|p| Value::String(p.to_string_lossy().into_owned())).collect())

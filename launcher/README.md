@@ -25,7 +25,7 @@ minutes); later runs rebuild only when the UI or shell sources changed.
   dialogs, the Meta sign-in window, opening folders/links and the encrypted Meta
   session. The UI has one command, `call`, and only the main window may use it.
 - `backend/server.mjs` holds the launcher logic (library, Meta store, downloads,
-  install, patch, play) on top of `core/`. The shell starts it with Node and
+  install, play) on top of `core/`. The shell starts it with Node and
   talks to it with one JSON message per line over stdin/stdout. It is read from
   the repository, so backend changes need no rebuild.
 
@@ -58,19 +58,13 @@ in any browser without Windows, Android or a Meta account.
   with original filenames. Transfers can be cancelled/retried, incomplete files
   stay `.part`, resume requires an ETag, and completed files receive a local
   SHA-256 for verification before installation. The download folder is selectable.
-- **Game page:** Click a game to open its page. Versions, add-ons, patching,
+- **Game page:** Click a game to open its page. Versions, add-ons,
   content imports and installation updates are under **Manage**.
 - **Add-ons:** Ownership must be returned by Meta before a separate DLC download
   is enabled. Some DLC is only an entitlement to content inside the base game,
-  with no downloadable file. Entitlement and asset-discovery compatibility inside
-  a patched game still depends on ovrport; copying files alone cannot guarantee it.
-- **Local games:** Import an APK (including already-patched APKs) and optional
-  expansion files. Originals are referenced in place, not deleted or modified.
-- **Patch:** Optionally configure the ovrport **CLI** `.exe` or `.jar` in Settings
-  (the JAR requires Java). It writes a separate `-refract.apk`; installation remains
-  a separate explicit action. General patching does not guarantee every game's
-  compatibility with Refract. Existing game-specific runtime compatibility work is
-  not automatically applied to new downloads.
+  with no downloadable file.
+- **Local games:** Import an APK and optional expansion files. Originals are
+  referenced in place, not deleted or modified.
 - **Install:** Uses `adb install -r`, preserving app data. Signature conflicts
   report an error; the launcher does not uninstall the existing app. Assets are
   pushed into `/sdcard/Android/obb/<package>/`. After downloading more content,

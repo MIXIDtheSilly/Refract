@@ -17,7 +17,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { MetaAuth, QuestStore, appId } from '../core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from '../core/download.mjs';
 import { State } from '../core/state.mjs';
-import { Runtime, run } from '../core/runtime.mjs';
+import { Runtime } from '../core/runtime.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +44,6 @@ function refreshArtwork() {
   return artworkTask;
 }
 const message = error => String(error?.message || error).replace(/(?:OC|FRL|EA)[A-Za-z0-9_|-]{30,}/g, '[redacted]').replace(/access_token=[^\s&]+/g, 'access_token=[redacted]');
-const exists = async file => { try { await fs.access(file); return true; } catch { return false; } };
 function publicState() {
   return { ...state.data, signedIn: Boolean(token), account, running: runtime.game, busy,
     // Credentials and signed CDN URLs never reach the UI or library file.
@@ -59,7 +58,7 @@ function changed() {
 async function persist() { await state.save(); changed(); }
 function getGame(id) { const game = state.data.games.find(g => g.id === id); if (!game) throw new Error('Game is no longer in your library.'); return game; }
 function store() { if (!token) throw new Error('Sign in to Meta first.'); return new QuestStore(token); }
-async function exclusive(callback) { if (busy) throw new Error('Wait for the current install or patch to finish.'); busy = true; changed(); try { return await callback(); } finally { busy = false; changed(); } }
+async function exclusive(callback) { if (busy) throw new Error('Wait for the current install to finish.'); busy = true; changed(); try { return await callback(); } finally { busy = false; changed(); } }
 const absolute = value => { if (typeof value !== 'string' || !path.isAbsolute(value)) throw new Error('Select an absolute path.'); return value; };
 
 async function syncInstalled() {
@@ -87,7 +86,7 @@ async function syncMeta() {
 
 async function downloadGame(id, binaryId, dlcId) {
   const game = getGame(id);
-  if (state.data.jobs.some(j => j.gameId === id && ['queued', 'downloading', 'installing', 'patching'].includes(j.status))) throw new Error('This game already has an active task.');
+  if (state.data.jobs.some(j => j.gameId === id && ['queued', 'downloading', 'installing'].includes(j.status))) throw new Error('This game already has an active task.');
   const api = store();
   const job = { id: randomUUID(), gameId: id, name: game.name, status: 'queued', completed: 0, total: 0, binaryId, dlcId, stage: 'Checking Quest build' };
   state.data.jobs.unshift(job); state.data.jobs = state.data.jobs.slice(0, 50);
@@ -122,7 +121,7 @@ async function downloadGame(id, binaryId, dlcId) {
         const apk = files.find(f => f.kind === 'apk');
         const metadata = await runtime.inspect(apk.path);
         if (metadata.package !== plan.package) throw new Error('Downloaded APK package does not match the selected build.');
-        Object.assign(game, { package: metadata.package, activity: metadata.activity, apk: apk.path, patched: metadata.patched,
+        Object.assign(game, { package: metadata.package, activity: metadata.activity, apk: apk.path,
           version: plan.version, binaryId: plan.binaryId, files, downloaded: true });
       } else {
         game.files = [...(game.files || []).filter(f => !files.some(n => n.name === f.name)), ...files];
@@ -185,17 +184,6 @@ const methods = {
     catch (error) { job.status = 'failed'; job.error = message(error); throw error; }
     finally { await persist(); }
   }),
-  patch: id => exclusive(async () => {
-    const game = getGame(id), cli = state.data.settings.ovrportCli;
-    if (!cli || !await exists(cli)) throw new Error('Choose the ovrport CLI executable or JAR in Settings first.');
-    if (!game.apk) throw new Error('Download or import the APK first.');
-    const output = path.join(path.dirname(game.apk), `${path.basename(game.apk, '.apk')}-refract.apk`);
-    const args = ['patch', `--input=${game.apk}`, `--output=${output}`];
-    await run(cli.endsWith('.jar') ? 'java' : cli, cli.endsWith('.jar') ? ['-jar', cli, ...args] : args, { timeout: 20 * 60 * 1000 });
-    const metadata = await runtime.inspect(output);
-    if (metadata.package !== game.package) throw new Error('Patched APK changed its package name; import it separately.');
-    game.apk = output; game.patched = true; await persist();
-  }),
   play: async id => {
     const game = getGame(id); if (busy) throw new Error('Wait for installation to finish.');
     if (!game.installed) throw new Error('Install the game first.');
@@ -211,7 +199,7 @@ const methods = {
   },
   stop: () => runtime.stop(),
   settings: async values => {
-    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'ovrportCli'];
+    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir'];
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
     if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
     const settings = { ...state.data.settings };
@@ -238,7 +226,9 @@ const loaded = (async () => {
   state = new State(dataDirectory); await state.load();
   // Digitalis (the ARM64 translator Refract needs) is built for Android 16, so the default AVD is API 36.
   state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk'), avd: 'refract-google-api36', port: 5580,
-    memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'), ovrportCli: '', ...state.data.settings };
+    memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'), ...state.data.settings };
+  // Refract no longer needs games patched; drop the old ovrport setting.
+  delete state.data.settings.ovrportCli;
   runtime = new Runtime(root, state.data.settings);
 })();
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

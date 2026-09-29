@@ -37,6 +37,8 @@ test('backend answers over stdio, validates settings and keeps secrets out of st
   assert.match((await request('settings', { port: 5581 })).error, /even-numbered port/);
   assert.match((await request('nope')).error, /Unknown launcher request/);
   assert.match((await request('toString')).error, /Unknown launcher request/);
+  assert.match((await request('patch', 'local:com.example.game')).error, /Unknown launcher request/);
+  assert.equal('ovrportCli' in state.value.settings, false);
   assert.match((await request('import', 'relative.apk')).error, /absolute path/);
   assert.match((await request('builds', '123456')).error, /Sign in to Meta first/);
 

@@ -24,10 +24,7 @@ Expansion-file placement follows Meta's Android OBB directory convention:
 Meta checks downloadable asset entitlements on its delivery services:
 [Meta mobile DLC](https://developers.meta.com/horizon/blog/introducing-mobile-dlc-support-in-beta/).
 
-Optional patching invokes the user's installed
-[ovrport CLI](https://github.com/ovrport/app/tree/master/overportcli) as a separate
-program using its documented `patch --input= --output=` interface. No ovrport
-binaries are redistributed here. Games and artwork remain their owners' property.
+Games and artwork remain their owners' property.
 
 ## Desktop shell
 

@@ -7,7 +7,7 @@ export function SettingsPage({ state, run, pending, notify, connect }) {
   const [dirty, setDirty] = useState(false);
   const edit = (key, value) => { setDraft(d => ({ ...d, [key]: value })); setDirty(true); };
   const browse = key => run(`choose-${key}`, async () => {
-    const value = await call(key === 'ovrportCli' ? 'chooseCli' : 'chooseFolder');
+    const value = await call('chooseFolder');
     if (value) edit(key, value);
   });
   const locked = state.busy || Boolean(state.running) || state.jobs.some(j => activeStatuses.includes(j.status));
@@ -41,11 +41,6 @@ export function SettingsPage({ state, run, pending, notify, connect }) {
         <h2>Downloads</h2>
         <p>Where APK and expansion files are saved. Five GB stays free so Android can still boot.</p>
         {field('downloadDir', 'Download folder', { required: true }, true)}
-      </section>
-      <section className="panel">
-        <h2>Patching</h2>
-        <p>Optional. The ovrport CLI writes a separate patched APK; installing stays a separate step.</p>
-        {field('ovrportCli', 'ovrport CLI', { placeholder: 'ovrport .exe or .jar' }, true)}
       </section>
       <section className="panel">
         <h2>Android runtime</h2>

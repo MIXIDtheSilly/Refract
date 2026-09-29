@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { LogoMark } from './logo';
 
-export const activeStatuses = ['queued', 'downloading', 'installing', 'patching'];
+export const activeStatuses = ['queued', 'downloading', 'installing'];
 
 export function bytes(n) {
   if (!n) return '0 MB';

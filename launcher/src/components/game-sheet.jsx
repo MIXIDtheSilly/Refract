@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Dialog } from 'radix-ui';
-import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, Play, Plus, RefreshCcw, Wrench, X } from 'lucide-react';
+import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, Play, Plus, RefreshCcw, X } from 'lucide-react';
 import { call } from '../api';
 import { activeStatuses, ago, bytes, Cover, GameStatus, IconButton, isFree } from './common';
 
@@ -36,7 +36,6 @@ export function GameSheet({ game, state, local, onClose, run, pending, setPage, 
     { icon: History, label: 'Versions', hint: 'Pick a Quest build', disabled: busy || !state.signedIn, onClick: () => loadExtra('builds') },
     { icon: PackagePlus, label: 'Add-ons', hint: 'DLC you own', disabled: busy || !state.signedIn, onClick: () => loadExtra('dlc') });
   if (local && game.apk) manage.push(
-    { icon: Wrench, label: 'Patch with ovrport', hint: game.patched ? 'Patched' : '', disabled: busy, onClick: () => operate(async () => { await call('patch', game.id); notify('Patched'); }) },
     { icon: FilePlus2, label: 'Add content files', hint: 'OBB / assets', disabled: busy, onClick: () => operate(async () => { await call('importAssets', game.id); notify('Install again to apply content files'); }) },
     ...(game.installed ? [{ icon: RefreshCcw, label: 'Update installation', hint: 'Reinstall, keeps saves', disabled: busy, onClick: install }] : []),
     { icon: FolderOpen, label: 'Open folder', disabled: false, onClick: () => operate(() => call('openFolder', game.id)) });
