@@ -13,7 +13,8 @@ int main(){
         {5,0,1,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,offsetof(Data,buffer),0},
         {6,0,1,VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,offsetof(Data,view),0},
         {7,0,1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,offsetof(Data,sampled),0}};
-    refract::ExpandedDescriptorTemplate out(entries,reinterpret_cast<VkDescriptorSet>(16),&data);
+    refract::ExpandedDescriptorTemplate out;
+    out.expand(refract::DescriptorTemplateLayout(entries.data(),entries.size()),reinterpret_cast<VkDescriptorSet>(16),&data);
     if(out.writes.size()!=5 || out.writes[0].dstBinding!=3 || out.writes[0].dstArrayElement!=1 ||
        out.writes[0].pImageInfo[1].imageView!=data.sampled[1].imageView || out.writes[0].pImageInfo[0].sampler ||
        out.writes[1].pImageInfo[0].imageView || out.writes[1].pImageInfo[0].sampler!=data.sampler.sampler ||
@@ -23,7 +24,25 @@ int main(){
     // Zero stride repeats the same payload; packed/unaligned entries must be copied safely.
     std::array<unsigned char,sizeof(data)+1> unaligned{};std::memcpy(unaligned.data()+1,&data,sizeof(data));
     entries[0].stride=0;
-    refract::ExpandedDescriptorTemplate repeated(entries,reinterpret_cast<VkDescriptorSet>(16),unaligned.data()+1);
+    refract::ExpandedDescriptorTemplate repeated;
+    repeated.expand(refract::DescriptorTemplateLayout(entries.data(),entries.size()),reinterpret_cast<VkDescriptorSet>(16),unaligned.data()+1);
     if(repeated.writes[0].pImageInfo[1].imageView!=data.sampled[0].imageView)return 1;
+    // Reused scratch must not keep the image view of an earlier, differently shaped template.
+    const VkDescriptorUpdateTemplateEntry samplerOnly{0,0,1,VK_DESCRIPTOR_TYPE_SAMPLER,offsetof(Data,sampler),0};
+    out.expand(refract::DescriptorTemplateLayout(&samplerOnly,1),reinterpret_cast<VkDescriptorSet>(17),&data);
+    if(out.writes.size()!=1 || out.writes[0].dstSet!=reinterpret_cast<VkDescriptorSet>(17) ||
+       out.writes[0].pImageInfo[0].sampler!=data.sampler.sampler || out.writes[0].pImageInfo[0].imageView)return 1;
+    // A re-entrant update (a layer below calling back in) gets its own slot; the outer one stays valid.
+    refract::DescriptorScratchPool pool;
+    {
+        refract::DescriptorScratchPool::Lease outer(pool);
+        {
+            refract::DescriptorScratchPool::Lease inner(pool);
+            if(&inner.scratch==&outer.scratch || pool.depth!=2)return 1;
+        }
+        refract::DescriptorScratchPool::Lease again(pool);
+        if(&again.scratch==&outer.scratch || pool.depth!=2)return 1;
+    }
+    if(pool.depth!=0 || pool.slots.size()!=2)return 1;
     std::puts("Descriptor template expansion passed");
 }

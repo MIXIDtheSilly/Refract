@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include "vulkan_descriptor_template.h"
 #include <sys/system_properties.h>
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO,"Refract.VulkanCompat",__VA_ARGS__)
@@ -18,8 +19,10 @@ bool textureDiagnostics(){static bool enabled=[] {char value[PROP_VALUE_MAX]{};_
 void* realLibrary(){static void* h=dlopen("libvulkan.so",RTLD_NOW|RTLD_LOCAL);return h;}
 template<class T>T real(const char* name){return reinterpret_cast<T>(dlsym(realLibrary(),name));}
 using TemplateKey = std::pair<VkDevice, VkDescriptorUpdateTemplate>;
-std::mutex templateMutex;
-std::map<TemplateKey, std::shared_ptr<const std::vector<VkDescriptorUpdateTemplateEntry>>> templates;
+using Layout = refract::DescriptorTemplateLayout;
+// Descriptor updates run thousands of times a frame: read under a shared lock.
+std::shared_mutex templateMutex;
+std::map<TemplateKey, std::shared_ptr<const Layout>> templates;
 struct Promotion {const char* name;uint32_t api;uint32_t revision;};
 constexpr Promotion promotions[]={
     {VK_KHR_MULTIVIEW_EXTENSION_NAME,VK_API_VERSION_1_1,VK_KHR_MULTIVIEW_SPEC_VERSION},
@@ -47,27 +50,33 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice device,const VkAllocationCal
     real<PFN_vkDestroyDevice>("vkDestroyDevice")(device,alloc);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(VkDevice device,const VkDescriptorUpdateTemplateCreateInfo* info,const VkAllocationCallbacks* alloc,VkDescriptorUpdateTemplate* out){
-    std::shared_ptr<const std::vector<VkDescriptorUpdateTemplateEntry>> entries;
+    std::shared_ptr<const Layout> layout;
     if(info->templateType == VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET &&
        std::all_of(info->pDescriptorUpdateEntries, info->pDescriptorUpdateEntries + info->descriptorUpdateEntryCount,
            [](const auto& e){ return refract::descriptor_template_supported(e.descriptorType); })) {
-        entries = std::make_shared<const std::vector<VkDescriptorUpdateTemplateEntry>>(
-            info->pDescriptorUpdateEntries, info->pDescriptorUpdateEntries + info->descriptorUpdateEntryCount);
+        layout = std::make_shared<const Layout>(info->pDescriptorUpdateEntries, info->descriptorUpdateEntryCount);
     }
     auto result=real<PFN_vkCreateDescriptorUpdateTemplate>("vkCreateDescriptorUpdateTemplate")(device,info,alloc,out);
-    if(result==VK_SUCCESS && entries){std::lock_guard lock(templateMutex);templates[{device,*out}]=std::move(entries);}
+    if(result==VK_SUCCESS && layout){std::lock_guard lock(templateMutex);templates[{device,*out}]=std::move(layout);}
     return result;
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(VkDevice device,VkDescriptorUpdateTemplate value,const VkAllocationCallbacks* alloc){
-    {std::lock_guard lock(templateMutex);templates.erase({device,value});}
+    std::shared_ptr<const Layout> retired;
+    {std::lock_guard lock(templateMutex);auto it=templates.find({device,value});
+        if(it!=templates.end()){retired=std::move(it->second);templates.erase(it);}}
+    // An in-flight expansion owns its layout; free it and call the driver outside the registry lock.
     real<PFN_vkDestroyDescriptorUpdateTemplate>("vkDestroyDescriptorUpdateTemplate")(device,value,alloc);
 }
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(VkDevice device,VkDescriptorSet set,VkDescriptorUpdateTemplate value,const void* data){
-    std::shared_ptr<const std::vector<VkDescriptorUpdateTemplateEntry>> entries;
-    {std::lock_guard lock(templateMutex);auto it=templates.find({device,value});if(it!=templates.end())entries=it->second;}
-    if(!entries){real<PFN_vkUpdateDescriptorSetWithTemplate>("vkUpdateDescriptorSetWithTemplate")(device,set,value,data);return;}
-    refract::ExpandedDescriptorTemplate expanded(*entries,set,data);
-    real<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(device,static_cast<uint32_t>(expanded.writes.size()),expanded.writes.data(),0,nullptr);
+    static const auto updateTemplate=real<PFN_vkUpdateDescriptorSetWithTemplate>("vkUpdateDescriptorSetWithTemplate");
+    static const auto updateSets=real<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets");
+    std::shared_ptr<const Layout> layout;
+    {std::shared_lock lock(templateMutex);auto it=templates.find({device,value});if(it!=templates.end())layout=it->second;}
+    if(!layout){updateTemplate(device,set,value,data);return;}
+    thread_local refract::DescriptorScratchPool pool;
+    refract::DescriptorScratchPool::Lease lease(pool);
+    lease.scratch.expand(*layout,set,data);
+    updateSets(device,static_cast<uint32_t>(lease.scratch.writes.size()),lease.scratch.writes.data(),0,nullptr);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplateKHR(VkDevice d,const VkDescriptorUpdateTemplateCreateInfo* i,const VkAllocationCallbacks* a,VkDescriptorUpdateTemplate* o){return vkCreateDescriptorUpdateTemplate(d,i,a,o);}
 VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplateKHR(VkDevice d,VkDescriptorUpdateTemplate t,const VkAllocationCallbacks* a){vkDestroyDescriptorUpdateTemplate(d,t,a);}
