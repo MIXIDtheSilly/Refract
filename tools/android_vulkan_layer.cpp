@@ -2,27 +2,66 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 #include <android/log.h>
+#include <sys/system_properties.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include "vulkan_descriptor_template.h"
 
 namespace {
 constexpr const char* layerName="VK_LAYER_REFRACT_runtime";
 void* key(const void* h){return h?*reinterpret_cast<void* const*>(h):nullptr;}
 struct Instance {VkInstance handle;PFN_vkGetInstanceProcAddr gipa;};
-struct Device {VkDevice handle;PFN_vkGetDeviceProcAddr gdpa;};
-std::mutex mutex;
+// Descriptor entry points are resolved once in vkCreateDevice: games update
+// descriptors thousands of times a frame, and a by-name lookup each time is not free.
+struct Device {
+    VkDevice handle;
+    PFN_vkGetDeviceProcAddr gdpa;
+    PFN_vkCreateDescriptorUpdateTemplate createTemplate = nullptr;
+    PFN_vkDestroyDescriptorUpdateTemplate destroyTemplate = nullptr;
+    PFN_vkUpdateDescriptorSetWithTemplate updateTemplate = nullptr;
+    PFN_vkUpdateDescriptorSets updateSets = nullptr;
+};
+// Lookups on the per-draw path take a shared lock; only create/destroy calls write.
+std::shared_mutex mutex;
 std::map<void*,Instance> instances;
 std::map<void*,Device> devices;
-using Entries=std::vector<VkDescriptorUpdateTemplateEntry>;
-std::map<std::pair<VkDevice,VkDescriptorUpdateTemplate>,std::shared_ptr<const Entries>> templates;
-Instance instance(const void* h){std::lock_guard lock(mutex);return instances.at(key(h));}
-Device device(const void* h){std::lock_guard lock(mutex);return devices.at(key(h));}
+using Layout=refract::DescriptorTemplateLayout;
+std::map<std::pair<VkDevice,VkDescriptorUpdateTemplate>,std::shared_ptr<const Layout>> templates;
+Instance instance(const void* h){std::shared_lock lock(mutex);return instances.at(key(h));}
+Device device(const void* h){std::shared_lock lock(mutex);return devices.at(key(h));}
 template<class T>T function(Instance s,const char* n){return reinterpret_cast<T>(s.gipa(s.handle,n));}
 template<class T>T function(Device s,const char* n){return reinterpret_cast<T>(s.gdpa(s.handle,n));}
+// Opt-in timings (debug.refract.descriptor_profile=1); the normal path performs no clock reads.
+struct DescriptorProfile {
+    using Clock=std::chrono::steady_clock;
+    static bool enabled(){static const bool active=[] {
+        char value[PROP_VALUE_MAX]{};__system_property_get("debug.refract.descriptor_profile",value);
+        return !std::strcmp(value,"1");}();return active;}
+    struct Totals {uint64_t calls=0,expanded=0,writes=0,lookup=0,expand=0,driver=0;};
+    bool active=enabled();
+    Clock::time_point start{},lookedUp{},expanded{};
+    DescriptorProfile(){if(active)start=Clock::now();}
+    void lookupDone(){if(active)lookedUp=Clock::now();}
+    void expansionDone(){if(active)expanded=Clock::now();}
+    void finish(bool converted,size_t writes){
+        if(!active)return;
+        const auto end=Clock::now();
+        auto ns=[](auto a,auto b){return std::chrono::duration_cast<std::chrono::nanoseconds>(b-a).count();};
+        thread_local Totals totals;
+        ++totals.calls;totals.expanded+=converted;totals.writes+=writes;
+        totals.lookup+=ns(start,lookedUp);totals.expand+=ns(lookedUp,expanded);totals.driver+=ns(expanded,end);
+        if(totals.calls%4096==0)__android_log_print(ANDROID_LOG_INFO,"Refract.Descriptors",
+            "thread calls=%llu expanded=%llu fallback=%llu writes=%llu avg_us lookup=%.3f expand=%.3f downstream=%.3f",
+            (unsigned long long)totals.calls,(unsigned long long)totals.expanded,
+            (unsigned long long)(totals.calls-totals.expanded),(unsigned long long)totals.writes,
+            totals.lookup/(1000.0*totals.calls),totals.expand/(1000.0*totals.calls),totals.driver/(1000.0*totals.calls));
+    }
+};
 struct Promotion {const char* name;uint32_t api,revision;};
 constexpr Promotion promotions[]={
     {VK_KHR_MULTIVIEW_EXTENSION_NAME,VK_API_VERSION_1_1,VK_KHR_MULTIVIEW_SPEC_VERSION},
@@ -86,7 +125,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,const Vk
     for(uint32_t i=0;i<info->enabledExtensionCount;++i){auto n=info->ppEnabledExtensionNames[i];bool promoted=false;for(auto& p:promotions)if(api>=p.api&&!std::strcmp(n,p.name)&&!has(es,n))promoted=true;if(!promoted)names.push_back(n);}
     auto modified=*info;modified.enabledExtensionCount=names.size();modified.ppEnabledExtensionNames=names.data();
     auto result=create(physical,&modified,alloc,out);
-    if(result==VK_SUCCESS){std::lock_guard lock(mutex);devices[key(*out)]={*out,gdpa};}
+    if(result==VK_SUCCESS){
+        Device state{*out,gdpa};
+        state.createTemplate=function<PFN_vkCreateDescriptorUpdateTemplate>(state,"vkCreateDescriptorUpdateTemplate");
+        if(!state.createTemplate)state.createTemplate=function<PFN_vkCreateDescriptorUpdateTemplate>(state,"vkCreateDescriptorUpdateTemplateKHR");
+        state.destroyTemplate=function<PFN_vkDestroyDescriptorUpdateTemplate>(state,"vkDestroyDescriptorUpdateTemplate");
+        if(!state.destroyTemplate)state.destroyTemplate=function<PFN_vkDestroyDescriptorUpdateTemplate>(state,"vkDestroyDescriptorUpdateTemplateKHR");
+        state.updateTemplate=function<PFN_vkUpdateDescriptorSetWithTemplate>(state,"vkUpdateDescriptorSetWithTemplate");
+        if(!state.updateTemplate)state.updateTemplate=function<PFN_vkUpdateDescriptorSetWithTemplate>(state,"vkUpdateDescriptorSetWithTemplateKHR");
+        state.updateSets=function<PFN_vkUpdateDescriptorSets>(state,"vkUpdateDescriptorSets");
+        std::lock_guard lock(mutex);devices[key(*out)]=state;
+    }
     return result;
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice h,const VkAllocationCallbacks* alloc){
@@ -94,28 +143,37 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice h,const VkAllocationCallback
     function<PFN_vkDestroyDevice>(s,"vkDestroyDevice")(h,alloc);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(VkDevice h,const VkDescriptorUpdateTemplateCreateInfo* info,const VkAllocationCallbacks* alloc,VkDescriptorUpdateTemplate* out){
-    auto s=device(h);std::shared_ptr<const Entries> entries;
-    if(info->templateType==VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET && std::all_of(info->pDescriptorUpdateEntries,info->pDescriptorUpdateEntries+info->descriptorUpdateEntryCount,[](auto& e){return refract::descriptor_template_supported(e.descriptorType);}))entries=std::make_shared<const Entries>(info->pDescriptorUpdateEntries,info->pDescriptorUpdateEntries+info->descriptorUpdateEntryCount);
-    auto create=function<PFN_vkCreateDescriptorUpdateTemplate>(s,"vkCreateDescriptorUpdateTemplate");
-    if(!create)create=function<PFN_vkCreateDescriptorUpdateTemplate>(s,"vkCreateDescriptorUpdateTemplateKHR");
-    if(!create)return VK_ERROR_EXTENSION_NOT_PRESENT;
-    auto result=create(h,info,alloc,out);
-    if(result==VK_SUCCESS&&entries){std::lock_guard lock(mutex);templates[{h,*out}]=std::move(entries);}
+    auto s=device(h);std::shared_ptr<const Layout> layout;
+    if(info->templateType==VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET && std::all_of(info->pDescriptorUpdateEntries,info->pDescriptorUpdateEntries+info->descriptorUpdateEntryCount,[](auto& e){return refract::descriptor_template_supported(e.descriptorType);}))layout=std::make_shared<const Layout>(info->pDescriptorUpdateEntries,info->descriptorUpdateEntryCount);
+    if(!s.createTemplate)return VK_ERROR_EXTENSION_NOT_PRESENT;
+    auto result=s.createTemplate(h,info,alloc,out);
+    if(result==VK_SUCCESS&&layout){std::lock_guard lock(mutex);templates[{h,*out}]=std::move(layout);}
     return result;
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(VkDevice h,VkDescriptorUpdateTemplate value,const VkAllocationCallbacks* alloc){
-    auto s=device(h);{std::lock_guard lock(mutex);templates.erase({h,value});}
-    auto destroy=function<PFN_vkDestroyDescriptorUpdateTemplate>(s,"vkDestroyDescriptorUpdateTemplate");
-    if(!destroy)destroy=function<PFN_vkDestroyDescriptorUpdateTemplate>(s,"vkDestroyDescriptorUpdateTemplateKHR");
-    destroy(h,value,alloc);
+    Device s;std::shared_ptr<const Layout> retired;
+    {std::lock_guard lock(mutex);s=devices.at(key(h));auto it=templates.find({h,value});
+        if(it!=templates.end()){retired=std::move(it->second);templates.erase(it);}}
+    // An in-flight expansion owns its layout; free it and call the driver outside the registry lock.
+    s.destroyTemplate(h,value,alloc);
 }
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(VkDevice h,VkDescriptorSet set,VkDescriptorUpdateTemplate value,const void* data){
-    auto s=device(h);std::shared_ptr<const Entries> entries;
-    {std::lock_guard lock(mutex);auto it=templates.find({h,value});if(it!=templates.end())entries=it->second;}
-    if(entries){refract::ExpandedDescriptorTemplate expanded(*entries,set,data);function<PFN_vkUpdateDescriptorSets>(s,"vkUpdateDescriptorSets")(h,expanded.writes.size(),expanded.writes.data(),0,nullptr);return;}
-    auto update=function<PFN_vkUpdateDescriptorSetWithTemplate>(s,"vkUpdateDescriptorSetWithTemplate");
-    if(!update)update=function<PFN_vkUpdateDescriptorSetWithTemplate>(s,"vkUpdateDescriptorSetWithTemplateKHR");
-    update(h,set,value,data);
+    DescriptorProfile profile;
+    Device s;std::shared_ptr<const Layout> layout;
+    {std::shared_lock lock(mutex);s=devices.at(key(h));auto it=templates.find({h,value});if(it!=templates.end())layout=it->second;}
+    profile.lookupDone();
+    if(layout){
+        thread_local refract::DescriptorScratchPool pool;
+        refract::DescriptorScratchPool::Lease lease(pool);
+        lease.scratch.expand(*layout,set,data);
+        profile.expansionDone();
+        s.updateSets(h,static_cast<uint32_t>(lease.scratch.writes.size()),lease.scratch.writes.data(),0,nullptr);
+        profile.finish(true,lease.scratch.writes.size());
+        return;
+    }
+    profile.expansionDone();
+    s.updateTemplate(h,set,value,data);
+    profile.finish(false,0);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplateKHR(VkDevice h,const VkDescriptorUpdateTemplateCreateInfo* i,const VkAllocationCallbacks* a,VkDescriptorUpdateTemplate* o){return vkCreateDescriptorUpdateTemplate(h,i,a,o);}
 VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplateKHR(VkDevice h,VkDescriptorUpdateTemplate t,const VkAllocationCallbacks* a){vkDestroyDescriptorUpdateTemplate(h,t,a);}

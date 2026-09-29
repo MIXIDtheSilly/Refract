@@ -95,6 +95,12 @@ ComPtr<ID3D11DeviceContext> g_context;
 // acknowledgment, and so the game, waited up to a screen refresh (the game locked at ~64 fps).
 ComPtr<ID3D11Device> g_copyDevice;
 ComPtr<ID3D11DeviceContext> g_copyContext;
+// Each copy signals the next fence value, so the ACK thread can sleep until its copy is done
+// instead of spinning on a query. Null fence: event-query polling fallback.
+ComPtr<ID3D11DeviceContext4> g_copyContext4;
+ComPtr<ID3D11Fence> g_copyFence;
+HANDLE g_copyFenceEvent = nullptr;
+uint64_t g_copyFenceValue = 0;  // Last value signalled; receive thread only.
 Shared g_shared;
 
 // Receive thread -> window thread: copies of a shared eye pair (eye 0 left half, eye 1 right half).
@@ -161,12 +167,24 @@ bool ensure_slot(Slot& slot, UINT width, UINT height, DXGI_FORMAT typeless)
 }
 
 // The guest may overwrite its shared textures once acknowledged, so the copy must be finished.
-bool wait_copy(ID3D11Query* query)
+bool wait_copy(ID3D11Query* query, uint64_t fenceValue)
 {
     static proto::PerfStats stats("viewer-copy-complete");
     proto::PerfScope scope(stats);
     // Under the runtime's 3 s acknowledgment timeout, but past ordinary hitches (a failed copy drops the stream).
     const auto deadline = Clock::now() + std::chrono::milliseconds(2500);
+    if (!query) {
+        // The auto-reset event can carry a stale wakeup from an earlier timed-out wait,
+        // so the fence value decides, not the wakeup.
+        for (;;) {
+            const uint64_t completed = g_copyFence->GetCompletedValue();
+            if (completed == UINT64_MAX) return false;  // Device removed.
+            if (completed >= fenceValue) return true;
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+            if (left <= 0 || FAILED(g_copyFence->SetEventOnCompletion(fenceValue, g_copyFenceEvent))) return false;
+            WaitForSingleObject(g_copyFenceEvent, static_cast<DWORD>(left));
+        }
+    }
     HRESULT result;
     while ((result = g_copyContext->GetData(query, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE) {
         if (Clock::now() > deadline) return false;
@@ -285,7 +303,7 @@ public:
             if (found == pendingCopies_.end()) return true;  // Panel intentionally skipped.
             copy = found->second;
         }
-        const bool completed = wait_copy(copy.query.Get());
+        const bool completed = wait_copy(copy.query.Get(), copy.fenceValue);
         if (!completed) std::fprintf(stderr, "viewer: GPU copy of frame seq=%llu did not complete within 2.5 s\n",
                                      static_cast<unsigned long long>(sequence));
         if (completed) {
@@ -399,16 +417,20 @@ public:
             for (UINT eye = 0; eye < 2; ++eye)
                 g_copyContext->CopySubresourceRegion(entry.copy.Get(), 0, eye * header.width, 0, 0, (*textures)[eye].Get(), 0, nullptr);
             entry.copyLock->ReleaseSync(0);
-            ComPtr<ID3D11Query> query;
-            D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
-            if (FAILED(g_copyDevice->CreateQuery(&desc, &query))) return false;
-            g_copyContext->End(query.Get());
+            PendingCopy pending{nullptr, 0, quads, index, header.width, header.height, typeless, copyStart, std::move(layout)};
+            if (g_copyFence) {
+                pending.fenceValue = ++g_copyFenceValue;
+                if (FAILED(g_copyContext4->Signal(g_copyFence.Get(), pending.fenceValue))) return false;
+            } else {
+                D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
+                if (FAILED(g_copyDevice->CreateQuery(&desc, &pending.query))) return false;
+                g_copyContext->End(pending.query.Get());
+            }
             g_copyContext->Flush();
             handoff.submitted = index;
             {
                 std::lock_guard lock(copyMutex_);
-                pendingCopies_.emplace(header.sequence,
-                    PendingCopy{query, quads, index, header.width, header.height, typeless, copyStart, std::move(layout)});
+                pendingCopies_.emplace(header.sequence, std::move(pending));
             }
             return true;
         }
@@ -442,7 +464,8 @@ private:
     }
 
     struct PendingCopy {
-        ComPtr<ID3D11Query> query;
+        ComPtr<ID3D11Query> query;  // Only without a copy fence.
+        uint64_t fenceValue = 0;
         bool quads = false;
         int index = -1;
         UINT width = 0, height = 0;
@@ -597,6 +620,15 @@ bool create_device()
     ComPtr<ID3D11Multithread> copyMultithread;
     if (FAILED(g_copyContext.As(&copyMultithread))) return false;
     copyMultithread->SetMultithreadProtected(TRUE);  // Receive submits copies while the ACK thread checks their queries.
+    ComPtr<ID3D11Device5> copyDevice5;
+    const bool fence = SUCCEEDED(g_copyDevice.As(&copyDevice5)) && SUCCEEDED(g_copyContext.As(&g_copyContext4)) &&
+        SUCCEEDED(copyDevice5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_copyFence))) &&
+        (g_copyFenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr)) != nullptr;
+    if (!fence) {
+        g_copyFence.Reset();
+        g_copyContext4.Reset();
+    }
+    std::fprintf(stderr, "viewer: GPU copy completion via %s\n", fence ? "fence event" : "query polling");
     if (chosen) {
         DXGI_ADAPTER_DESC1 desc{};
         chosen->GetDesc1(&desc);
