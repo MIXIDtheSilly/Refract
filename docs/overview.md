@@ -11,6 +11,11 @@ The current prototype proves loader/runtime integration and stereo frame transpo
 The Windows desktop launcher is in [launcher/](../launcher/README.md). Run
 `powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1` for a local game
 library, Meta Quest storefront, APK/content downloads, and Refract install/play controls.
+When it starts the emulator (`tools/windows_android_emulator.ps1 -Action Start`), it applies the
+same CPU tuning as `scripts/start_emulator.ps1`: up to six vCPUs through the multi-core qemu copy
+(run `python tools/patch_emulator_cores.py` once), `tsc=nowatchdog idle=poll`, P-core affinity,
+`hw.gltransport=asg` and reboots until the guest clock is the TSC. Each game start also sets the
+guest's `NO_TTWU_QUEUE` scheduler feature (`tools/android_runtime_policy.py`).
 
 An experimental Android Emulator / Gfxstream path uses native Windows host GPU
 rendering, with no WSL. PowerShell build, launch and GPU-verification scripts

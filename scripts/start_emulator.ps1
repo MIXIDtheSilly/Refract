@@ -26,31 +26,9 @@ param([switch]$NoGpuSharing, [switch]$Hidden, [ValidateSet('dsound', 'winaudio',
       [switch]$AnyCore, [ValidateRange(10, 200)][int]$AudioLatencyMs = 50)
 $emulator = 'C:\Users\mixid\Android\Sdk\emulator'
 if (!$AnyCore) {
-    Add-Type -TypeDefinition @'
-using System; using System.Runtime.InteropServices;
-public static class PCores {
-    [DllImport("kernel32.dll")] static extern bool GetLogicalProcessorInformationEx(int relation, IntPtr buffer, ref int length);
-    // Affinity mask of the cores with the highest EfficiencyClass (the P-cores; all cores on a non-hybrid CPU).
-    public static long Mask() {
-        int length = 0;
-        GetLogicalProcessorInformationEx(0, IntPtr.Zero, ref length);  // 0 = RelationProcessorCore
-        IntPtr buffer = Marshal.AllocHGlobal(length);
-        try {
-            GetLogicalProcessorInformationEx(0, buffer, ref length);
-            long mask = 0; int best = -1;
-            for (int offset = 0; offset < length; offset += Marshal.ReadInt32(buffer + offset, 4)) {
-                int efficiency = Marshal.ReadByte(buffer + offset, 9);
-                long coreMask = Marshal.ReadInt64(buffer + offset, 32);  // GroupMask[0].Mask
-                if (efficiency > best) { best = efficiency; mask = 0; }
-                if (efficiency == best) mask |= coreMask;
-            }
-            return mask;
-        } finally { Marshal.FreeHGlobal(buffer); }
-    }
-}
-'@
+    . (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\p_core_affinity.ps1')
     # Processes started below (and the qemu that emulator.exe starts) inherit this affinity.
-    [Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity = [IntPtr][PCores]::Mask()
+    [Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity = [IntPtr](Get-PCoreMask)
 }
 $layer = Join-Path (Split-Path $PSScriptRoot -Parent) 'build-windows-gpu-layer\Release'
 if (!$NoGpuSharing) {

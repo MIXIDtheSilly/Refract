@@ -39,7 +39,7 @@ export class Runtime {
     await run('powershell.exe', powershellArgs(path.join(this.root, 'tools/windows_android_emulator.ps1'), {
       Action: 'Start', Avd: this.settings.avd, Port: this.settings.port, Sdk: this.settings.sdk,
       Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, GuestClock: this.settings.guestClock || 'Default', GpuSharing: true
-    }), { timeout: 240000 });
+    }), { timeout: 600000 });  // Room for the reboots that get the guest a TSC clock.
   }
   async inspect(apk) {
     const data = JSON.parse(await run('python', [path.join(this.root, 'launcher/inspect_apk.py'), '--apk', apk, '--sdk', this.settings.sdk]));
