@@ -38,7 +38,9 @@ export class Runtime {
     }
     await run('powershell.exe', powershellArgs(path.join(this.root, 'tools/windows_android_emulator.ps1'), {
       Action: 'Start', Avd: this.settings.avd, Port: this.settings.port, Sdk: this.settings.sdk,
-      Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, GuestClock: this.settings.guestClock || 'Default', GpuSharing: true
+      // No clock correction: it only works with emulator 36.5.11 and runs a single vCPU; the start
+      // script's tsc=nowatchdog and TSC reboots keep the guest on the TSC clock instead.
+      Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, GpuSharing: true
     }), { timeout: 600000 });  // Room for the reboots that get the guest a TSC clock.
   }
   async inspect(apk) {

@@ -2,7 +2,7 @@ param(
     [string]$GameName,
     [string]$AppApk,
     [string]$RuntimeApk,
-    [ValidatePattern('^[a-zA-Z0-9_-]+$')][string]$Avd = 'refract-nvidia-api34',
+    [ValidatePattern('^[a-zA-Z0-9_-]+$')][string]$Avd = 'refract-google-api36',
     [ValidatePattern('^[a-zA-Z0-9_.]+$')][string]$Package = 'com.meta.samples.NorthStar',
     [ValidatePattern('^[a-zA-Z0-9_./]+$')][string]$Activity = 'com.meta.samples.NorthStar/com.meta.northstar.NorthStarActivity',
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",

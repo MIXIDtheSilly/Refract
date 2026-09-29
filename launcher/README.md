@@ -58,7 +58,9 @@ Source components are in `ui/`, with shared shadcn components in `ui/components/
   Closing the game preview stops the game. Closing the launcher does not
   intentionally stop a running game; stop it with its preview window.
 
-The current default AVD is `refract-games-api34` on port 5580 with 8 GB guest RAM.
+The current default AVD is `refract-google-api36` on port 5580 with 8 GB guest RAM. It must be an
+Android 16 (API 36) AVD: games run on the Digitalis ARM64 translator, which is built for Android 16.
+Starting the emulator installs Digitalis into it if needed (`scripts/translator.ps1`).
 Change these in Settings for another existing Refract setup. The launcher does not
 provision WHPX, SteamVR, the system image, or an AVD from scratch.
 

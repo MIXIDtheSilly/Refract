@@ -153,9 +153,9 @@ async function downloadGame(id, binaryId, dlcId) {
 
 async function bootstrap() {
 state = new State(app.getPath('userData')); await state.load();
-state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk'), avd: 'refract-games-api34', port: 5580,
-  memoryMB: 8192, downloadDir: path.join(app.getPath('downloads'), 'Refract'), ovrportCli: '',
-  guestClock: await exists(path.join(root, 'build-whpx-clock/Release/refract_clock_launcher.exe')) ? 'TscCorrected' : 'Default', ...state.data.settings };
+// Digitalis (the ARM64 translator Refract needs) is built for Android 16, so the default AVD is API 36.
+state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk'), avd: 'refract-google-api36', port: 5580,
+  memoryMB: 8192, downloadDir: path.join(app.getPath('downloads'), 'Refract'), ovrportCli: '', ...state.data.settings };
 runtime = new Runtime(root, state.data.settings);
 try { if (safeStorage.isEncryptionAvailable()) token = safeStorage.decryptString(await fs.readFile(path.join(state.directory, 'meta-session.bin'))); } catch {}
 window = new BrowserWindow({ width: 1320, height: 880, minWidth: 920, minHeight: 640, title: 'Refract', backgroundColor: '#141414',

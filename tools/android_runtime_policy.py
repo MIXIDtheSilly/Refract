@@ -21,6 +21,13 @@ def main():
                               text=True, timeout=120).stdout.strip()
     if run('shell', 'getprop ro.hardware') != 'ranchu':
         print(json.dumps({'status': 'skipped', 'reason': 'Not the Refract emulator'})); return
+    # Games run on the Digitalis ARM64 translator (Refract's patched build in prebuilts/digitalis).
+    if run('shell', 'getprop ro.dalvik.vm.native.bridge') != 'libberberis_arm64.so':
+        raise RuntimeError('The emulator is not using the Digitalis translator. Boot it with -writable-system '
+                           'and run scripts/translator.ps1 -Use digitalis (Android 16 / API 36 AVDs only).')
+    # Digitalis' files live only in the /system overlay's upper layer; after a boot the first app to
+    # open them gets EACCES until something else has looked them up, so read them once as shell first.
+    run('shell', 'cat /system/bin/arm64/app_process64 /system/bin/arm64/linker64 > /dev/null; ls /system/lib64/arm64 > /dev/null')
     run('root'); run('wait-for-device')
     limit = int(run('shell', 'cat /proc/sys/vm/max_map_count'))
     if limit < 1048576:
@@ -63,7 +70,8 @@ def main():
     run('shell', 'settings put global gpu_debug_layers VK_LAYER_REFRACT_runtime')
     run('shell', 'settings delete global gpu_debug_layer_app')
     run('shell', 'sync')
-    print(json.dumps({'status': 'ready', 'max_map_count': limit, 'scheduler': scheduler, 'vulkan_layer': remote}))
+    print(json.dumps({'status': 'ready', 'max_map_count': limit, 'scheduler': scheduler, 'translator': 'digitalis',
+                      'vulkan_layer': remote}))
 
 
 if __name__ == '__main__': main()

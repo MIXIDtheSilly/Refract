@@ -1,7 +1,7 @@
 param(
     [ValidateSet('Setup', 'Start', 'Verify', 'Install', 'Stop')][string]$Action = 'Verify',
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
-    [ValidatePattern('^[a-zA-Z0-9_-]+$')][string]$Avd = 'refract-nvidia-api34',
+    [ValidatePattern('^[a-zA-Z0-9_-]+$')][string]$Avd = 'refract-google-api36',
     [ValidateRange(5554, 5682)][int]$Port = 5580,
     [ValidateSet('x86_64', 'arm64-v8a')][string]$Abi = 'x86_64',
     [ValidateRange(2048, 16384)][int]$MemoryMB = 4096,
@@ -30,7 +30,8 @@ $adb = Join-Path $Sdk 'platform-tools\adb.exe'
 $emulator = Join-Path $Sdk 'emulator\emulator.exe'
 $serial = "emulator-$Port"
 if (!$RuntimeApk) { $RuntimeApk = "$PSScriptRoot\..\build-android-runtime-windows-$Abi\refract-openxr-runtime-debug.apk" }
-$image = 'system-images;android-34;google_apis;x86_64'
+# Android 16: the Digitalis ARM64 translator in prebuilts\digitalis is built for it.
+$image = 'system-images;android-36;google_apis;x86_64'
 $logs = Join-Path (Split-Path $PSScriptRoot -Parent) 'build-windows-emulator'
 function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
@@ -101,6 +102,21 @@ function Wait-Boot($Process) {
     throw "Boot timed out; see $logs"
 }
 # The guest's clocksource name, or $null when it cannot be read (no su on this image).
+function Get-Prop([string]$Name) { ((& $adb -s $serial shell getprop $Name) -join '').Trim() }
+# Games need the Digitalis ARM64 translator (patched for Refract; Google's is slower and lacks the fixes).
+# scripts\translator.ps1 installs it into the writable /system overlay, which only boots with -writable-system.
+function Use-Digitalis($Process) {
+    if ((Get-Prop ro.dalvik.vm.native.bridge) -eq 'libberberis_arm64.so') { return }
+    $level = [int](Get-Prop ro.build.version.sdk)
+    if ($level -lt 36) {
+        throw "$Avd is Android API $level; Refract's Digitalis translator needs an Android 16 (API 36) AVD such as refract-google-api36."
+    }
+    Write-Host 'Installing the Digitalis ARM64 translator (reboots Android)'
+    & "$PSScriptRoot\..\scripts\translator.ps1" -Use digitalis -Serial $serial -Adb $adb
+    Start-Sleep -Seconds 5
+    Wait-Boot $Process
+    if ((Get-Prop ro.dalvik.vm.native.bridge) -ne 'libberberis_arm64.so') { throw 'Digitalis did not become the native bridge; see scripts\translator.ps1.' }
+}
 function Get-Clocksource {
     $ErrorActionPreference = 'Continue'
     $clock = ((& $adb -s $serial shell su 0 cat /sys/devices/system/clocksource/clocksource0/current_clocksource 2>$null) -join '').Trim()
@@ -123,7 +139,8 @@ switch ($Action) {
         if ($devices -match "^$serial\s") { throw "$serial already exists; use Verify or Stop first." }
         New-Item -ItemType Directory -Force $logs | Out-Null
         Set-GlTransport
-        $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB")
+        $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB",
+                       '-writable-system')
         if (!$ShowWindow) { $arguments += '-no-window' }
         $affinity = $null
         if (!$AnyCore) {
@@ -189,7 +206,7 @@ switch ($Action) {
             $env:ANDROID_EMULATOR_LAUNCHER_DIR = $oldLauncherDir
         }
         Wait-Boot $process
-        try { Verify-Gpu; Verify-Abi } catch {
+        try { Verify-Gpu; Verify-Abi; Use-Digitalis $process } catch {
             & $adb -s $serial emu kill | Out-Null
             throw
         }
