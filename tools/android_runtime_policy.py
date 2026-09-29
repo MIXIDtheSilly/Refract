@@ -27,6 +27,12 @@ def main():
         run('shell', 'echo 1048576 > /proc/sys/vm/max_map_count')
         limit = int(run('shell', 'cat /proc/sys/vm/max_map_count'))
         if limit < 1048576: raise RuntimeError('Memory mapping policy did not apply')
+    # The emulator exposes every vCPU as its own package, so with TTWU_QUEUE each cross-CPU wake-up
+    # is an IPI, a slow exit under WHPX (~3000/s -> ~200/s, Batman ~+5% fps). Resets at every boot.
+    # A performance setting only: a kernel without it must not stop the game.
+    features = run('shell', 'mount | grep -q " /sys/kernel/debug " || mount -t debugfs debugfs /sys/kernel/debug; '
+                   'echo NO_TTWU_QUEUE > /sys/kernel/debug/sched/features; cat /sys/kernel/debug/sched/features; true')
+    scheduler = 'NO_TTWU_QUEUE' if 'NO_TTWU_QUEUE' in features.split() else 'unchanged'
     root = Path(__file__).resolve().parents[1]
     source = root / 'tools/android_vulkan_layer.cpp'
     header = root / 'tools/vulkan_descriptor_template.h'
@@ -57,7 +63,7 @@ def main():
     run('shell', 'settings put global gpu_debug_layers VK_LAYER_REFRACT_runtime')
     run('shell', 'settings delete global gpu_debug_layer_app')
     run('shell', 'sync')
-    print(json.dumps({'status': 'ready', 'max_map_count': limit, 'vulkan_layer': remote}))
+    print(json.dumps({'status': 'ready', 'max_map_count': limit, 'scheduler': scheduler, 'vulkan_layer': remote}))
 
 
 if __name__ == '__main__': main()
