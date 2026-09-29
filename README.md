@@ -31,7 +31,7 @@ platform-sdk/         Meta Platform SDK stand-in (package com.oculus.horizon)
 protocol/             Pose, image and input protocol and transports
 viewer/               Windows viewer: receives the shared eye textures and shows them
 host-bridge/          Host bridge to a PC OpenXR runtime
-launcher/             Electron desktop launcher (GPL-3.0)
+launcher/             Desktop launcher (Tauri + Node backend, GPL-3.0)
 scripts/              Start the emulator and launch a game
 tools/                GPU layer, GLES layer, translator patches, probes, analysis
 prebuilts/digitalis/  Prebuilt ARM64-to-x86_64 translator (Digitalis/Berberis)

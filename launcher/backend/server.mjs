@@ -23,6 +23,7 @@ import { loadLibraryArtwork } from '../core/artwork.mjs';
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(directory, '../..');
 const option = name => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined; };
+const scan = !process.argv.includes('--no-scan');
 const dataDirectory = option('data') || path.join(process.env.APPDATA || path.join(os.homedir(), '.config'), 'Refract');
 
 // stdout is the protocol channel; keep stray logging off it.
@@ -244,11 +245,11 @@ const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infini
 lines.on('line', async line => {
   let request; try { request = JSON.parse(line); } catch { return; }
   try { await loaded; } catch (error) { if (request.id !== undefined) send({ id: request.id, ok: false, error: message(error) }); return; }
-  if (request.type === 'secret') { token = typeof request.value === 'string' ? request.value : ''; changed(); if (token) syncMeta().catch(() => {}); return; }
+  if (request.type === 'secret') { token = typeof request.value === 'string' ? request.value : ''; changed(); if (token && scan) syncMeta().catch(() => {}); return; }
   handle(request);
 });
 // The shell closes stdin when the launcher window closes. A running game keeps going.
 lines.on('close', () => { for (const controller of controllers.values()) controller.abort(); state?.writes.finally(() => process.exit(0)); });
 loaded.then(() => {
-  if (!process.argv.includes('--no-scan')) { syncInstalled().catch(() => {}); refreshArtwork().catch(() => {}); }
+  if (scan) { syncInstalled().catch(() => {}); refreshArtwork().catch(() => {}); }
 }, error => { process.stderr.write(`Refract backend could not start: ${message(error)}\n`); process.exit(1); });

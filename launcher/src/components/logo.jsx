@@ -1,0 +1,27 @@
+import { useId } from 'react';
+
+// img/Refract_logo_trans.svg with masks in place of its black fills, so the mark
+// works on any background. Drawn in currentColor.
+const RING = 'M495.889 443.047C619.141 410.708 733.182 393.843 817.639 392.393C860.056 391.665 893.663 394.858 916.857 401.198C941.983 408.068 946.495 416.111 947.002 418.045C947.51 419.981 947.527 429.202 929.011 447.522C911.919 464.433 884.209 483.716 846.899 503.907C772.61 544.11 664.98 585.408 541.728 617.748C418.475 650.088 304.434 666.954 219.977 668.404C177.56 669.132 143.953 665.938 120.76 659.597C95.6343 652.728 91.1225 644.686 90.6145 642.751C90.1069 640.816 90.088 631.594 108.605 613.273C125.697 596.363 153.407 577.081 190.717 556.889C265.005 516.686 372.636 475.387 495.889 443.047Z';
+const FRONT = 'M894.03 503.609C856.251 527.526 806.282 552.041 747.828 575.337C689.374 598.633 623.935 620.112 556.36 638.183C488.785 656.253 420.809 670.451 357.469 679.725C294.13 688.998 237.052 693.108 190.468 691.752L518.808 530.398L894.03 503.609Z';
+
+export function LogoMark({ className, title }) {
+  const id = useId().replace(/[^\w-]/g, '');
+  return <svg viewBox="64 202 912 620" className={className} fill="none" stroke="currentColor"
+    role={title ? 'img' : undefined} aria-label={title} aria-hidden={title ? undefined : true}>
+    <defs>
+      <mask id={`${id}-gaps`} maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+        <rect width="1024" height="1024" fill="#fff" stroke="none" />
+        <rect x="364.471" y="685.24" width="109" height="112" transform="rotate(28.2666 364.471 685.24)" fill="#000" stroke="none" />
+        <rect x="631.567" y="188.495" width="109" height="112" transform="rotate(28.2666 631.567 188.495)" fill="#000" stroke="none" />
+      </mask>
+      <mask id={`${id}-ring`} maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+        <rect width="1024" height="1024" fill="#fff" stroke="none" />
+        <circle cx="519" cy="512" r="298" fill="#000" stroke="none" />
+        <path d={FRONT} fill="#fff" stroke="none" />
+      </mask>
+    </defs>
+    <circle cx="519" cy="512" r="282" strokeWidth="49" mask={`url(#${id}-gaps)`} />
+    <path d={RING} strokeWidth="47" mask={`url(#${id}-ring)`} />
+  </svg>;
+}

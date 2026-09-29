@@ -51,6 +51,9 @@ Desktop.ini
 __pycache__/
 launcher/node_modules/
 launcher/dist/
+launcher/dist-preview/
+launcher/src-tauri/target/
+launcher/src-tauri/gen/
 *.tmp
 *.temp
 *.bak

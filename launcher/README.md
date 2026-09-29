@@ -5,21 +5,42 @@ games, the live Quest storefront, owned-game downloads, expansion files and DLC.
 
 ## Run
 
-Requires Node.js 24+, Python, and the project's existing Android SDK/Windows Refract
-setup. From the project root:
+Requires Windows 11 (WebView2 is built in), Node.js 22+, Python, Rust from
+[rustup.rs](https://rustup.rs) with the Visual Studio C++ build tools, and the
+project's existing Android SDK/Windows Refract setup. From the project root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1
 ```
 
-The first launch installs the locked npm dependencies and downloads Electron.
-You can also double-click **Refract Launcher.cmd** in the project root.
-For development: `cd launcher; npm ci; npm start`.
+or double-click **Refract Launcher.cmd**. The first run installs the locked npm
+dependencies and builds `src-tauri/target/release/refract-launcher.exe` (a few
+minutes); later runs rebuild only when the UI or shell sources changed.
 
-The renderer uses React, Tailwind CSS and local shadcn/ui components. Vite builds
-it into `dist/`; both start commands rebuild before opening Electron. No local
-web server is needed. `npm run build` builds the renderer without starting it.
-Source components are in `ui/`, with shared shadcn components in `ui/components/ui`.
+## How it is put together
+
+- `src/` is the interface (React, plain CSS, the Jost typeface). Gray surfaces,
+  white controls and the logo from `img/Refract_logo_trans.svg`.
+- `src-tauri/` is the native shell (Rust, Tauri 2). It owns the window, file
+  dialogs, the Meta sign-in window, opening folders/links and the encrypted Meta
+  session. The UI has one command, `call`, and only the main window may use it.
+- `backend/server.mjs` holds the launcher logic (library, Meta store, downloads,
+  install, patch, play) on top of `core/`. The shell starts it with Node and
+  talks to it with one JSON message per line over stdin/stdout. It is read from
+  the repository, so backend changes need no rebuild.
+
+### Develop
+
+```powershell
+cd launcher
+npm ci
+npm start            # tauri dev: Vite with hot reload inside the real window
+npm run dev          # the UI alone in a browser, running on sample data
+npm run preview:build  # dist-preview/index.html: one self-contained preview file
+```
+
+Outside Tauri the UI uses `src/api/mock.js`, so it can be designed and reviewed
+in any browser without Windows, Android or a Meta account.
 
 ## Use
 
@@ -29,15 +50,16 @@ Source components are in `ui/`, with shared shadcn components in `ui/components/
 - **Store:** Search the live Meta catalog; open a listing and add it to the
   library. Purchases open on Meta's site. Sign in to list your Quest entitlements
   and access downloads; a Rift purchase is not a Quest entitlement.
-- **Connect Meta:** Sign in on Meta's hosted page. Credentials are never sent to
-  an Refract service. The account token is encrypted with Electron safeStorage
-  (Windows DPAPI) and never sent to the launcher renderer or written in logs.
+- **Connect Meta:** Sign in on Meta's hosted page, in a separate private window
+  with no access to the launcher. Credentials are never sent to a Refract service.
+  The account token is encrypted with Windows DPAPI and never sent to the
+  launcher UI or written in logs.
 - **Downloads:** Choose a Quest build. APK, OBB and binary asset files are saved
   with original filenames. Transfers can be cancelled/retried, incomplete files
   stay `.part`, resume requires an ETag, and completed files receive a local
   SHA-256 for verification before installation. The download folder is selectable.
-- **Game actions (⋯):** Versions, add-ons, patching, content imports and installation
-  updates are in the game's menu. Runtime settings are collapsed under Settings.
+- **Game page:** Click a game to open its page. Versions, add-ons, patching,
+  content imports and installation updates are under **Manage**.
 - **Add-ons:** Ownership must be returned by Meta before a separate DLC download
   is enabled. Some DLC is only an entitlement to content inside the base game,
   with no downloadable file. Entitlement and asset-discovery compatibility inside
@@ -67,7 +89,9 @@ provision WHPX, SteamVR, the system image, or an AVD from scratch.
 ## Data and limitations
 
 `%APPDATA%/Refract/library.json` stores games, settings and task history.
-`meta-session.bin` stores the encrypted Meta token. Downloads default to
+`meta-session.dpapi` stores the encrypted Meta token (sessions from the old
+Electron launcher are not read; sign in again once). `launcher-backend.log` holds
+backend errors. Downloads default to
 `~/Downloads/Refract/<app-id>/<build-id>/`. Games' actual saves stay in the AVD.
 Five GB of free disk headroom is reserved before downloads to keep Android
 bootable. Meta APIs used by community launchers are undocumented and may change;
@@ -79,17 +103,13 @@ additional owned apps can be added from the store.
 
 ```powershell
 npm test --prefix launcher
-npm run smoke --prefix launcher
 ```
 
 Unit tests cover Quest filtering, SSO challenge validation, DLC entitlement
 selection, APK/OBB plans, download integrity/resume, unsafe paths/redirects, atomic
-library persistence and shell argument handling. The desktop smoke test uses a
-separate `build-launcher-smoke` profile, navigates Library/Settings/Downloads,
-queries the live Quest store, adds a listing to that test profile, checks filters,
-dialog/menu keyboard focus, progress display, and the minimum window width.
-It also checks that state updates preserve text being edited. Screenshots are
-written there. It does not sign in, download APKs, install, or launch any games.
+library persistence, shell argument handling, and the backend's stdio protocol
+(settings validation, unknown methods, the Meta token never appearing in UI state,
+clean shutdown). `cargo check` in `src-tauri` checks the shell.
 
 Meta login challenge creation, public storefront search and installed-game scan
 have been checked live. Account-specific downloads/install/DLC still need a
