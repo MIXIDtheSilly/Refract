@@ -21,6 +21,9 @@
   --sidebar: 236px;
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   color-scheme: dark;
+}
+/* Set on body as well as the root so a host page's body defaults can't override them. */
+html, body {
   font-family: 'Jost Variable', 'Jost', 'Segoe UI', system-ui, sans-serif;
   font-size: 15px;
   line-height: 1.45;
@@ -30,7 +33,7 @@
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
-body { overflow: hidden; background: var(--bg); user-select: none; }
+body { overflow: hidden; user-select: none; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; }
