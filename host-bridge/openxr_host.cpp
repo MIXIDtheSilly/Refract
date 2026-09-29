@@ -11,11 +11,13 @@
 #include "transport_tcp.h"
 #include "video_transport.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <array>
 #include <memory>
@@ -30,6 +32,7 @@
 #define XR_USE_TIMESPEC
 #else
 #define XR_USE_GRAPHICS_API_D3D11
+#define XR_USE_PLATFORM_WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -393,9 +396,16 @@ public:
                 for (const auto& ext : available) {
                     if (std::strcmp(ext.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME) == 0) handTrackingEnabled_ = true;
                     if (std::strcmp(ext.extensionName, XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME) == 0) handDataSourceEnabled_ = true;
+#if defined(_WIN32)
+                    if (std::strcmp(ext.extensionName, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0)
+                        win32TimeEnabled_ = true;
+#endif
                 }
             }
         }
+#if defined(_WIN32)
+        if (win32TimeEnabled_) extensions.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+#endif
         if (handTrackingEnabled_) {
             extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
             if (handDataSourceEnabled_) extensions.push_back(XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME);
@@ -547,7 +557,15 @@ public:
             }
             if (result == XR_SUCCESS) {
                 frameDisplayTime = frameState.predictedDisplayTime;
-                locateTime = frameState.predictedDisplayTime;
+                // Poses are predicted to the runtime's display time (~38 ms ahead over Steam Link).
+                // REFRACT_POSE_PREDICTION=0 locates the newest tracked poses instead: nothing overshoots, but
+                // the runtime then has to reproject the whole pipeline delay, which looked smeared.
+                const XrTime now = posePrediction_ ? 0 : current_xr_time();
+                locateTime = now ? (std::min)(now, frameState.predictedDisplayTime) : frameState.predictedDisplayTime;
+                if (now && sequence % 900 == 0) {
+                    std::fprintf(stderr, "Refract OpenXR: runtime display time is %.1f ms ahead; poses located now\n",
+                        (frameState.predictedDisplayTime - now) / 1e6);
+                }
                 if (frameState.shouldRender && refract::protocol::valid_display_period(frameState.predictedDisplayPeriod)) {
                     frame.display_period_ns = static_cast<uint32_t>(frameState.predictedDisplayPeriod);
                 }
@@ -626,6 +644,7 @@ public:
             (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
             frame.hmd = to_protocol_pose(location.pose);
             frame.hmd_flags = static_cast<uint32_t>(location.locationFlags);
+            publishedPoses_[publishedPoseCount_++ % publishedPoses_.size()] = {frame.hmd, frameDisplayTime};
             if (sequence % 90 == 0) {
                 std::fprintf(
                     stderr,
@@ -637,8 +656,12 @@ public:
             }
         }
 
-        locate_controller_spaces(frame, locateTime, sequence);
-        locate_hand_joints(frame, locateTime, sequence);
+        // REFRACT_PREDICTION_LEAD_MS predicts controllers and hands that much further, for the frames the
+        // pipeline adds after this one. Off by default: the measured delay (half or all of it) overshot.
+        // The head is never predicted further; the runtime reprojects its rotation anyway.
+        const XrTime handTime = locateTime + (useFrameLoop_ && posePrediction_ ? predictionLead_ : 0);
+        locate_controller_spaces(frame, handTime, sequence);
+        locate_hand_joints(frame, handTime, sequence);
         publish_pose(frame);
 
         if (beganFrame) {
@@ -650,7 +673,7 @@ public:
             uint32_t layerCount = 0;
 #if defined(_WIN32)
             if (projectionSwapchain_ != XR_NULL_HANDLE &&
-                update_projection_layer(locateTime, projectionViews, projectionLayer, quadLayers, layerCount, mixedProjection)) {
+                update_projection_layer(frameDisplayTime, projectionViews, projectionLayer, quadLayers, layerCount, mixedProjection)) {
                 if (layerCount) {
                     const uint32_t offset = mixedProjection ? 1 : 0;
                     if (mixedProjection) layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
@@ -818,7 +841,18 @@ private:
 
     XrTime current_xr_time()
     {
-#if !defined(_WIN32)
+#if defined(_WIN32)
+        if (win32TimeEnabled_ && convertPerformanceCounter_ == nullptr &&
+            !load_func("xrConvertWin32PerformanceCounterToTimeKHR", &convertPerformanceCounter_)) {
+            win32TimeEnabled_ = false;
+        }
+        LARGE_INTEGER counter{};
+        XrTime xrTime = 0;
+        if (convertPerformanceCounter_ && QueryPerformanceCounter(&counter) &&
+            convertPerformanceCounter_(instance_, &counter, &xrTime) == XR_SUCCESS) {
+            return xrTime;
+        }
+#else
         if (convertTimespecTimeToTime_ != nullptr) {
             timespec now{};
             if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
@@ -1159,6 +1193,8 @@ private:
                 projectionViews[i].subImage.imageRect.extent = uploadedExtentByImage_[imageIndex];
             }
         }
+        if (uploadedProjectionByImage_[imageIndex].view_count == 2)
+            measure_pose_latency(uploadedProjectionByImage_[imageIndex], uploadedAndroidSequenceByImage_[imageIndex], displayTime);
 
         projectionLayer.space = localSpace_;
         projectionLayer.layerFlags = uploadedProjectionByImage_[imageIndex].layer_flags;
@@ -1169,6 +1205,41 @@ private:
             reportedProjectionSubmit_ = true;
         }
         return true;
+    }
+
+    // Finds the published head pose a newly shown image was rendered with (the runtime's eyes are that
+    // pose +/- half the IPD, so their midpoint is exact) and measures how long after that pose's display
+    // time the image is shown: the delay Refract's pipeline adds on top of the runtime's own. Diagnostic
+    // only. Frames rendered while the head is still match several poses and are skipped.
+    void measure_pose_latency(const refract::protocol::ImageProjection& projection, uint64_t imageSequence, XrTime displayTime)
+    {
+        if (imageSequence == UINT64_MAX || imageSequence == lastLatencyImage_) return;
+        lastLatencyImage_ = imageSequence;
+        const auto& l = projection.views[0].pose;
+        const auto& r = projection.views[1].pose;
+        const float x = (l.x + r.x) * 0.5f, y = (l.y + r.y) * 0.5f, z = (l.z + r.z) * 0.5f;
+        auto distance = [&](const refract::protocol::Pose& p) {
+            const float dot = std::fabs(p.qx * l.qx + p.qy * l.qy + p.qz * l.qz + p.qw * l.qw);
+            return std::sqrt((p.x - x) * (p.x - x) + (p.y - y) * (p.y - y) + (p.z - z) * (p.z - z)) +
+                   0.1f * std::sqrt((std::max)(0.0f, 1.0f - dot * dot));  // 0.1 m per radian (~1.7 mm/degree).
+        };
+        const size_t count = (std::min<size_t>)(publishedPoseCount_, publishedPoses_.size());
+        float best = 1e9f, second = 1e9f;
+        XrTime bestTime = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const float d = distance(publishedPoses_[i].hmd);
+            if (d < best) { second = best; best = d; bestTime = publishedPoses_[i].displayTime; }
+            else if (d < second) { second = d; }
+        }
+        if (best > 2e-5f || second < 1e-4f || displayTime < bestTime) return;
+        latencySamples_.push_back(displayTime - bestTime);
+        if (latencySamples_.size() < 60) return;
+        std::sort(latencySamples_.begin(), latencySamples_.end());
+        const XrDuration median = latencySamples_[latencySamples_.size() / 2];
+        const XrDuration p90 = latencySamples_[latencySamples_.size() * 9 / 10];
+        latencySamples_.clear();
+        std::fprintf(stderr, "Refract Latency: rendered pose shown %.1f ms after its frame's display time (p90 %.1f ms)\n",
+            median / 1e6, p90 / 1e6);
     }
 
     void fill_projection_texture(ID3D11Texture2D* texture, uint32_t imageIndex)
@@ -1773,6 +1844,20 @@ private:
     bool reportedSyncFailure_ = false;
     refract::protocol::PoseFrame latest_{};
     std::mutex frameMutex_;
+    struct PublishedPose { refract::protocol::Pose hmd; XrTime displayTime = 0; };
+    std::array<PublishedPose, 32> publishedPoses_{};
+    uint64_t publishedPoseCount_ = 0;
+    uint64_t lastLatencyImage_ = UINT64_MAX;
+    std::vector<XrDuration> latencySamples_;
+    static XrDuration read_fixed_prediction_lead() {
+        const char* value = std::getenv("REFRACT_PREDICTION_LEAD_MS");
+        return value && *value ? static_cast<XrDuration>(std::atof(value) * 1e6) : XrDuration(-1);
+    }
+    XrDuration predictionLead_ = (std::max<XrDuration>)(read_fixed_prediction_lead(), 0);
+    const bool posePrediction_ = [] {
+        const char* value = std::getenv("REFRACT_POSE_PREDICTION");
+        return !value || std::strcmp(value, "0") != 0;
+    }();
 
     PFN_xrDestroyInstance destroyInstance_ = nullptr;
     PFN_xrGetSystem getSystem_ = nullptr;
@@ -1844,6 +1929,9 @@ private:
 #endif
 #if !defined(_WIN32)
     PFN_xrConvertTimespecTimeToTimeKHR convertTimespecTimeToTime_ = nullptr;
+#else
+    bool win32TimeEnabled_ = false;
+    PFN_xrConvertWin32PerformanceCounterToTimeKHR convertPerformanceCounter_ = nullptr;
 #endif
 };
 

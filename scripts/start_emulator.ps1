@@ -19,11 +19,13 @@
 # Check with tools\mic_probe (adb shell /data/local/tmp/mic_probe while speaking).
 # -AudioLatencyMs is how much audio qemu keeps queued in DirectSound (qemu's default is 10 ms, the same as its
 # mixer timer period, so any late timer tick under load plays as a crackle; AC Nexus crackled). More = later sound.
+# -AudioBufferMs caps the DirectSound buffer, which qemu keeps filling: sound can run up to this far behind (the old
+# fixed 64 KiB, ~340 ms, made voice chat lag badly).
 # qemu is pinned to the P-cores (i7-12700: logical processors 0-15; 16-19 are E-cores) so Windows can't move
 # the vCPU threads to E-cores, e.g. while the window is minimized. -AnyCore turns that off.
 param([switch]$NoGpuSharing, [switch]$Hidden, [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
       [ValidateRange(1, 6)][int]$Cores = 1, [string]$KernelArgs = 'tsc=nowatchdog idle=poll', [switch]$NoHostMic,
-      [switch]$AnyCore, [ValidateRange(10, 200)][int]$AudioLatencyMs = 50)
+      [switch]$AnyCore, [ValidateRange(10, 200)][int]$AudioLatencyMs = 50, [ValidateRange(40, 340)][int]$AudioBufferMs = 70)
 $emulator = 'C:\Users\mixid\Android\Sdk\emulator'
 if (!$AnyCore) {
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\p_core_affinity.ps1')
@@ -40,7 +42,7 @@ if (!$NoGpuSharing) {
 # qemu 2.12 audio options come from the environment (QEMU_<driver>_<option>); inherited by the emulator.
 if ($Audio -eq 'dsound') {
     $env:QEMU_DSOUND_LATENCY_MILLIS = $AudioLatencyMs
-    $env:QEMU_DSOUND_BUFSIZE_OUT = 65536  # ~340 ms of 48 kHz stereo; the default 16 KiB leaves little room above the latency.
+    $env:QEMU_DSOUND_BUFSIZE_OUT = $AudioBufferMs * 192  # 48 kHz 16-bit stereo.
 }
 $arguments = @('-avd', 'refract-google-api36', '-port', '5582', '-gpu', 'host', '-accel', 'on', '-no-snapshot',
                '-no-boot-anim', '-memory', '8192', '-writable-system', '-audio', $Audio)

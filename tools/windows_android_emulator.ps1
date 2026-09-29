@@ -27,6 +27,9 @@ param(
     # qemu's 10 ms DirectSound queue crackles under load. Without -allow-host-audio the guest mic gets zeros.
     [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
     [ValidateRange(10, 200)][int]$AudioLatencyMs = 50,
+    # DirectSound buffer size: qemu fills all of it, so once guest and host audio clocks drift apart the
+    # sound runs this far behind. 64 KiB (~340 ms) made Yeeps voice chat lag badly.
+    [ValidateRange(40, 340)][int]$AudioBufferMs = 70,
     [switch]$NoHostMic
 )
 $ErrorActionPreference = 'Stop'
@@ -200,7 +203,7 @@ switch ($Action) {
             if ($Audio -eq 'dsound') {
                 # qemu 2.12 reads audio options from the environment (QEMU_<driver>_<option>).
                 $env:QEMU_DSOUND_LATENCY_MILLIS = $AudioLatencyMs
-                $env:QEMU_DSOUND_BUFSIZE_OUT = 65536  # ~340 ms of 48 kHz stereo, room above the latency.
+                $env:QEMU_DSOUND_BUFSIZE_OUT = $AudioBufferMs * 192  # 48 kHz 16-bit stereo.
             }
             if ($launchExe -ne $emulator) {
                 $env:ANDROID_EMULATOR_LAUNCHER_DIR = Join-Path $Sdk 'emulator'

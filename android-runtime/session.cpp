@@ -1409,6 +1409,10 @@ bool submit_composite_frame(const XrFrameEndInfo& info, XrResult& result)
 {
     namespace proto = refract::protocol;
     if (!g_vulkanSession || !direct_to_host() || !info.layers) return false;
+    // Only refract_viewer decodes atlas frames. The SteamVR host bridge sets debug.refract.composite=0
+    // and gets the mixed GPU batch instead, whose quads its OpenXR runtime composites natively.
+    static const bool compositeEnabled = int_property("debug.refract.composite", 1, 0, 1) != 0;
+    if (!compositeEnabled) return false;
     // After a lost consumer nothing else reconnects for panel frames (the batch path needs export
     // on), so try here; a new connection turns shared export back on.
     if (g_gpuConsumerLost && image_transport_client().connected()) resume_gpu_export_if_reconnected();
@@ -2288,6 +2292,7 @@ XrResult XRAPI_CALL xrEndSession_impl(XrSession session)
 XrResult XRAPI_CALL xrPollEvent_impl(XrInstance instance, XrEventDataBuffer* eventData)
 {
     log_call("xrPollEvent");
+    refract::runtime::apply_unity_quality();
     if (!is_valid_instance(instance)) {
         return XR_ERROR_HANDLE_INVALID;
     }
@@ -2975,6 +2980,7 @@ XrResult XRAPI_CALL xrAttachSessionActionSets_impl(
 XrResult XRAPI_CALL xrSyncActions_impl(XrSession session, const XrActionsSyncInfo* syncInfo)
 {
     log_call("xrSyncActions");
+    refract::runtime::apply_unity_quality();
     if (!is_valid_session(session)) {
         return XR_ERROR_HANDLE_INVALID;
     }
@@ -3206,7 +3212,9 @@ XrResult XRAPI_CALL xrCreateHandTrackerEXT_impl(XrSession session, const XrHandT
     if (!info || info->type != XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT || !tracker ||
         (info->hand != XR_HAND_LEFT_EXT && info->hand != XR_HAND_RIGHT_EXT) || info->handJointSet != XR_HAND_JOINT_SET_DEFAULT_EXT)
         return XR_ERROR_VALIDATION_FAILURE;
-    uint32_t sources = 3;
+    // Without XR_EXT_hand_tracking_data_source, Quest reports only optical hands. Controller-derived
+    // joints would make OVRPlugin switch to hand input and drop the held controllers.
+    uint32_t sources = 1;
     struct InputHeader { XrStructureType type; const void* next; };
     for (auto* next = static_cast<const InputHeader*>(info->next); next; next = static_cast<const InputHeader*>(next->next)) {
         if (next->type != XR_TYPE_HAND_TRACKING_DATA_SOURCE_INFO_EXT) continue;
@@ -3375,6 +3383,37 @@ XrResult XRAPI_CALL xrWaitFrame_impl(
     if (frameState == nullptr ||
         (frameWaitInfo != nullptr && frameWaitInfo->type != XR_TYPE_FRAME_WAIT_INFO) || frameState->type != XR_TYPE_FRAME_STATE) {
         return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    // debug.refract.frame_sync=1 (the SteamVR host bridge): the host sends one pose per frame of its OpenXR
+    // runtime, right after that runtime's xrWaitFrame. Starting the game's frame when it arrives phase-locks
+    // the two frame loops, so the game renders with the newest pose and can finish in time for the host's
+    // next frame. A free-running timer beat against the host's clock: poses waited up to a frame, finished
+    // images up to another, and ~4 frames a second were missed. Without a live pose stream, pace by timer.
+    static const bool frameSync = int_property("debug.refract.frame_sync", 0, 0, 1) != 0;
+    if (frameSync) {
+        static uint64_t lastSequence = UINT64_MAX;
+        static XrTime lastNewPose = 0;
+        auto frame = pose_client().latest_pose_frame();
+        const XrTime framePeriod = refract::protocol::display_period_or_default(frame);
+        XrTime now = monotonic_time_ns();
+        if (frame.sequence == lastSequence && now - lastNewPose < 100'000'000) {
+            const XrTime deadline = now + framePeriod * 3 / 2;
+            while (frame.sequence == lastSequence && now < deadline) {
+                std::this_thread::sleep_for(std::chrono::microseconds(250));
+                frame = pose_client().latest_pose_frame();
+                now = monotonic_time_ns();
+            }
+        }
+        if (frame.sequence != lastSequence) {
+            lastSequence = frame.sequence;
+            lastNewPose = now;
+            g_nextFrameStart = now + framePeriod;
+            frameState->predictedDisplayTime = g_nextFrameStart;
+            frameState->predictedDisplayPeriod = framePeriod;
+            frameState->shouldRender = 1;
+            return XR_SUCCESS;
+        }
     }
 
     // Pace at the active host display period. Never build a queue of

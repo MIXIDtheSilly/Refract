@@ -2,14 +2,19 @@
 
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <dlfcn.h>
 #include <link.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/system_properties.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 namespace refract::runtime {
 namespace {
@@ -112,12 +117,74 @@ void apply_game_patches()
     }
 }
 
+void apply_unity_quality()
+{
+    static const int target = [] {
+        char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.refract.texture_mip_limit", value);
+        return std::atoi(value);
+    }();
+    if (target <= 0) return;
+    // Unity's quality setters assert the main thread.
+    char thread[16]{};
+    if (prctl(PR_GET_NAME, thread) != 0 || std::strcmp(thread, "UnityMain") != 0) return;
+    static int64_t nextCheckNs = 0;
+    timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    const int64_t nowNs = int64_t(now.tv_sec) * 1'000'000'000 + now.tv_nsec;
+    if (nowNs < nextCheckNs) return;
+    nextCheckNs = nowNs + 1'000'000'000;
+
+    using ResolveIcall = void* (*)(const char*);
+    using GetLimit = int (*)();
+    using SetLimit = void (*)(int);
+    static GetLimit get = nullptr;
+    static SetLimit set = nullptr;
+    static int attempts = 0;
+    if (!get || !set) {
+        if (attempts >= 30) return;  // Not an IL2CPP Unity game with this API.
+        ++attempts;
+        // The runtime may live in another linker namespace, so open the game's copy by its full path.
+        std::string path;
+        dl_iterate_phdr([](dl_phdr_info* info, size_t, void* data) {
+            const char* name = info->dlpi_name ? std::strrchr(info->dlpi_name, '/') : nullptr;
+            if (!name || std::strcmp(name + 1, "libil2cpp.so") != 0) return 0;
+            *static_cast<std::string*>(data) = info->dlpi_name;
+            return 1;
+        }, &path);
+        if (path.empty()) return;  // Not loaded yet, or not IL2CPP.
+        void* il2cpp = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+        auto resolve = il2cpp ? reinterpret_cast<ResolveIcall>(dlsym(il2cpp, "il2cpp_resolve_icall")) : nullptr;
+        if (!resolve) {
+            if (attempts == 30)
+                __android_log_print(ANDROID_LOG_WARN, "Refract.Patch", "texture mip limit: cannot open %s: %s", path.c_str(), dlerror());
+            return;
+        }
+        get = reinterpret_cast<GetLimit>(resolve("UnityEngine.QualitySettings::get_globalTextureMipmapLimit()"));
+        set = reinterpret_cast<SetLimit>(resolve("UnityEngine.QualitySettings::set_globalTextureMipmapLimit(System.Int32)"));
+        if (!get || !set) {
+            get = reinterpret_cast<GetLimit>(resolve("UnityEngine.QualitySettings::get_masterTextureLimit()"));
+            set = reinterpret_cast<SetLimit>(resolve("UnityEngine.QualitySettings::set_masterTextureLimit(System.Int32)"));
+        }
+        if (!get || !set) {
+            if (attempts == 30)
+                __android_log_print(ANDROID_LOG_WARN, "Refract.Patch", "texture mip limit: Unity icalls not found");
+            return;
+        }
+    }
+    const int current = get();
+    if (current >= target) return;
+    set(target);
+    __android_log_print(ANDROID_LOG_INFO, "Refract.Patch", "texture mip limit %d -> %d (now %d)", current, target, get());
+}
+
 } // namespace refract::runtime
 
 #else
 
 namespace refract::runtime {
 void apply_game_patches() {}
+void apply_unity_quality() {}
 } // namespace refract::runtime
 
 #endif

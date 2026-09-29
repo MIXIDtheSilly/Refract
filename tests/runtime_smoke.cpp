@@ -376,10 +376,19 @@ int main()
     XrSpace offsetSpace{};
     if (xrCreateReferenceSpace(session, &offsetInfo, &offsetSpace) != XR_SUCCESS) return EXIT_FAILURE;
     handLocate.baseSpace = offsetSpace;
-    if (locateHand(hand, &handLocate, &locations) != XR_SUCCESS || !locations.isActive ||
+    // Like Quest, a tracker without a data-source request ignores controller-derived joints.
+    if (locateHand(hand, &handLocate, &locations) != XR_SUCCESS || locations.isActive || joints[0].locationFlags) return EXIT_FAILURE;
+    XrHandTrackingDataSourceEXT controller = XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT;
+    XrHandTrackingDataSourceInfoEXT controllerInfo{XR_TYPE_HAND_TRACKING_DATA_SOURCE_INFO_EXT};
+    controllerInfo.requestedDataSourceCount = 1; controllerInfo.requestedDataSources = &controller;
+    handInfo.next = &controllerInfo;
+    XrHandTrackerEXT controllerHand{};
+    if (createHand(session, &handInfo, &controllerHand) != XR_SUCCESS) return EXIT_FAILURE;
+    if (locateHand(controllerHand, &handLocate, &locations) != XR_SUCCESS || !locations.isActive ||
         !source.isActive || source.dataSource != XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT ||
         joints[0].locationFlags != 15 || joints[0].radius != 0.02f ||
-        joints[0].pose.position.x != 0.75f || joints[0].pose.position.y != 1.5f || joints[0].pose.position.z != 2.25f) return EXIT_FAILURE;
+        joints[0].pose.position.x != 0.75f || joints[0].pose.position.y != 1.5f || joints[0].pose.position.z != 2.25f ||
+        destroyHand(controllerHand) != XR_SUCCESS) return EXIT_FAILURE;
     XrHandTrackingDataSourceEXT optical = XR_HAND_TRACKING_DATA_SOURCE_UNOBSTRUCTED_EXT;
     XrHandTrackingDataSourceInfoEXT sourceInfo{XR_TYPE_HAND_TRACKING_DATA_SOURCE_INFO_EXT};
     sourceInfo.requestedDataSourceCount = 1; sourceInfo.requestedDataSources = &optical;

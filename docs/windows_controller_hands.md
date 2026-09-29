@@ -53,6 +53,12 @@ velocity because velocity is not transported. These functions were previously
 missing, and North Star logged `XR_ERROR_FUNCTION_UNSUPPORTED` while creating
 hand trackers through ovrport.
 
+A tracker created without `XrHandTrackingDataSourceInfoEXT` accepts only optical
+data, as on Quest. Accepting controller-derived joints by default made OVRPlugin
+report active hands and switch Batman: Arkham Shadow to hand input, so the held
+controllers stopped moving in game. Apps that want controller-derived joints must
+request `XR_HAND_TRACKING_DATA_SOURCE_CONTROLLER_EXT`.
+
 Controller-derived joint data is distinct from optical tracking of bare hands.
 This relay cannot supply optical data that the PC/SteamVR driver does not expose.
 

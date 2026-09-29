@@ -28,7 +28,7 @@ if (!$HostExe) {
 $HostExe = (Resolve-Path -LiteralPath $HostExe).Path
 $adb = Join-Path $Sdk 'platform-tools\adb.exe'
 $serial = "emulator-$Port"
-if (!$PSBoundParameters.ContainsKey('MemoryMB') -and $Package -eq 'com.zenstudios.PFXVRQuest') { $MemoryMB = 8192 }
+if (!$PSBoundParameters.ContainsKey('MemoryMB') -and $Package -in 'com.zenstudios.PFXVRQuest', 'com.camouflaj.manta') { $MemoryMB = 8192 }
 if ($GuestClock -eq 'Auto') {
     $GuestClock = 'Default'
     $clockTools = "$PSScriptRoot/../build-whpx-clock/Release"
@@ -84,6 +84,30 @@ try {
     }
     $installed = Invoke-Adb @('shell', 'pm', 'path', $Package)
     if ($installed.Code -ne 0 -or $installed.Text -notmatch '^package:') { throw "$Package is not installed." }
+    $ownedGamesFile = Join-Path $PSScriptRoot '..\scripts\owned_games.txt'
+    $ownedGames = if (Test-Path -LiteralPath $ownedGamesFile) {
+        @(Get-Content -LiteralPath $ownedGamesFile | ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith('#') })
+    } else { @() }
+    $owned = if ($Package -in $ownedGames) { '1' } else { '0' }
+    $ownership = Invoke-Adb @('shell', 'setprop', "debug.refract.platform.owned.$Package", $owned)
+    if ($ownership.Code -ne 0) { throw "Could not apply the owned-game setting for ${Package}: $($ownership.Error)" }
+    # Meta's OVRPlugin rejects an otherwise functional OpenXR runtime when its
+    # reported name does not identify the Oculus compatibility environment.
+    $runtimeName = Invoke-Adb @('shell', 'setprop', 'debug.refract.runtime_name', 'Oculus')
+    if ($runtimeName.Code -ne 0) { throw "Could not set the Quest runtime identity: $($runtimeName.Error)" }
+    # Emulated ASTC textures are stored expanded to RGBA8 on the host GPU; Batman's overflowed
+    # a 10 GB card. Dropping the top mip level cuts texture memory to about a quarter.
+    $mipLimit = if ($Package -eq 'com.camouflaj.manta') { '1' } else { '0' }
+    $mip = Invoke-Adb @('shell', 'setprop', 'debug.refract.texture_mip_limit', $mipLimit)
+    if ($mip.Code -ne 0) { throw "Could not set the texture mip limit: $($mip.Error)" }
+    # The host bridge cannot decode refract_viewer's atlas frames (scene + panels in one image);
+    # it needs panels as separate quad layers, which the host OpenXR runtime composites.
+    $composite = Invoke-Adb @('shell', 'setprop', 'debug.refract.composite', '0')
+    if ($composite.Code -ne 0) { throw "Could not select quad-layer frames: $($composite.Error)" }
+    # The bridge sends one pose per frame of the host OpenXR runtime; the game starts its frames on them.
+    $frameSync = Invoke-Adb @('shell', 'setprop', 'debug.refract.frame_sync', '1')
+    if ($frameSync.Code -ne 0) { throw "Could not enable frame sync: $($frameSync.Error)" }
     $policyArgs = @("$PSScriptRoot\unreal_memory_policy.py", '--sdk', $Sdk, '--serial', $serial, '--package', $Package)
     if ($UnrealMemoryPolicy -eq 'Off') { $policyArgs += '--restore' }
     $policyJson = & python @policyArgs
