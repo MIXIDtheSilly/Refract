@@ -37,8 +37,10 @@ CodePatch g_patches[] = {
 
 struct Search {
     const char* library;
+    uintptr_t vaddr;  // Start of the three words to compare (patch vaddr - 4).
     uintptr_t bias;
     bool found;
+    bool mapped;      // All three words lie in one executable segment of the library.
 };
 
 int find_library(dl_phdr_info* info, size_t, void* data)
@@ -49,14 +51,26 @@ int find_library(dl_phdr_info* info, size_t, void* data)
     if (!name || std::strcmp(name, search->library) != 0) return 0;
     search->bias = info->dlpi_addr;
     search->found = true;
+    // Other games have libraries of the same name that are smaller than the patched build
+    // (North Star's libil2cpp.so ends before the AC Nexus offset): reading there crashed them.
+    for (int i = 0; i < info->dlpi_phnum; ++i) {
+        const auto& segment = info->dlpi_phdr[i];
+        if (segment.p_type == PT_LOAD && (segment.p_flags & PF_X) && search->vaddr >= segment.p_vaddr &&
+            search->vaddr + 3 * sizeof(uint32_t) <= segment.p_vaddr + segment.p_filesz)
+            search->mapped = true;
+    }
     return 1;
 }
 
 void apply(CodePatch& patch)
 {
-    Search search{patch.library, 0, false};
+    Search search{patch.library, patch.vaddr - sizeof(uint32_t), 0, false, false};
     dl_iterate_phdr(find_library, &search);
     if (!search.found) return;  // Not this game, or not loaded yet.
+    if (!search.mapped) {
+        patch.applied = true;  // A different build: never look again.
+        return;
+    }
     auto* code = reinterpret_cast<uint32_t*>(search.bias + patch.vaddr);
     if (code[0] == patch.replacement && code[-1] == patch.before[0] && code[1] == patch.before[2]) {
         patch.applied = true;

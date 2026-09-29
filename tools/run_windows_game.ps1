@@ -11,13 +11,20 @@ param(
     [ValidateSet('Auto', 'Default', 'Tsc', 'TscCorrected')][string]$GuestClock = 'Auto',
     [ValidateSet('Auto', 'Off')][string]$UnrealMemoryPolicy = 'Auto',
     [switch]$GpuSharing,
-    [string]$HostExe = "$PSScriptRoot\..\build-windows-nvidia\host-bridge\Release\refract-host-bridge.exe"
+    # build_host.cmd (Ninja) writes host-bridge\refract-host-bridge.exe; multi-config generators add Release\.
+    [string]$HostExe
 )
 $ErrorActionPreference = 'Stop'
 if (!$PSBoundParameters.ContainsKey('GpuSharing')) {
     $GpuSharing = Test-Path "$PSScriptRoot\..\build-windows-gpu-layer\Release\refract_gpu_layer.json"
 }
 if ($Activity.Split('/')[0] -ne $Package) { throw 'Activity must belong to Package.' }
+if (!$HostExe) {
+    $HostExe = @("$PSScriptRoot\..\build-windows-nvidia\host-bridge\refract-host-bridge.exe",
+                 "$PSScriptRoot\..\build-windows-nvidia\host-bridge\Release\refract-host-bridge.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (!$HostExe) { throw 'Build the host bridge first (build_host.cmd).' }
+}
 $HostExe = (Resolve-Path -LiteralPath $HostExe).Path
 $adb = Join-Path $Sdk 'platform-tools\adb.exe'
 $serial = "emulator-$Port"
