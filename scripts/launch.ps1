@@ -5,7 +5,8 @@
       [ValidateSet('', 'two-gear', 'heavy-optimize', 'lite-translate-or-interpret', 'interpret-only')][string]$TranslatorMode = '',
       [string]$UnityArgs = '', [string]$Package = 'com.TrassGames.Yeeps',
       [switch]$RawPixels, [ValidateRange(2, 200)][int]$VideoMbps = 40,
-      [string]$Activity = 'com.unity3d.player.UnityPlayerGameActivity', [switch]$UncachedBuffers)
+      [string]$Activity = 'com.unity3d.player.UnityPlayerGameActivity', [switch]$UncachedBuffers,
+      [switch]$EmulatedTextures)
 # Relaunch Yeeps (or -Package/-Activity, e.g. com.meta.samples.NorthStar/com.meta.northstar.NorthStarActivity) under Refract: fresh logcat in runs\<Run>, controller input server, live view window.
 # GPU sharing (default) needs the emulator started by start_emulator.ps1 (Refract Vulkan layer loaded);
 # without the layer the runtime falls back to pixels over adb by itself.
@@ -20,7 +21,9 @@
 # platform_user_id.txt (optional) sets the Meta user id games see.
 # The runtime Vulkan layer (tools/android_vulkan_layer.cpp, deployed by tools/android_runtime_policy.py) is enabled
 # for -Package. It gives the game's CPU-written buffers cached memory instead of gfxstream's slow uncached memory
-# (Batman's heavy scene 41 -> 68 fps); -UncachedBuffers turns that off.
+# (Batman's heavy scene 41 -> 68 fps); -UncachedBuffers turns that off. It also re-encodes ETC2/EAC/ASTC textures,
+# which the host GPU can't sample, as BC: gfxstream would otherwise keep each one decompressed to RGBA8 next to the
+# original (Batman: 6.9 -> ~3 GB of VRAM). -EmulatedTextures turns that off.
 # -TranslatorMode sets the ARM translator's (libndk_translation) berberis.mode until the next reboot; the default
 # two-gear measured fastest. Translator flags are ro.berberis.flags in /system/build.prop (reboot to apply).
 $ErrorActionPreference = 'Stop'
@@ -98,6 +101,7 @@ if ($phone) {
     & $adb -s $Serial shell 'echo 1048576 > /proc/sys/vm/max_map_count; mount | grep -q " /sys/kernel/debug " || mount -t debugfs debugfs /sys/kernel/debug; echo NO_TTWU_QUEUE > /sys/kernel/debug/sched/features'
     & $adb -s $Serial shell settings put global gpu_debug_app $Package
     & $adb -s $Serial shell setprop debug.refract.cached_buffer_memory $(if ($UncachedBuffers) { '0' } else { '1' })
+    & $adb -s $Serial shell setprop debug.refract.transcode_textures $(if ($EmulatedTextures) { '0' } else { '1' })
 }
 & $adb -s $Serial reverse tcp:38490 tcp:38490 | Out-Null
 & $adb -s $Serial reverse tcp:38491 tcp:38491 | Out-Null

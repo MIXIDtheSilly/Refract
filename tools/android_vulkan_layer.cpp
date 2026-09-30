@@ -13,6 +13,7 @@
 #include <shared_mutex>
 #include <vector>
 #include "vulkan_descriptor_template.h"
+#include "vulkan_texture_transcoder.h"
 
 namespace {
 constexpr const char* layerName="VK_LAYER_REFRACT_runtime";
@@ -29,6 +30,9 @@ struct Device {
     PFN_vkUpdateDescriptorSets updateSets = nullptr;
     uint32_t cachedTypes = 0;    // HOST_VISIBLE + HOST_CACHED + HOST_COHERENT memory types.
     uint32_t uncachedTypes = 0;  // HOST_VISIBLE types without HOST_CACHED.
+    std::shared_ptr<refract::TextureTranscoder> transcoder;  // debug.refract.transcode_textures=1 and BC supported
+    PFN_vkBeginCommandBuffer beginCommandBuffer = nullptr;
+    PFN_vkCmdCopyBufferToImage copyBufferToImage = nullptr;
 };
 // Lookups on the per-draw path take a shared lock; only create/destroy calls write.
 std::shared_mutex mutex;
@@ -105,6 +109,13 @@ void filterBufferMemory(const Device& d,VkMemoryRequirements* requirements){
         __android_log_print(ANDROID_LOG_INFO,"Refract.CachedBuffers","buffer size=%llu types %x -> %x",
             (unsigned long long)requirements->size,before,requirements->memoryTypeBits);
 }
+// debug.refract.transcode_textures=1 (read once): ETC2/EAC textures become BC textures (see vulkan_texture_transcoder.h).
+bool transcodeTextures(){
+    static const bool active=[] {char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.refract.transcode_textures",value);
+        return !std::strcmp(value,"1");}();
+    return active;
+}
 // debug.refract.vram_stats=1 (read once): accounts live device memory per memory type and bound images per
 // format, logged under Refract.VRAM every 5 s while something changes. The sizes are what gfxstream reports,
 // so an emulated (ASTC/ETC2) image includes its decompressed copy; "raw" is what the texels would take natively.
@@ -133,6 +144,8 @@ struct VramStats {
         w=h=bytes=0;
         if(astc(f)){auto& d=astcDims[(f-VK_FORMAT_ASTC_4x4_UNORM_BLOCK)/2];w=d[0];h=d[1];bytes=16;}
         else if(etc(f)){w=h=4;bytes=(f<=VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK||f==VK_FORMAT_EAC_R11_UNORM_BLOCK||f==VK_FORMAT_EAC_R11_SNORM_BLOCK)?8:16;}
+        else if(f>=VK_FORMAT_BC1_RGB_UNORM_BLOCK&&f<=VK_FORMAT_BC7_SRGB_BLOCK){w=h=4;
+            bytes=(f<=VK_FORMAT_BC1_RGBA_SRGB_BLOCK||f==VK_FORMAT_BC4_UNORM_BLOCK||f==VK_FORMAT_BC4_SNORM_BLOCK)?8:16;}
     }
     static uint64_t rawBytes(const Image& i){
         uint32_t bw,bh,bb;block(i.format,bw,bh,bb);if(!bb)return 0;
@@ -201,12 +214,28 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,const Vk
     if(!chain)return VK_ERROR_INITIALIZATION_FAILED;
     auto gdpa=chain->u.pLayerInfo->pfnNextGetDeviceProcAddr;
     auto create=reinterpret_cast<PFN_vkCreateDevice>(chain->u.pLayerInfo->pfnNextGetInstanceProcAddr(s.handle,"vkCreateDevice"));
+    PFN_vkSetDeviceLoaderData setLoaderData=nullptr;  // for command buffers the layer allocates itself
+    for(auto* n=reinterpret_cast<const VkLayerDeviceCreateInfo*>(info->pNext);n;n=reinterpret_cast<const VkLayerDeviceCreateInfo*>(n->pNext))
+        if(n->sType==VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO&&n->function==VK_LOADER_DATA_CALLBACK)setLoaderData=n->u.pfnSetDeviceLoaderData;
     chain->u.pLayerInfo=chain->u.pLayerInfo->pNext;
     std::vector<VkExtensionProperties> es;auto r=extensions(s,physical,es);if(r!=VK_SUCCESS)return r;
     auto api=apiVersion(s,physical);std::vector<const char*> names;
     for(uint32_t i=0;i<info->enabledExtensionCount;++i){auto n=info->ppEnabledExtensionNames[i];bool promoted=false;for(auto& p:promotions)if(api>=p.api&&!std::strcmp(n,p.name)&&!has(es,n))promoted=true;if(!promoted)names.push_back(n);}
     auto modified=*info;modified.enabledExtensionCount=names.size();modified.ppEnabledExtensionNames=names.data();
+    // Transcoded textures are BC, which needs the textureCompressionBC feature on the device.
+    bool transcode=false;VkPhysicalDeviceFeatures features{};VkPhysicalDeviceFeatures2* features2=nullptr;VkBool32 savedBc=VK_FALSE;
+    if(transcodeTextures()){
+        VkPhysicalDeviceFeatures supported{};
+        function<PFN_vkGetPhysicalDeviceFeatures>(s,"vkGetPhysicalDeviceFeatures")(physical,&supported);
+        transcode=supported.textureCompressionBC;
+        if(!transcode)__android_log_print(ANDROID_LOG_WARN,"Refract.Transcode","device has no BC texture support; transcoding off");
+        for(auto* n=static_cast<const VkBaseInStructure*>(modified.pNext);transcode&&n;n=n->pNext)
+            if(n->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)features2=reinterpret_cast<VkPhysicalDeviceFeatures2*>(const_cast<VkBaseInStructure*>(n));
+        if(features2){savedBc=features2->features.textureCompressionBC;features2->features.textureCompressionBC=VK_TRUE;}
+        else if(transcode){if(modified.pEnabledFeatures)features=*modified.pEnabledFeatures;features.textureCompressionBC=VK_TRUE;modified.pEnabledFeatures=&features;}
+    }
     auto result=create(physical,&modified,alloc,out);
+    if(features2)features2->features.textureCompressionBC=savedBc;
     if(result==VK_SUCCESS){
         Device state{*out,gdpa};
         state.createTemplate=function<PFN_vkCreateDescriptorUpdateTemplate>(state,"vkCreateDescriptorUpdateTemplate");
@@ -216,6 +245,27 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,const Vk
         state.updateTemplate=function<PFN_vkUpdateDescriptorSetWithTemplate>(state,"vkUpdateDescriptorSetWithTemplate");
         if(!state.updateTemplate)state.updateTemplate=function<PFN_vkUpdateDescriptorSetWithTemplate>(state,"vkUpdateDescriptorSetWithTemplateKHR");
         state.updateSets=function<PFN_vkUpdateDescriptorSets>(state,"vkUpdateDescriptorSets");
+        state.beginCommandBuffer=function<PFN_vkBeginCommandBuffer>(state,"vkBeginCommandBuffer");
+        state.copyBufferToImage=function<PFN_vkCmdCopyBufferToImage>(state,"vkCmdCopyBufferToImage");
+        if(transcode){
+            VkPhysicalDeviceMemoryProperties props{};
+            function<PFN_vkGetPhysicalDeviceMemoryProperties>(s,"vkGetPhysicalDeviceMemoryProperties")(physical,&props);
+            auto formatProperties=function<PFN_vkGetPhysicalDeviceFormatProperties>(s,"vkGetPhysicalDeviceFormatProperties");
+            auto flag=[](const char* name){char value[PROP_VALUE_MAX]{};__system_property_get(name,value);return std::strcmp(value,"0")!=0;};
+            // ASTC is transcoded on the GPU by a compute shader, on queue families that have compute.
+            refract::TextureTranscoder::GpuSetup gpu;
+            gpu.enabled=flag("debug.refract.transcode_gpu");gpu.setLoaderData=setLoaderData;
+            uint32_t familyCount=0;auto families=function<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(s,"vkGetPhysicalDeviceQueueFamilyProperties");
+            families(physical,&familyCount,nullptr);std::vector<VkQueueFamilyProperties> familyProps(familyCount);families(physical,&familyCount,familyProps.data());
+            for(uint32_t i=0;i<familyCount&&i<32;++i)if(familyProps[i].queueFlags&VK_QUEUE_COMPUTE_BIT)gpu.computeFamilies|=1u<<i;
+            VkPhysicalDeviceProperties deviceProps{};function<PFN_vkGetPhysicalDeviceProperties>(s,"vkGetPhysicalDeviceProperties")(physical,&deviceProps);
+            gpu.maxStorageRange=deviceProps.limits.maxStorageBufferRange;
+            state.transcoder=std::make_shared<refract::TextureTranscoder>(*out,gdpa,props,[&](VkFormat f){
+                VkFormatProperties p{};formatProperties(physical,f,&p);
+                constexpr VkFormatFeatureFlags need=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+                return (p.optimalTilingFeatures&need)==need;},flag("debug.refract.transcode_astc"),gpu);  // transcode_astc=0 keeps ASTC emulated
+            __android_log_print(ANDROID_LOG_INFO,"Refract.Transcode","ETC2/EAC/ASTC -> BC texture transcoding enabled");
+        }
         if(cachedBufferMemory()){
             VkPhysicalDeviceMemoryProperties props{};
             function<PFN_vkGetPhysicalDeviceMemoryProperties>(s,"vkGetPhysicalDeviceMemoryProperties")(physical,&props);
@@ -243,6 +293,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physical,const Vk
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice h,const VkAllocationCallbacks* alloc){
     auto s=device(h);{std::lock_guard lock(mutex);devices.erase(key(h));for(auto it=templates.begin();it!=templates.end();)if(it->first.first==h)it=templates.erase(it);else ++it;}
+    s.transcoder.reset();  // frees its staging before the device goes
     function<PFN_vkDestroyDevice>(s,"vkDestroyDevice")(h,alloc);
 }
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(VkDevice h,VkBuffer buffer,VkMemoryRequirements* out){
@@ -258,26 +309,173 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(VkDevice h,const Vk
     vkGetBufferMemoryRequirements2(h,info,out);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(VkDevice h,const VkMemoryAllocateInfo* info,const VkAllocationCallbacks* alloc,VkDeviceMemory* out){
-    auto result=function<PFN_vkAllocateMemory>(device(h),"vkAllocateMemory")(h,info,alloc,out);
-    if(result==VK_SUCCESS){std::lock_guard lock(vram.lock);vram.memories[*out]={info->allocationSize,info->memoryTypeIndex};
+    auto s=device(h);auto result=function<PFN_vkAllocateMemory>(s,"vkAllocateMemory")(h,info,alloc,out);
+    if(result!=VK_SUCCESS)return result;
+    if(s.transcoder)s.transcoder->addMemory(*out,info->allocationSize,info->memoryTypeIndex);
+    if(vramStats()){std::lock_guard lock(vram.lock);vram.memories[*out]={info->allocationSize,info->memoryTypeIndex};
         vram.typeBytes[info->memoryTypeIndex]+=info->allocationSize;++vram.typeCount[info->memoryTypeIndex];vram.changed();}
     return result;
 }
 VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice h,VkDeviceMemory memory,const VkAllocationCallbacks* alloc){
-    {std::lock_guard lock(vram.lock);auto it=vram.memories.find(memory);
+    auto s=device(h);
+    if(s.transcoder)s.transcoder->removeMemory(memory);
+    if(vramStats()){std::lock_guard lock(vram.lock);auto it=vram.memories.find(memory);
         if(it!=vram.memories.end()){vram.typeBytes[it->second.second]-=it->second.first;--vram.typeCount[it->second.second];
             vram.memories.erase(it);vram.changed();}}
-    function<PFN_vkFreeMemory>(device(h),"vkFreeMemory")(h,memory,alloc);
+    function<PFN_vkFreeMemory>(s,"vkFreeMemory")(h,memory,alloc);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(VkDevice h,VkDeviceMemory memory,VkDeviceSize offset,VkDeviceSize size,VkMemoryMapFlags flags,void** data){
+    auto s=device(h);auto result=function<PFN_vkMapMemory>(s,"vkMapMemory")(h,memory,offset,size,flags,data);
+    if(result==VK_SUCCESS&&s.transcoder)s.transcoder->mapMemory(memory,offset,size,*data);
+    return result;
+}
+VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice h,VkDeviceMemory memory){
+    auto s=device(h);if(s.transcoder)s.transcoder->unmapMemory(memory);
+    function<PFN_vkUnmapMemory>(s,"vkUnmapMemory")(h,memory);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(VkDevice h,const VkBufferCreateInfo* info,const VkAllocationCallbacks* alloc,VkBuffer* out){
+    auto s=device(h);auto result=function<PFN_vkCreateBuffer>(s,"vkCreateBuffer")(h,info,alloc,out);
+    if(result==VK_SUCCESS&&s.transcoder&&(info->usage&VK_BUFFER_USAGE_TRANSFER_SRC_BIT))s.transcoder->addBuffer(*out,info->size);
+    return result;
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(VkDevice h,VkBuffer buffer,const VkAllocationCallbacks* alloc){
+    auto s=device(h);if(s.transcoder)s.transcoder->removeBuffer(buffer);
+    function<PFN_vkDestroyBuffer>(s,"vkDestroyBuffer")(h,buffer,alloc);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice h,VkBuffer buffer,VkDeviceMemory memory,VkDeviceSize offset){
+    auto s=device(h);auto result=function<PFN_vkBindBufferMemory>(s,"vkBindBufferMemory")(h,buffer,memory,offset);
+    if(result==VK_SUCCESS&&s.transcoder)s.transcoder->bindBuffer(buffer,memory,offset);
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2(VkDevice h,uint32_t count,const VkBindBufferMemoryInfo* infos){
+    auto s=device(h);auto next=function<PFN_vkBindBufferMemory2>(s,"vkBindBufferMemory2");
+    if(!next)next=function<PFN_vkBindBufferMemory2>(s,"vkBindBufferMemory2KHR");
+    auto result=next(h,count,infos);
+    if(result==VK_SUCCESS&&s.transcoder)for(uint32_t i=0;i<count;++i)s.transcoder->bindBuffer(infos[i].buffer,infos[i].memory,infos[i].memoryOffset);
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2KHR(VkDevice h,uint32_t count,const VkBindBufferMemoryInfo* infos){
+    return vkBindBufferMemory2(h,count,infos);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(VkDevice h,const VkImageCreateInfo* info,const VkAllocationCallbacks* alloc,VkImage* out){
-    auto result=function<PFN_vkCreateImage>(device(h),"vkCreateImage")(h,info,alloc,out);
-    if(result==VK_SUCCESS){std::lock_guard lock(vram.lock);
-        vram.images[*out]={info->format,info->extent,info->mipLevels,info->arrayLayers,info->samples,info->usage};}
+    auto s=device(h);VkImageCreateInfo modified=*info;
+    const auto codec=s.transcoder?s.transcoder->adjust(modified):refract::texture::Codec::None;
+    auto result=function<PFN_vkCreateImage>(s,"vkCreateImage")(h,&modified,alloc,out);
+    if(result==VK_SUCCESS&&codec!=refract::texture::Codec::None){
+        s.transcoder->addImage(*out,*info);
+        static std::atomic<unsigned> reports{0};
+        if(reports.fetch_add(1,std::memory_order_relaxed)<8)__android_log_print(ANDROID_LOG_INFO,"Refract.Transcode",
+            "image %ux%u mips=%u layers=%u format %d -> %d",modified.extent.width,modified.extent.height,modified.mipLevels,
+            modified.arrayLayers,info->format,modified.format);
+    }
+    if(result==VK_SUCCESS&&vramStats()){std::lock_guard lock(vram.lock);
+        vram.images[*out]={modified.format,modified.extent,modified.mipLevels,modified.arrayLayers,modified.samples,modified.usage};}
     return result;
 }
 VKAPI_ATTR void VKAPI_CALL vkDestroyImage(VkDevice h,VkImage image,const VkAllocationCallbacks* alloc){
-    {std::lock_guard lock(vram.lock);if(vram.images.erase(image))vram.changed();}
-    function<PFN_vkDestroyImage>(device(h),"vkDestroyImage")(h,image,alloc);
+    auto s=device(h);if(s.transcoder)s.transcoder->removeImage(image);
+    if(vramStats()){std::lock_guard lock(vram.lock);if(vram.images.erase(image))vram.changed();}
+    function<PFN_vkDestroyImage>(s,"vkDestroyImage")(h,image,alloc);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImageView(VkDevice h,const VkImageViewCreateInfo* info,const VkAllocationCallbacks* alloc,VkImageView* out){
+    auto s=device(h);VkImageViewCreateInfo modified=*info;
+    if(s.transcoder)modified.format=s.transcoder->viewFormat(info->image,info->format);
+    return function<PFN_vkCreateImageView>(s,"vkCreateImageView")(h,&modified,alloc,out);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(VkDevice h,const VkCommandPoolCreateInfo* info,const VkAllocationCallbacks* alloc,VkCommandPool* out){
+    auto s=device(h);auto result=function<PFN_vkCreateCommandPool>(s,"vkCreateCommandPool")(h,info,alloc,out);
+    if(result==VK_SUCCESS&&s.transcoder)s.transcoder->createdPool(*out,info->queueFamilyIndex);
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(VkDevice h,const VkCommandBufferAllocateInfo* info,VkCommandBuffer* out){
+    auto s=device(h);auto result=function<PFN_vkAllocateCommandBuffers>(s,"vkAllocateCommandBuffers")(h,info,out);
+    if(result==VK_SUCCESS&&s.transcoder)s.transcoder->allocated(info->commandPool,info->commandBufferCount,out,info->level==VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    return result;
+}
+// debug.refract.hitch_log (default on): pipeline creation slower than 8 ms is logged as Refract.Hitch, since the
+// driver compiles shaders synchronously and a game creating pipelines mid-frame stalls.
+bool hitchLog(){static const bool on=[] {char value[PROP_VALUE_MAX]{};__system_property_get("debug.refract.hitch_log",value);
+    return std::strcmp(value,"0")!=0;}();return on;}
+extern "C++" template<class Call>VkResult timedPipelines(const char* what,uint32_t count,Call call){
+    const auto start=std::chrono::steady_clock::now();auto result=call();
+    const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+    if(ms>8)__android_log_print(ANDROID_LOG_INFO,"Refract.Hitch","%s: %u pipeline(s) took %.1f ms",what,count,ms);
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice h,VkPipelineCache cache,uint32_t count,const VkGraphicsPipelineCreateInfo* infos,const VkAllocationCallbacks* alloc,VkPipeline* out){
+    auto next=function<PFN_vkCreateGraphicsPipelines>(device(h),"vkCreateGraphicsPipelines");
+    return timedPipelines("vkCreateGraphicsPipelines",count,[&]{return next(h,cache,count,infos,alloc,out);});
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(VkDevice h,VkPipelineCache cache,uint32_t count,const VkComputePipelineCreateInfo* infos,const VkAllocationCallbacks* alloc,VkPipeline* out){
+    auto next=function<PFN_vkCreateComputePipelines>(device(h),"vkCreateComputePipelines");
+    return timedPipelines("vkCreateComputePipelines",count,[&]{return next(h,cache,count,infos,alloc,out);});
+}
+// GPU transcodes recorded for a command buffer run in a layer command buffer placed just before it in its batch.
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue,uint32_t count,const VkSubmitInfo* submits,VkFence fence){
+    auto s=device(queue);auto next=function<PFN_vkQueueSubmit>(s,"vkQueueSubmit");
+    thread_local std::vector<VkSubmitInfo> modified;thread_local std::vector<std::vector<VkCommandBuffer>> lists;
+    if(s.transcoder&&s.transcoder->prepareSubmit(count,submits,modified,lists))return next(queue,count,modified.data(),fence);
+    return next(queue,count,submits,fence);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,uint32_t count,const VkSubmitInfo2* submits,VkFence fence){
+    auto s=device(queue);auto next=function<PFN_vkQueueSubmit2>(s,"vkQueueSubmit2");
+    if(!next)next=function<PFN_vkQueueSubmit2>(s,"vkQueueSubmit2KHR");
+    thread_local std::vector<VkSubmitInfo2> modified;thread_local std::vector<std::vector<VkCommandBufferSubmitInfo>> lists;
+    if(s.transcoder&&s.transcoder->prepareSubmit2(count,submits,modified,lists))return next(queue,count,modified.data(),fence);
+    return next(queue,count,submits,fence);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2KHR(VkQueue queue,uint32_t count,const VkSubmitInfo2* submits,VkFence fence){
+    return vkQueueSubmit2(queue,count,submits,fence);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBeginCommandBuffer(VkCommandBuffer cmd,const VkCommandBufferBeginInfo* info){
+    auto s=device(cmd);if(s.transcoder)s.transcoder->reset(cmd);
+    return s.beginCommandBuffer(cmd,info);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandBuffer(VkCommandBuffer cmd,VkCommandBufferResetFlags flags){
+    auto s=device(cmd);if(s.transcoder)s.transcoder->reset(cmd);
+    return function<PFN_vkResetCommandBuffer>(s,"vkResetCommandBuffer")(cmd,flags);
+}
+VKAPI_ATTR void VKAPI_CALL vkFreeCommandBuffers(VkDevice h,VkCommandPool pool,uint32_t count,const VkCommandBuffer* buffers){
+    auto s=device(h);if(s.transcoder)s.transcoder->freed(count,buffers);
+    function<PFN_vkFreeCommandBuffers>(s,"vkFreeCommandBuffers")(h,pool,count,buffers);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(VkDevice h,VkCommandPool pool,VkCommandPoolResetFlags flags){
+    auto s=device(h);if(s.transcoder)s.transcoder->poolReset(pool,false);
+    return function<PFN_vkResetCommandPool>(s,"vkResetCommandPool")(h,pool,flags);
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroyCommandPool(VkDevice h,VkCommandPool pool,const VkAllocationCallbacks* alloc){
+    auto s=device(h);if(s.transcoder)s.transcoder->poolReset(pool,true);
+    function<PFN_vkDestroyCommandPool>(s,"vkDestroyCommandPool")(h,pool,alloc);
+}
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(VkCommandBuffer cmd,VkBuffer buffer,VkImage image,VkImageLayout layout,uint32_t count,const VkBufferImageCopy* regions){
+    auto s=device(cmd);
+    if(s.transcoder){
+        thread_local std::vector<VkBufferImageCopy> redirected;VkBuffer staging;
+        if(s.transcoder->redirect(cmd,buffer,image,count,regions,redirected,staging)){
+            s.copyBufferToImage(cmd,staging,image,layout,count,redirected.data());return;}
+    }
+    s.copyBufferToImage(cmd,buffer,image,layout,count,regions);
+}
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage2(VkCommandBuffer cmd,const VkCopyBufferToImageInfo2* info){
+    auto s=device(cmd);auto next=function<PFN_vkCmdCopyBufferToImage2>(s,"vkCmdCopyBufferToImage2");
+    if(!next)next=function<PFN_vkCmdCopyBufferToImage2>(s,"vkCmdCopyBufferToImage2KHR");
+    if(s.transcoder){
+        thread_local std::vector<VkBufferImageCopy2> redirected;VkBuffer staging;
+        if(s.transcoder->redirect(cmd,info->srcBuffer,info->dstImage,info->regionCount,info->pRegions,redirected,staging)){
+            auto modified=*info;modified.srcBuffer=staging;modified.pRegions=redirected.data();next(cmd,&modified);return;}
+    }
+    next(cmd,info);
+}
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage2KHR(VkCommandBuffer cmd,const VkCopyBufferToImageInfo2* info){
+    vkCmdCopyBufferToImage2(cmd,info);
+}
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer cmd,VkImage src,VkImageLayout srcLayout,VkImage dst,VkImageLayout dstLayout,uint32_t count,const VkImageCopy* regions){
+    auto s=device(cmd);if(s.transcoder)s.transcoder->checkImageCopy(src,dst);
+    function<PFN_vkCmdCopyImage>(s,"vkCmdCopyImage")(cmd,src,srcLayout,dst,dstLayout,count,regions);
+}
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyImageToBuffer(VkCommandBuffer cmd,VkImage src,VkImageLayout layout,VkBuffer dst,uint32_t count,const VkBufferImageCopy* regions){
+    auto s=device(cmd);if(s.transcoder)s.transcoder->checkReadback(src);
+    function<PFN_vkCmdCopyImageToBuffer>(s,"vkCmdCopyImageToBuffer")(cmd,src,layout,dst,count,regions);
 }
 static void recordImageSize(VkImage image,VkDeviceSize size){
     std::lock_guard lock(vram.lock);auto it=vram.images.find(image);if(it!=vram.images.end())it->second.size=size;
@@ -372,11 +570,23 @@ PFN_vkVoidFunction intercept(const char* name){
     if(cachedBufferMemory()){
         ENTRY(vkGetBufferMemoryRequirements);ENTRY(vkGetBufferMemoryRequirements2);ENTRY(vkGetBufferMemoryRequirements2KHR);
     }
-    if(vramStats()){
+    if(vramStats()||transcodeTextures()){
         ENTRY(vkAllocateMemory);ENTRY(vkFreeMemory);ENTRY(vkCreateImage);ENTRY(vkDestroyImage);
+    }
+    if(vramStats()){
         ENTRY(vkGetImageMemoryRequirements);ENTRY(vkGetImageMemoryRequirements2);ENTRY(vkGetImageMemoryRequirements2KHR);
         ENTRY(vkBindImageMemory);ENTRY(vkBindImageMemory2);ENTRY(vkBindImageMemory2KHR);
     }
+    if(transcodeTextures()){
+        ENTRY(vkMapMemory);ENTRY(vkUnmapMemory);ENTRY(vkCreateBuffer);ENTRY(vkDestroyBuffer);
+        ENTRY(vkBindBufferMemory);ENTRY(vkBindBufferMemory2);ENTRY(vkBindBufferMemory2KHR);ENTRY(vkCreateImageView);
+        ENTRY(vkCreateCommandPool);ENTRY(vkQueueSubmit);ENTRY(vkQueueSubmit2);ENTRY(vkQueueSubmit2KHR);
+        ENTRY(vkAllocateCommandBuffers);ENTRY(vkBeginCommandBuffer);ENTRY(vkResetCommandBuffer);ENTRY(vkFreeCommandBuffers);
+        ENTRY(vkResetCommandPool);ENTRY(vkDestroyCommandPool);
+        ENTRY(vkCmdCopyBufferToImage);ENTRY(vkCmdCopyBufferToImage2);ENTRY(vkCmdCopyBufferToImage2KHR);
+        ENTRY(vkCmdCopyImage);ENTRY(vkCmdCopyImageToBuffer);
+    }
+    if(hitchLog()){ENTRY(vkCreateGraphicsPipelines);ENTRY(vkCreateComputePipelines);}
     ENTRY(vkCreateDescriptorUpdateTemplate);ENTRY(vkDestroyDescriptorUpdateTemplate);ENTRY(vkUpdateDescriptorSetWithTemplate);
     ENTRY(vkCreateDescriptorUpdateTemplateKHR);ENTRY(vkDestroyDescriptorUpdateTemplateKHR);ENTRY(vkUpdateDescriptorSetWithTemplateKHR);
 #undef ENTRY

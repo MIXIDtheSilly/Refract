@@ -72,6 +72,8 @@ def main():
     # CPU-written buffers get cached memory instead of gfxstream's slow uncached memory
     # (Batman's heavy scene 41 -> 68 fps). Read by the layer when the game creates its Vulkan device.
     run('shell', 'setprop debug.refract.cached_buffer_memory 1')
+    # ETC2/EAC/ASTC textures become BC, which the host GPU samples natively (no decompressed copy in VRAM).
+    run('shell', 'setprop debug.refract.transcode_textures 1')
     run('shell', 'sync')
     print(json.dumps({'status': 'ready', 'max_map_count': limit, 'scheduler': scheduler, 'translator': 'digitalis',
                       'vulkan_layer': remote}))
