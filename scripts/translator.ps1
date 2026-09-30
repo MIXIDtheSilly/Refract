@@ -1,6 +1,6 @@
 param([Parameter(Mandatory)][ValidateSet('google', 'digitalis')][string]$Use,
       [string]$Serial = 'emulator-5582', [switch]$Refresh, [switch]$NoReboot,
-      [string]$Adb = 'C:\Users\mixid\Android\Sdk\platform-tools\adb.exe')
+      [string]$Adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe")
 # Switches the emulator's ARM64 translator between Google's libndk_translation and Digitalis
 # (open-source berberis, prebuilt in ..\prebuilts\digitalis). Both sets live side by side on
 # /system: the active one is copied into /system/lib64/arm64, /system/bin/arm64 and
@@ -18,8 +18,23 @@ function Sh([string]$command) {
 }
 
 & $adb -s $Serial root | Out-Null
+Start-Sleep -Seconds 2  # adbd restarts as root; wait-for-device could still see the old one.
 & $adb -s $Serial wait-for-device
 & $adb -s $Serial remount | Select-Object -Last 1
+# A new AVD's first remount only disables verity; /system becomes writable after a reboot (and adbd may still be
+# restarting as root). Check, and reboot once if needed.
+if ((& $adb -s $Serial shell 'touch /system/.refract-rw && rm /system/.refract-rw && echo ok') -ne 'ok') {
+    Write-Output 'Restarting Android to make /system writable'
+    & $adb -s $Serial reboot
+    & $adb -s $Serial wait-for-device
+    & $adb -s $Serial shell 'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done'
+    & $adb -s $Serial root | Out-Null
+    & $adb -s $Serial wait-for-device
+    & $adb -s $Serial remount | Select-Object -Last 1
+    if ((& $adb -s $Serial shell 'touch /system/.refract-rw && rm /system/.refract-rw && echo ok') -ne 'ok') {
+        throw 'Android /system could not be made writable. The emulator must be started with -writable-system.'
+    }
+}
 
 # One-time backup of Google's translator files (on the device and on this PC).
 if ((Sh '[ -d /system/lib64/arm64.google ] && echo yes || echo no') -ne 'yes') {

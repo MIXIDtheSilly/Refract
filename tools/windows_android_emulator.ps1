@@ -41,6 +41,8 @@ if (!$RuntimeApk) { $RuntimeApk = "$PSScriptRoot\..\build-android-runtime-window
 # Android 16: the Digitalis ARM64 translator in prebuilts\digitalis is built for it.
 $image = 'system-images;android-36;google_apis;x86_64'
 $logs = Join-Path (Split-Path $PSScriptRoot -Parent) 'build-windows-emulator'
+# A progress line the launcher shows while Android starts (launcher/core/runtime.mjs reads REFRACT-STAGE lines).
+function Stage([string]$Text) { Write-Host $Text; [Console]::Out.WriteLine("REFRACT-STAGE: $Text"); [Console]::Out.Flush() }
 function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed ($LASTEXITCODE)" }
@@ -52,15 +54,17 @@ function Verify-Gpu {
     if ($LASTEXITCODE -ne 0) { throw 'Guest Vulkan query failed.' }
     $vk = ($raw -join "`n") | ConvertFrom-Json
     $devices = @($vk.devices)
-    if ($gles -notmatch 'NVIDIA' -or $gles -match 'SwiftShader|llvmpipe|softpipe|software') {
-        throw "Nvidia hardware GLES required; found: $gles"
+    # Games need the PC's GPU; software rendering is far too slow. Refract is tuned and tested on NVIDIA.
+    if ($gles -match 'SwiftShader|llvmpipe|softpipe|software') {
+        throw "Android is using software graphics ($gles). Update your graphics driver and try again."
     }
-    if (!$devices.Count) { throw 'Guest reports no Vulkan devices.' }
+    if (!$devices.Count) { throw 'Android sees no Vulkan GPU. Update your graphics driver and try again.' }
     foreach ($device in $devices) {
         $p = $device.properties
-        if ($p.vendorID -ne 4318 -or $p.deviceType -eq 4 -or $p.deviceName -match 'SwiftShader|llvmpipe|software') {
-            throw "Non-Nvidia/software Vulkan device: $($p.deviceName)"
+        if ($p.deviceType -eq 4 -or $p.deviceName -match 'SwiftShader|llvmpipe|software') {
+            throw "Android is using a software Vulkan device ($($p.deviceName)). Update your graphics driver and try again."
         }
+        if ($p.vendorID -ne 4318) { Write-Warning "Refract is tested on NVIDIA GPUs; this one is $($p.deviceName)." }
     }
     New-Item -ItemType Directory -Force $logs | Out-Null
     $gles | Set-Content "$logs\guest-gles.txt"
@@ -81,11 +85,15 @@ function Verify-Abi {
         Write-Host "ARM64 native bridge: $bridge; guest ABIs: $abis"
     }
 }
-# Sets hw.gltransport in the AVD's config.ini, keeping the original once as config.ini.before-<transport>.
-function Set-GlTransport {
+# The AVD's content folder (config.ini, disk images), or $null when the AVD is not found.
+function Get-AvdPath {
     $avdHome = @($env:ANDROID_AVD_HOME, $(if ($env:ANDROID_USER_HOME) { Join-Path $env:ANDROID_USER_HOME 'avd' }),
                  (Join-Path $env:USERPROFILE '.android\avd')) | Where-Object { $_ -and (Test-Path "$_\$Avd.ini") } | Select-Object -First 1
-    $avdPath = if ($avdHome) { (Get-Content "$avdHome\$Avd.ini" | Where-Object { $_ -match '^path=' } | Select-Object -First 1) -replace '^path=', '' }
+    if ($avdHome) { (Get-Content "$avdHome\$Avd.ini" | Where-Object { $_ -match '^path=' } | Select-Object -First 1) -replace '^path=', '' }
+}
+# Sets hw.gltransport in the AVD's config.ini, keeping the original once as config.ini.before-<transport>.
+function Set-GlTransport {
+    $avdPath = Get-AvdPath
     $config = if ($avdPath) { Join-Path $avdPath 'config.ini' }
     if (!$config -or !(Test-Path $config)) { Write-Warning "AVD config for $Avd not found; hw.gltransport left unchanged."; return }
     $lines = @(Get-Content $config)
@@ -111,17 +119,23 @@ function Get-EmulatorFailure {
     if ($reason) { return "The emulator stopped: $($reason.Trim()) (log: $log)" }
     "The emulator stopped while starting. See $log"
 }
-function Wait-Boot($Process) {
-    $deadline = (Get-Date).AddMinutes(3)
+function Wait-Boot($Process, [int]$Minutes = 3) {
+    $deadline = (Get-Date).AddMinutes($Minutes)
+    $offlineSince = $null
     do {
         Start-Sleep -Seconds 2
         $ErrorActionPreference = 'Continue'
         $boot = & $adb -s $serial shell getprop sys.boot_completed 2>$null
+        # After a cold start adb can keep a booted emulator "offline" for minutes; reconnecting clears it.
+        $offline = (& $adb devices 2>$null) -match "^$serial\s+offline"
         $ErrorActionPreference = 'Stop'
         if ($boot -eq '1') { return }
         if ($Process.HasExited) { throw (Get-EmulatorFailure) }
+        if (!$offline) { $offlineSince = $null }
+        elseif (!$offlineSince) { $offlineSince = Get-Date }
+        elseif (((Get-Date) - $offlineSince).TotalSeconds -gt 30) { & $adb reconnect offline 2>$null | Out-Null; $offlineSince = Get-Date }
     } while ((Get-Date) -lt $deadline)
-    throw "Boot timed out; see $logs"
+    throw "Android did not finish starting within $Minutes minutes. Close Refract and try again; if it keeps happening, restart Windows. (Logs: $logs)"
 }
 # The guest's clocksource name, or $null when it cannot be read (no su on this image).
 function Get-Prop([string]$Name) { ((& $adb -s $serial shell getprop $Name) -join '').Trim() }
@@ -133,7 +147,7 @@ function Use-Digitalis($Process) {
     if ($level -lt 36) {
         throw "$Avd is Android API $level; Refract's Digitalis translator needs an Android 16 (API 36) AVD such as refract-google-api36."
     }
-    Write-Host 'Installing the Digitalis ARM64 translator (reboots Android)'
+    Stage 'Installing the ARM translator (Android restarts)'
     & "$PSScriptRoot\..\scripts\translator.ps1" -Use digitalis -Serial $serial -Adb $adb
     Start-Sleep -Seconds 5
     Wait-Boot $Process
@@ -171,6 +185,22 @@ switch ($Action) {
         }
         New-Item -ItemType Directory -Force $logs | Out-Null
         Set-GlTransport
+        # A new AVD's first boot sets up and encrypts /data. On the multi-core qemu that stalls vCPU 0 long enough
+        # for the emulator's hang detector to kill it, so the first boot runs once on the stock emulator.
+        # The launcher's Setup marks the AVDs it creates (launcher/core/android_sdk.mjs).
+        $avdPath = Get-AvdPath
+        if ($avdPath -and (Test-Path "$avdPath\refract-first-boot-pending")) {
+            Stage 'Setting up Android for the first time (a few minutes, only once)'
+            $first = Start-Process $emulator -ArgumentList @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim',
+                '-memory', "$MemoryMB", '-writable-system', '-no-window', '-crash-report-mode', 'never') `
+                -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\emulator.stdout.log" -RedirectStandardError "$logs\emulator.stderr.log"
+            Wait-Boot $first 10
+            Remove-Item "$avdPath\refract-first-boot-pending"
+            Run $adb @('-s', $serial, 'shell', 'sync')
+            Run $adb @('-s', $serial, 'emu', 'kill')
+            if (!$first.WaitForExit(60000)) { $first.Kill() }
+            Start-Sleep -Seconds 3
+        }
         $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB",
                        '-writable-system', '-audio', $Audio,
                        # After a crash (e.g. gfxstream on North Star's exit) the next start otherwise waits
@@ -257,7 +287,7 @@ switch ($Action) {
         }
         # Whether a boot passes the TSC sync check is luck (Linux's stability checks are never overridden).
         for ($attempt = 0; ($clock = Get-Clocksource) -and $clock -ne 'tsc' -and $attempt -lt $TscReboots; $attempt++) {
-            Write-Host "Guest clock is $clock (TSC failed the boot sync check); rebooting Android ($($attempt + 1)/$TscReboots)"
+            Stage "Restarting Android for a steadier clock ($($attempt + 1)/$TscReboots)"
             Run $adb @('-s', $serial, 'reboot')
             Start-Sleep -Seconds 5
             Wait-Boot $process

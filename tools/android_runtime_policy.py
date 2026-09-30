@@ -45,7 +45,8 @@ def main():
     header = root / 'tools/vulkan_descriptor_template.h'
     output = root / 'build-vulkan-compat/libVkLayer_REFRACT_runtime.so'
     output.parent.mkdir(exist_ok=True)
-    if not output.exists() or output.stat().st_mtime < max(source.stat().st_mtime, header.stat().st_mtime):
+    # A packaged Refract ships only the built layer; a source checkout rebuilds it when the source changes.
+    if not output.exists() or (source.exists() and output.stat().st_mtime < max(source.stat().st_mtime, header.stat().st_mtime)):
         compilers = sorted((args.sdk / 'ndk').glob('*/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android29-clang++.cmd'),
                            key=lambda p: tuple(int(n) for n in p.parents[5].name.split('.')))
         if not compilers: raise RuntimeError('Android NDK required for the runtime Vulkan layer')
