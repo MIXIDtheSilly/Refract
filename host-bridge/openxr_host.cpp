@@ -88,6 +88,7 @@ void print_usage()
     std::fprintf(stderr, "  refract-host-bridge --video-recv-udp [port] [frames]\n");
     std::fprintf(stderr, "  refract-host-bridge --video-send-synthetic [host] [port] [frames] [fps]\n");
     std::fprintf(stderr, "  refract-host-bridge --video-send-rgba [host] [port] [frames] [fps] [width] [height]\n");
+    std::fprintf(stderr, "  refract-host-bridge --probe-openxr\n");
     std::fprintf(stderr, "  refract-host-bridge --smoke\n");
 }
 
@@ -388,6 +389,41 @@ public:
         if (instance_ != XR_NULL_HANDLE && destroyInstance_ != nullptr) {
             destroyInstance_(instance_);
         }
+    }
+
+    // Whether a PC VR runtime is running with a headset attached, without opening a session.
+    bool probe()
+    {
+        if (!loader_.load()) {
+            return false;
+        }
+        XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
+        std::strncpy(instanceInfo.applicationInfo.applicationName, "Refract headset check", XR_MAX_APPLICATION_NAME_SIZE - 1);
+        std::strncpy(instanceInfo.applicationInfo.engineName, "Refract", XR_MAX_ENGINE_NAME_SIZE - 1);
+        instanceInfo.applicationInfo.applicationVersion = 1;
+        instanceInfo.applicationInfo.engineVersion = 1;
+#if defined(_WIN32)
+        instanceInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+#else
+        instanceInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+#endif
+        XrResult result = loader_.createInstance(&instanceInfo, &instance_);
+        if (result != XR_SUCCESS) {
+            std::fprintf(stderr, "Refract OpenXR: xrCreateInstance failed: %s (%d)\n", xr_result_name(result), result);
+            return false;
+        }
+        if (!load_func("xrDestroyInstance", &destroyInstance_) || !load_func("xrGetSystem", &getSystem_)) {
+            return false;
+        }
+        XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
+        systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+        result = getSystem_(instance_, &systemInfo, &systemId_);
+        if (result != XR_SUCCESS) {
+            std::fprintf(stderr, "Refract OpenXR: xrGetSystem failed: %s (%d)\n", xr_result_name(result), result);
+            return false;
+        }
+        std::fprintf(stderr, "Refract OpenXR: headset ready\n");
+        return true;
     }
 
     bool initialize(const std::string& gameName)
@@ -2059,6 +2095,10 @@ int OpenXrHost::run(int argc, char** argv)
     }
 
     const std::string_view mode(argv[1]);
+    if (mode == "--probe-openxr") {
+        OpenXrPoseSource source;
+        return source.probe() ? 0 : 1;
+    }
     if (mode == "--serve-gpu-fds") {
         const char* socket_path = argc >= 3 ? argv[2] : "/tmp/refract-gpu-frame.sock";
         uint32_t frames = 0;
