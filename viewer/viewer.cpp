@@ -20,6 +20,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
 #include <d2d1_1.h>
 #include <d3d11_4.h>
 #include <dwrite.h>
@@ -52,6 +53,7 @@ namespace proto = refract::protocol;
 namespace {
 
 constexpr wchar_t kTitle[] = L"Refract Viewer";  // pose_input_server.py matches "Refract Viewer" for keyboard focus.
+std::wstring g_title = kTitle;  // --title <game> makes it "<game> – Refract Viewer".
 
 // A composite frame's layout (AXRI v10): the slot's slices are its two atlas textures.
 struct Composite {
@@ -1194,6 +1196,14 @@ int main(int argc, char** argv)
         else if (arg == "--adb") adb = argv[++i];
         else if (arg == "--serial") serial = argv[++i];
         else if (arg == "--package") package = argv[++i];
+        else if (arg == "--title") ++i;  // Read below as UTF-16: a game name can hold any character.
+        else if (arg == "--stats") g_app.overlay = std::atoi(argv[++i]) != 0;  // 0: start with the F1 overlay hidden.
+    }
+    int wideCount = 0;
+    if (LPWSTR* wide = CommandLineToArgvW(GetCommandLineW(), &wideCount)) {
+        for (int i = 1; i + 1 < wideCount; ++i)
+            if (std::wstring_view(wide[i]) == L"--title" && *wide[i + 1]) g_title = std::wstring(wide[++i]) + L" \x2013 " + kTitle;
+        LocalFree(wide);
     }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1205,11 +1215,12 @@ int main(int argc, char** argv)
     wc.lpszClassName = L"RefractViewer";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
-    g_app.window = CreateWindowExW(0, wc.lpszClassName, kTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+    g_app.window = CreateWindowExW(0, wc.lpszClassName, g_title.c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
         1000, 1040, nullptr, nullptr, wc.hInstance, nullptr);
     if (!g_app.window || !create_swapchain()) { std::fprintf(stderr, "viewer: window setup failed\n"); return 1; }
     if (!create_overlay()) std::fprintf(stderr, "viewer: overlay setup failed; no performance stats\n");
     AndroidStats android(adb, serial, package);
+    android.enabled = g_app.overlay;
     android.start();
     g_app.android = &android;
     // A launcher may start us hidden; the first ShowWindow uses that startup value.
@@ -1282,10 +1293,10 @@ int main(int argc, char** argv)
         if (elapsed >= 1.0) {
             g_app.gameFps = float(g_shared.sceneFrames / elapsed);
             g_app.shownFps = float(presented / elapsed);
-            wchar_t title[256];
+            wchar_t title[1024];
             const bool panels = g_shared.wantPanels;
             swprintf_s(title, L"%ls  |  game %.0f fps, shown %.0f fps (%ls%ls)  |  right-drag look, click trigger, wheel hand distance  |  "
-                L"F1 stats, F2 screenshot, F3 both eyes, F6 %ls, F11 fullscreen, Home recenter", kTitle,
+                L"F1 stats, F2 screenshot, F3 both eyes, F6 %ls, F11 fullscreen, Home recenter", g_title.c_str(),
                 g_shared.sceneFrames.exchange(0) / elapsed, presented / elapsed,
                 !g_shared.connected ? L"waiting for game" : g_shared.gpu ? L"GPU shared" : g_shared.video ? L"H.264" : L"pixel stream",
                 panels ? L", panels" : L"", panels ? L"scene" : L"panels");
