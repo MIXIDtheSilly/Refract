@@ -1,0 +1,15 @@
+<!-- com.oculus.systemdriver stand-in. Meta's OpenXR loader, bundled in many Quest games (Unity OVRPlugin),
+     loads the runtime from this package: it calls com.oculus.systemdriver.DriverLoader.loadXrRuntime() and
+     getProcAddr() in its class loader. The package carries a copy of Refract's libopenxr_runtime.so and
+     refract_driver.c. Games without a <queries> entry still see it, because they target API 29. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.oculus.systemdriver"
+    android:versionCode="1"
+    android:versionName="0.1">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="29" />
+    <application
+        android:allowBackup="false"
+        android:hasCode="true"
+        android:extractNativeLibs="true"
+        android:label="Refract XR Driver" />
+</manifest>
