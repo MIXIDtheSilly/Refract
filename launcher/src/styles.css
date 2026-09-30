@@ -203,6 +203,7 @@ select.field-input option { background: var(--panel); }
 .setup-text strong { font-weight: 500; font-size: 14.5px; }
 .setup-text span, .setup-text small { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; user-select: text; }
 .setup-text small { color: var(--faint); }
+.setup-text small.setup-progress { color: var(--text); font-variant-numeric: tabular-nums; }
 .setup-banner { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; padding: 16px 18px; border-radius: 18px; background: var(--surface); border: 1px solid rgba(255, 138, 128, 0.35); }
 .setup-banner > svg { width: 22px; height: 22px; color: var(--danger); flex-shrink: 0; }
 .setup-banner div { flex: 1; min-width: 0; display: grid; gap: 2px; }

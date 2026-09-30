@@ -61,10 +61,12 @@ async function sha256(file) {
   }));
   return hashes.get(key);
 }
-// Refract's Android side: the OpenXR runtime games render through, and the Meta Platform SDK stand-in
+// Refract's Android side: the OpenXR runtime games render through, the same runtime as com.oculus.systemdriver
+// (where Meta's OpenXR loader in many Unity games looks for it), and the Meta Platform SDK stand-in
 // (package com.oculus.horizon) that unmodified Quest APKs load instead of Horizon OS.
 export const guestPackages = [
   { package: 'com.refract.openxrruntime', label: 'Refract OpenXR runtime', apk: 'build-android-runtime-windows-arm64-v8a/refract-openxr-runtime-debug.apk' },
+  { package: 'com.oculus.systemdriver', label: 'Refract XR driver', apk: 'build-android-runtime-windows-arm64-v8a/refract-systemdriver-debug.apk' },
   { package: 'com.oculus.horizon', label: 'Meta Platform stand-in', apk: 'build-platform-sdk/refract-platform-debug.apk' },
 ];
 export function validPackage(value) {
@@ -139,7 +141,9 @@ export class Runtime {
         // No clock correction: it only works with emulator 36.5.11 and runs a single vCPU; the start
         // script's tsc=nowatchdog and TSC reboots keep the guest on the TSC clock instead.
         Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, GpuSharing: true
-      }), { timeout: 600000 });  // Room for the reboots that get the guest a TSC clock.
+      }), { timeout: 25 * 60 * 1000, onOutput: text => {  // Room for a new AVD's first boot and the TSC reboots.
+        for (const [, stage] of text.matchAll(/^REFRACT-STAGE: (.+)$/gm)) update(stage.trim());
+      } });
     }
     await this.prepare(update);
   }
@@ -151,6 +155,25 @@ export class Runtime {
       await run('powershell.exe', powershellArgs(path.join(this.root, 'scripts/translator.ps1'), {
         Use: 'digitalis', Serial: `emulator-${this.port}`, Adb: path.join(this.settings.sdk, 'platform-tools/adb.exe') }), { timeout: 300000 });
       await sleep(5000); await this.waitBoot(this.port);
+    }
+    // Unmodified Quest games only use the Meta Platform SDK (Refract's stand-in) when Build.MANUFACTURER says
+    // Oculus (Unity's getIsOnOculusHardware), so the device presents itself as a Quest 3 (scripts/device_identity.ps1).
+    if (!/oculus/i.test(await this.adb(['shell', 'getprop', 'ro.product.manufacturer']))) {
+      update('Setting up the Quest identity (Android restarts)');
+      await this.adb(['root'], { timeout: 30000 }); await sleep(2000); await this.adb(['wait-for-device'], { timeout: 60000 });
+      await this.adb(['remount'], { timeout: 60000 });
+      const files = '/system/build.prop /vendor/build.prop /product/etc/build.prop /system_ext/etc/build.prop /odm/etc/build.prop';
+      await this.adb(['shell', `for f in ${files}; do [ -f $f ] || continue; [ -f $f.before-identity ] || cp -p $f $f.before-identity; `
+        + "sed -i -E 's/^(ro\\.product\\.([a-z_]+\\.)?brand)=.*/\\1=oculus/; s/^(ro\\.product\\.([a-z_]+\\.)?manufacturer)=.*/\\1=Oculus/; "
+        + "s/^(ro\\.product\\.([a-z_]+\\.)?model)=.*/\\1=Quest 3/' $f; done; sync"]);
+      await this.adb(['reboot'], { timeout: 30000 }).catch(() => {});
+      await sleep(5000); await this.waitBoot(this.port);
+      if (!/oculus/i.test(await this.adb(['shell', 'getprop', 'ro.product.manufacturer']))) throw new Error('Android did not take the Quest identity. Restart Refract and try again.');
+    }
+    // A new Android shows a one-time "Viewing full screen" notice over the first full-screen app. It takes focus,
+    // so a Unity game pauses itself and never renders a frame. Mark the notice as already seen.
+    if ((await this.adb(['shell', 'settings', 'get', 'secure', 'immersive_mode_confirmations'])).trim() !== 'confirmed') {
+      await this.adb(['shell', 'settings', 'put', 'secure', 'immersive_mode_confirmations', 'confirmed']);
     }
     for (const item of guestPackages) {
       const apk = path.join(this.root, item.apk);
@@ -221,6 +244,8 @@ export class Runtime {
     let finished = false;
     const end = (code, error) => {
       if (finished) return; finished = true; this.child = null; this.game = null; this.mode = null;
+      // A session the player stopped ended as asked, whatever its window's exit code.
+      if (this.stopping) { this.stopping = false; code = 0; error = ''; }
       if (partial.startsWith('REFRACT-ERROR: ')) marked = partial.slice(15).trim();
       onExit(code, error || (code ? marked || readableError(tail) || 'The game session stopped unexpectedly.' : tail));
     };
@@ -235,6 +260,7 @@ export class Runtime {
   async stop() {
     if (!this.child) return;
     const pid = this.child.pid;
+    this.stopping = true;
     // Closing the session's window (headset bridge or PC viewer) ends the session through its save-aware shutdown.
     const script = `$p = Get-CimInstance Win32_Process -Filter "Name='refract-host-bridge.exe' OR Name='refract_viewer.exe'" | Where-Object ParentProcessId -eq ${Number(pid)}; foreach ($h in $p) { $null = (Get-Process -Id $h.ProcessId).CloseMainWindow() }`;
     await run('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')]);

@@ -1,19 +1,12 @@
 // Checks that everything Refract needs to run a game is on this PC, and fixes what it can.
 // Each check: { id, title, ok, detail, fix?: { action, label, note? } }.
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { run, powershellArgs, guestPackages } from './runtime.mjs';
+import { avdHome, installAndroid, missingAndroid, multicoreReady } from './android_sdk.mjs';
 
 const exists = file => fs.access(file).then(() => true, () => false);
-const IMAGE = 'system-images/android-36/google_apis/x86_64';
 const winget = id => ['install', '--exact', '--id', id, '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity'];
-
-function avdHome() {
-  if (process.env.ANDROID_AVD_HOME) return process.env.ANDROID_AVD_HOME;
-  if (process.env.ANDROID_USER_HOME) return path.join(process.env.ANDROID_USER_HOME, 'avd');
-  return path.join(os.homedir(), '.android/avd');
-}
 // A tool installed while the launcher runs is on the user's PATH in the registry, not in this process.
 export async function refreshPath() {
   const script = "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')";
@@ -42,31 +35,21 @@ async function python() {
   return { ...check, ok: false, detail: 'Refract reads game packages and prepares Android with Python 3.', fix: { action: 'python', label: 'Install Python' } };
 }
 
+// The Android SDK packages Refract is tested with (pinned, see android_sdk.mjs) and its virtual device.
 async function android(sdk, avd) {
-  const sdkCheck = { id: 'sdk', title: 'Android SDK' };
+  const sdkCheck = { id: 'sdk', title: 'Android' };
   const avdCheck = { id: 'avd', title: 'Virtual device' };
-  if (!await exists(sdk)) {
-    const missing = { ok: false, fix: { action: 'android-studio', label: 'Install Android Studio', note: 'Open Android Studio once after it installs so it downloads the SDK, then come back here.' } };
-    return [{ ...sdkCheck, ...missing, detail: `No Android SDK at ${sdk}. Android Studio installs one.` },
-      { ...avdCheck, ok: false, detail: 'Needs the Android SDK first.' }];
-  }
-  const buildTools = await fs.readdir(path.join(sdk, 'build-tools')).catch(() => []);
-  const aapt2 = (await Promise.all(buildTools.map(v => exists(path.join(sdk, 'build-tools', v, 'aapt2.exe'))))).some(Boolean);
-  const missing = [
-    !await exists(path.join(sdk, 'platform-tools/adb.exe')) && 'platform tools',
-    !await exists(path.join(sdk, 'emulator/emulator.exe')) && 'emulator',
-    !aapt2 && 'build tools',
-  ].filter(Boolean);
-  const setup = { action: 'android', label: 'Set up Android', note: 'Downloads about 2 GB and accepts the Android SDK licenses.' };
-  const noCli = !await exists(path.join(sdk, 'cmdline-tools/latest/bin/sdkmanager.bat'));
-  const cliHelp = 'In Android Studio open Settings > Languages & Frameworks > Android SDK > SDK Tools and install "Android SDK Command-line Tools".';
-  const results = [missing.length
-    ? { ...sdkCheck, ok: false, detail: `${sdk} is missing the ${missing.join(', ')}.${noCli ? ` ${cliHelp}` : ''}`, ...(noCli ? {} : { fix: setup }) }
-    : { ...sdkCheck, ok: true, detail: sdk }];
-  const image = await exists(path.join(sdk, IMAGE));
+  const missing = await missingAndroid(sdk);
+  const gb = missing.reduce((sum, item) => sum + item.size, 0) / 1e9;
+  const setup = { action: 'android', label: 'Set up Android',
+    note: `Downloads ${gb >= 0.1 ? `about ${gb.toFixed(1)} GB` : 'a few files'} from Google. Setting up accepts the Android SDK License Agreement (developer.android.com/studio/terms).` };
+  const cores = missing.some(m => m.id === 'emulator') || await multicoreReady(sdk);
+  const results = [missing.length || !cores
+    ? { ...sdkCheck, ok: false, detail: missing.length ? `Needs ${missing.map(m => m.label).join(', ')} in ${sdk}.` : 'The emulator would give Android only one CPU core.', fix: setup }
+    : { ...sdkCheck, ok: true, detail: `Emulator 37.1.11 with multi-core Android, in ${sdk}` }];
   const device = await exists(path.join(avdHome(), `${avd}.ini`));
-  results.push(image && device ? { ...avdCheck, ok: true, detail: `${avd} (Android 16)` }
-    : { ...avdCheck, ok: false, detail: `${!image ? 'The Android 16 system image is not installed. ' : ''}${!device ? `There is no virtual device named ${avd}.` : ''}${noCli ? ` ${cliHelp}` : ''}`.trim(), ...(noCli ? {} : { fix: setup }) });
+  results.push(device ? { ...avdCheck, ok: true, detail: `${avd} (Android 16)` }
+    : { ...avdCheck, ok: false, detail: `There is no virtual device named ${avd} yet.`, fix: setup });
   return results;
 }
 
@@ -131,15 +114,13 @@ export async function checkSetup(root, settings) {
   return [py, ...androidChecks, accel, parts, xr];
 }
 
-export async function fixSetup(root, settings, action) {
+export async function fixSetup(root, settings, action, progress = () => {}) {
   const long = { timeout: 60 * 60 * 1000 };
   switch (action) {
     case 'python':
       await run('winget.exe', winget('Python.Python.3.13'), long); await refreshPath(); return;
-    case 'android-studio':
-      await run('winget.exe', winget('Google.AndroidStudio'), long); return;
     case 'android':
-      await run('powershell.exe', powershellArgs(path.join(root, 'tools/windows_android_emulator.ps1'), { Action: 'Setup', Sdk: settings.sdk, Avd: settings.avd }), long); return;
+      await installAndroid(settings.sdk, settings.avd, progress); return;
     case 'hypervisor': {
       // Elevated: Windows shows its permission prompt. The feature takes effect after a restart.
       const inner = 'Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart | Out-Null';

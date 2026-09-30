@@ -244,7 +244,7 @@ try {
     if ($sessionProcess.HasExited -and !($closeRequest -and $closeRequest.WaitOne(0)) -and $sessionProcess.ExitCode -ne 0) {
         if (!$PcViewer) { throw (Get-HostFailure) }
         $err = (Get-Content "$logs\viewer.err" -ErrorAction SilentlyContinue | Where-Object { $_.Trim() } | Select-Object -Last 1) -join ''
-        throw "The PC viewer stopped: $err (log: build-windows-game\viewer.err)"
+        throw "The PC viewer stopped (exit code $($sessionProcess.ExitCode)): $err (log: build-windows-game\viewer.err)"
     }
 } finally {
     if ($gameStarted) {

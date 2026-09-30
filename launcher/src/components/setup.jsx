@@ -26,10 +26,11 @@ export function SetupPanel({ state, run, pending, notify }) {
   const [checks, refresh, setChecks] = useSetup(run);
   const fix = check => run(`fix-${check.id}`, async () => {
     setChecks(await call('fixSetup', check.fix.action));
-    notify(check.fix.action === 'hypervisor' ? 'Restart Windows to finish turning on Windows Hypervisor Platform.'
-      : check.fix.action === 'android-studio' ? 'Open Android Studio once so it downloads the Android SDK, then check again.' : `${check.title} is set up`);
+    notify(check.fix.action === 'hypervisor' ? 'Restart Windows to finish turning on Windows Hypervisor Platform.' : `${check.title} is set up`);
   });
   const ready = checks && checks.every(c => c.ok || c.optional);
+  // Checks that share one fix (Android and the virtual device) show its button once.
+  const firstFix = check => checks.find(c => !c.ok && c.fix?.action === check.fix?.action) === check;
   return <section className="panel" aria-labelledby="setup-title">
     <div className="panel-row">
       <div><h2 id="setup-title">Setup</h2>
@@ -41,8 +42,9 @@ export function SetupPanel({ state, run, pending, notify }) {
       {checks.map(check => <li key={check.id} className={check.ok ? 'ok' : 'missing'}>
         {check.ok ? <CheckCircle2 aria-label="Ready" /> : <AlertCircle aria-label="Needs attention" />}
         <div className="setup-text"><strong>{check.title}</strong><span>{check.detail}</span>
-          {!check.ok && check.fix?.note && <small>{check.fix.note}</small>}</div>
-        {!check.ok && check.fix && <button type="button" className="btn btn-primary btn-sm" disabled={Boolean(state.fixing)} onClick={() => fix(check)}>
+          {!check.ok && check.fix && firstFix(check) && (state.fixing === check.fix.action && state.fixProgress
+            ? <small className="setup-progress">{state.fixProgress}</small> : check.fix.note && <small>{check.fix.note}</small>)}</div>
+        {!check.ok && check.fix && firstFix(check) && <button type="button" className="btn btn-primary btn-sm" disabled={Boolean(state.fixing)} onClick={() => fix(check)}>
           {state.fixing === check.fix.action ? <><Loader2 className="spin" />Working…</> : <><Wrench />{check.fix.label}</>}</button>}
       </li>)}
     </ul>}

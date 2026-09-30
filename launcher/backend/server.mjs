@@ -33,7 +33,7 @@ console.log = console.info = console.warn = (...args) => process.stderr.write(`$
 const send = message => write(`${JSON.stringify(message)}\n`);
 
 let headsetCheck = null;
-let state, runtime, token = '', account = '', accountImage = '', busy = false, fixing = '', starting = null, auth = null;
+let state, runtime, token = '', account = '', accountImage = '', busy = false, fixing = '', fixProgress = '', starting = null, auth = null;
 const controllers = new Map();
 let artworkTask;
 function refreshArtwork() {
@@ -46,7 +46,7 @@ function refreshArtwork() {
 }
 const message = error => String(error?.message || error).replace(/(?:OC|FRL|EA)[A-Za-z0-9_|-]{30,}/g, '[redacted]').replace(/access_token=[^\s&]+/g, 'access_token=[redacted]');
 function publicState() {
-  return { ...state.data, signedIn: Boolean(token), account, accountImage, running: runtime.game, runningMode: runtime.mode || null, busy, fixing, starting,
+  return { ...state.data, signedIn: Boolean(token), account, accountImage, running: runtime.game, runningMode: runtime.mode || null, busy, fixing, fixProgress, starting,
     // Credentials and signed CDN URLs never reach the UI or library file.
     games: state.data.games.map(g => ({ ...g, files: g.files?.map(f => ({ name: f.name, path: f.path, kind: f.kind, size: f.size })) })) };
 }
@@ -221,7 +221,8 @@ const methods = {
     if (fixing) throw new Error('A setup step is already running.');
     if (runtime.child) throw new Error('Close the running game first.');
     fixing = String(action); changed();
-    try { await fixSetup(root, state.data.settings, fixing); } finally { fixing = ''; changed(); }
+    try { await fixSetup(root, state.data.settings, fixing, text => { fixProgress = text; changed(); }); }
+    finally { fixing = ''; fixProgress = ''; changed(); }
     return methods.setup();
   },
   settings: async values => {
