@@ -194,6 +194,7 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
   async guestInfo(port) {
     const packages = guestPackages.map(p => p.package).join(' ');
     // One adb round trip. No double quotes: the script passes through Windows argument quoting.
+    // dumpsys and top get their own time limit: a busy or stuck system service must not take the rest with it.
     const script = [
       'echo @@props', 'getprop',
       'echo @@meminfo', 'cat /proc/meminfo',
@@ -204,16 +205,21 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
       'echo @@cmdline', 'su 0 cat /proc/cmdline 2>/dev/null',
       'echo @@selinux', 'getenforce',
       'echo @@display', 'wm size', 'wm density',
-      'echo @@gles', "dumpsys SurfaceFlinger | grep -m1 '^GLES'",
+      'echo @@gles', "timeout 8 dumpsys SurfaceFlinger 2>/dev/null | grep -m1 '^GLES'",
       'echo @@df', 'df -h /data /sdcard /system 2>/dev/null',
       'echo @@settings', 'settings get secure immersive_mode_confirmations', 'settings get global hide_error_dialogs',
-      'echo @@focus', 'dumpsys window 2>/dev/null | grep -m1 mCurrentFocus',
-      'echo @@guest', `for p in ${packages}; do f=$(pm path $p 2>/dev/null | grep -m1 base.apk | cut -d: -f2); if [ -z $f ]; then echo $p -; else echo $p $(sha256sum $f | cut -d' ' -f1) $(dumpsys package $p | grep -m1 versionName | tr -d ' '); fi; done`,
-      'echo @@packages', 'pm list packages -3 --show-versioncode',
-      'echo @@top', 'top -b -n 1 -m 15',
+      'echo @@focus', 'timeout 8 dumpsys window 2>/dev/null | grep -m1 mCurrentFocus',
+      'echo @@resumed', 'timeout 8 dumpsys activity activities 2>/dev/null | grep -m1 topResumedActivity',
+      'echo @@guest', `for p in ${packages}; do f=$(pm path $p 2>/dev/null | grep -m1 base.apk | cut -d: -f2); if [ -z $f ]; then echo $p -; else echo $p $(sha256sum $f | cut -d' ' -f1) $(timeout 5 dumpsys package $p 2>/dev/null | grep -m1 versionName | tr -d ' '); fi; done`,
+      'echo @@packages', 'timeout 10 pm list packages -3 --show-versioncode',
+      'echo @@top', 'timeout 8 top -b -n 1 -m 15',
       'echo @@end',
     ].join('; ');
-    const text = (await this.adb(port, ['shell', script], { timeout: 30000 })).replace(/\r\n/g, '\n');
+    // Whatever Android answered is kept, even when the shell stopped early (adb exit code, a timeout).
+    const result = await this.capture(port, ['shell', script], 60000);
+    const text = result.stdout.replace(/\r\n/g, '\n');
+    if (!text.includes('@@props')) throw new Error(`Android did not answer the info request (${result.timedOut ? 'timed out' : `adb exit code ${result.code}`}): ${redact(result.stderr.trim().split('\n').pop() || 'no output')}`);
+    const reached = [...text.matchAll(/^@@(\w+)$/gm)].map(m => m[1]);
     const props = Object.fromEntries([...section(text, 'props').matchAll(/^\[([^\]]+)\]: \[([\s\S]*?)\]$/gm)].map(m => [m[1], m[2]]));
     const kb = name => Number(section(text, 'meminfo').match(new RegExp(`^${name}:\\s+(\\d+)`, 'm'))?.[1] || 0) * 1024;
     const [cores, loadavg, uptime] = section(text, 'cpu').split('\n');
@@ -227,6 +233,8 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
       kernel: section(text, 'kernel').trim(), cmdline: section(text, 'cmdline').trim(), selinux: section(text, 'selinux').trim(), display: section(text, 'display').split(/\r?\n/).map(s => s.trim()).filter(Boolean).join(' · '),
       gles: section(text, 'gles').replace(/^GLES:\s*/, '').trim(), storage: section(text, 'df'), immersiveConfirmed: section(text, 'settings').split('\n')[0]?.trim() === 'confirmed', errorDialogsHidden: section(text, 'settings').split('\n')[1]?.trim() === '1',
       focus: section(text, 'focus').match(/u0 ([^}]+)\}/)?.[1].trim() || section(text, 'focus').trim(),
+      resumed: section(text, 'resumed').match(/u0 (\S+)/)?.[1] || section(text, 'resumed').trim(),
+      incomplete: !reached.includes('end') ? { stoppedAfter: reached.at(-1) || '', code: result.code, timedOut: result.timedOut, error: redact(result.stderr.trim().split('\n').slice(-3).join(' ')) } : null,
       guestPackages: guest,
       packages: section(text, 'packages').split(/\r?\n/).map(l => l.match(/^package:(\S+)(?:\s+versionCode:(\d+))?/)).filter(Boolean).map(m => ({ package: m[1], versionCode: m[2] || '' })).sort((a, b) => a.package.localeCompare(b.package)),
       top: section(text, 'top'),
@@ -259,6 +267,19 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
   }
   async logFiles() {
     return Promise.all(this.sources().map(async s => { const stat = await fs.stat(s.file).catch(() => null); return { ...s, exists: Boolean(stat), size: stat?.size || 0, modified: stat?.mtime.toISOString() || '' }; }));
+  }
+
+  // adb's stdout and stderr and exit code, whatever the exit code (no exception for a failing command).
+  capture(port, args, timeout) {
+    return new Promise(resolve => {
+      const child = spawn(path.join(this.settings.sdk, 'platform-tools/adb.exe'), ['-s', `emulator-${port}`, ...args], { windowsHide: true });
+      let stdout = '', stderr = '', timedOut = false;
+      child.stdout.on('data', b => { stdout += b.toString(); });
+      child.stderr.on('data', b => { stderr = (stderr + b.toString()).slice(-16384); });
+      const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeout);
+      child.on('error', e => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: e.message, timedOut }); });
+      child.on('close', code => { clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }); });
+    });
   }
 
   // One command in Android's shell, for the Shell tab. Output and exit code, never an exception for a failing command.
@@ -298,10 +319,11 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
     const [info, status] = await Promise.all([this.info().catch(e => ({ error: e.message })), this.status().catch(e => ({ error: e.message }))]);
     await fs.writeFile(path.join(directory, 'diagnostics.json'), redact(JSON.stringify({ ...extra, status, info }, null, 2)));
     if (info.guest?.top) await fs.writeFile(path.join(directory, 'top.txt'), info.guest.top);
-    if (info.port) {
-      const logcat = await this.adb(info.port, ['logcat', '-d', '-v', 'threadtime'], { timeout: 60000 }).catch(e => `logcat failed: ${e.message}`);
+    const port = info.port || await this.runtime.findPort().catch(() => null);
+    if (port) {
+      const logcat = await this.adb(port, ['logcat', '-d', '-v', 'threadtime'], { timeout: 60000 }).catch(e => `logcat failed: ${e.message}`);
       await fs.writeFile(path.join(directory, 'logcat.txt'), redact(logcat));
-      const props = await this.adb(info.port, ['shell', 'getprop'], { timeout: 10000 }).catch(() => '');
+      const props = await this.adb(port, ['shell', 'getprop'], { timeout: 10000 }).catch(() => '');
       await fs.writeFile(path.join(directory, 'getprop.txt'), props);
     } else if (this.logcat.entries.length) {
       await fs.writeFile(path.join(directory, 'logcat-launcher-buffer.txt'), this.logcat.entries.map(formatEntry).join('\n'));
