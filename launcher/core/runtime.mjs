@@ -175,6 +175,12 @@ export class Runtime {
     if ((await this.adb(['shell', 'settings', 'get', 'secure', 'immersive_mode_confirmations'])).trim() !== 'confirmed') {
       await this.adb(['shell', 'settings', 'put', 'secure', 'immersive_mode_confirmations', 'confirmed']);
     }
+    // System apps a fresh Android still has (safetyhub, switchaccess, systemui under translation load) sometimes crash
+    // or stop responding at boot. Their "Application Error"/"not responding" dialog takes focus, the game never
+    // becomes the resumed activity and stays black with no UI. Nobody can tap those dialogs here, so don't show them.
+    if ((await this.adb(['shell', 'settings', 'get', 'global', 'hide_error_dialogs'])).trim() !== '1') {
+      await this.adb(['shell', 'settings', 'put', 'global', 'hide_error_dialogs', '1']);
+    }
     for (const item of guestPackages) {
       const apk = path.join(this.root, item.apk);
       const local = await sha256(apk).catch(() => { throw new Error(`${item.label} is not built (${item.apk}). Open Settings > Setup.`); });

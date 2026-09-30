@@ -227,6 +227,10 @@ try {
         if ($LASTEXITCODE -eq 0) { Write-Host "SteamVR identity: $identityResult" }
         else { Write-Warning 'SteamVR process identification failed; using the OpenXR application name.' }
     }
+    # A crash or "not responding" dialog shown before hide_error_dialogs was set (launcher/core/runtime.mjs) keeps
+    # focus, and the game then never resumes: a black screen with no UI. Close any such dialog first.
+    # (Invoke-Adb joins arguments into one command line: the script is one double-quoted argument, its pattern single-quoted for sh.)
+    $null = Invoke-Adb @('shell', '"for i in 1 2 3 4 5; do dumpsys window | grep mCurrentFocus | grep -qE ''Application.Error|Not.Responding|isn.t.responding|keeps.stopping'' || break; am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null 2>&1; input keyevent KEYCODE_BACK; sleep 1; done"') 20000
     $launch = Invoke-Adb @('shell', 'am', 'start', '-W', '-n', $Activity) 60000
     if ($launch.Code -ne 0 -or $launch.Text -match 'Error:') { throw "Game launch failed: $($launch.Text) $($launch.Error)" }
     $gameStarted = $true
