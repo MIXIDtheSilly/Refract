@@ -97,6 +97,20 @@ function Set-GlTransport {
     Set-Content -Path $config -Value $lines -Encoding ascii
     Write-Host "AVD graphics transport: $(if ($current) { $current } else { 'default' }) -> $GlTransport (backup: $backup)"
 }
+# Why the emulator process quit, in words a player can act on (the emulator's own reason is in its log).
+function Get-EmulatorFailure {
+    $log = "$logs\emulator.stdout.log"
+    $line = if (Test-Path $log) { Get-Content $log | Where-Object { $_ -match '^(FATAL|ERROR)\s*\|' } | Select-Object -Last 1 }
+    $reason = "$line" -replace '^(FATAL|ERROR)\s*\|\s*', ''
+    if ($reason -match 'multiple emulators with the same AVD') {
+        return "The virtual device '$Avd' is already open in another emulator. Close that emulator and try again."
+    }
+    if ($reason -match 'acceleration|WHPX|hypervisor|AEHD|HAXM') {
+        return "The emulator needs Windows Hypervisor Platform (Settings > Setup can turn it on): $reason"
+    }
+    if ($reason) { return "The emulator stopped: $($reason.Trim()) (log: $log)" }
+    "The emulator stopped while starting. See $log"
+}
 function Wait-Boot($Process) {
     $deadline = (Get-Date).AddMinutes(3)
     do {
@@ -105,7 +119,7 @@ function Wait-Boot($Process) {
         $boot = & $adb -s $serial shell getprop sys.boot_completed 2>$null
         $ErrorActionPreference = 'Stop'
         if ($boot -eq '1') { return }
-        if ($Process.HasExited) { throw "Emulator exited; see $logs" }
+        if ($Process.HasExited) { throw (Get-EmulatorFailure) }
     } while ((Get-Date) -lt $deadline)
     throw "Boot timed out; see $logs"
 }
@@ -133,7 +147,11 @@ function Get-Clocksource {
 }
 switch ($Action) {
     Setup {
-        Run "$Sdk\cmdline-tools\latest\bin\sdkmanager.bat" @($image)
+        $sdkmanager = "$Sdk\cmdline-tools\latest\bin\sdkmanager.bat"
+        if (!(Test-Path $sdkmanager)) { throw "Android SDK command-line tools are missing ($sdkmanager). Install Android Studio, or its command-line tools, first." }
+        # Whoever runs Setup accepts the Android SDK licenses; sdkmanager would otherwise wait for input.
+        (1..30 | ForEach-Object { 'y' }) | & $sdkmanager --licenses | Out-Null
+        Run $sdkmanager @('platform-tools', 'emulator', 'build-tools;36.0.0', $image)
         $avds = & $emulator -list-avds
         if ($avds -notcontains $Avd) {
             'no' | & "$Sdk\cmdline-tools\latest\bin\avdmanager.bat" create avd --name $Avd --package $image --device pixel_2
@@ -145,6 +163,12 @@ switch ($Action) {
         Run $emulator @('-accel-check')
         $devices = & $adb devices
         if ($devices -match "^$serial\s") { throw "$serial already exists; use Verify or Stop first." }
+        # The emulator locks its AVD: a second copy would quit at once with a FATAL in its log.
+        $other = Get-CimInstance Win32_Process -Filter "Name LIKE 'qemu-system%'" | Where-Object { $_.CommandLine -match "-avd\s+$Avd(\s|$)" } | Select-Object -First 1
+        if ($other) {
+            $otherPort = if ($other.CommandLine -match '-port\s+(\d+)') { $Matches[1] } else { '5554' }
+            throw "The virtual device '$Avd' is already running as emulator-$otherPort. Use that emulator or close it first."
+        }
         New-Item -ItemType Directory -Force $logs | Out-Null
         Set-GlTransport
         $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB",
