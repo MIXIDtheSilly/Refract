@@ -3,6 +3,7 @@
 #include "gfxstream_template_fix.h"
 #include <vulkan/vk_layer.h>
 #include <array>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -13,7 +14,7 @@ using refract::protocol::WindowsGpuMarker;
 namespace {
 void* key(const void* h) { return h ? *reinterpret_cast<void* const*>(h) : nullptr; }
 struct Instance { VkInstance instance; PFN_vkGetInstanceProcAddr gipa; };
-struct Export { refract::SharedTexture eyes[2]; uint32_t width, height, formats[2]; };
+struct Export { refract::SharedTexture eyes[2]; uint32_t width, height, formats[2]; std::chrono::steady_clock::time_point used; };
 struct Command { VkCommandPool pool{}; WindowsGpuMarker marker; VkBuffer buffer{}; VkDeviceSize offset{}; uint32_t eye = 2, family = 0; };
 struct Device {
     VkDevice device; PFN_vkSetDeviceLoaderData setLoaderData = nullptr; Instance instance; PFN_vkGetDeviceProcAddr gdpa;
@@ -81,6 +82,7 @@ VKAPI_ATTR void VKAPI_CALL destroyDevice(VkDevice device, const VkAllocationCall
     auto destroy = fn<PFN_vkDestroyDevice>(d, "vkDestroyDevice");
     fn<PFN_vkDeviceWaitIdle>(d, "vkDeviceWaitIdle")(device);
     for (auto& [id, images] : d->exports) for (auto& eye : images->eyes) d->shared.destroy(eye);
+    std::fprintf(stderr, "Refract GPU layer: device destroyed, %zu exports freed\n", d->exports.size());
     devices.erase(key(device)); destroy(device, alloc);
 }
 VKAPI_ATTR VkResult VKAPI_CALL createCommandPool(VkDevice device, const VkCommandPoolCreateInfo* info, const VkAllocationCallbacks* alloc, VkCommandPool* out) {
@@ -141,10 +143,24 @@ VKAPI_ATTR void VKAPI_CALL blitImage(VkCommandBuffer cmd, VkImage source, VkImag
                 exported.reset(); c.eye = 2; original(); return;
             }
         }
+        // An export id is one slot of the guest's per-configuration ring (frames in flight), so live ids come back
+        // every few frames. gfxstream may keep the device past the game that used it, so free pairs (~20 MB each
+        // at 1600x1600) that have not been used for a while: a killed game's are freed once the next one exports.
+        const auto now = std::chrono::steady_clock::now();
+        exported->used = now;
+        for (auto it = d->exports.begin(); it != d->exports.end();) {
+            if (it->second && now - it->second->used > std::chrono::seconds(10)) {
+                for (auto& eye : it->second->eyes) d->shared.destroy(eye);
+                it = d->exports.erase(it);
+            } else ++it;
+        }
+        std::fprintf(stderr, "Refract GPU layer: export %016llx created, %zu kept\n",
+                     static_cast<unsigned long long>(c.marker.session), d->exports.size());
     }
     if (exported->width != c.marker.width || exported->height != c.marker.height || exported->formats[c.eye] != c.marker.formats[c.eye]) { c.eye = 2; original(); return; }
     // A validated Refract export consumes the source directly. The guest's scaled
     // destination is only needed for pixel fallback, which records a new pass.
+    exported->used = std::chrono::steady_clock::now();
     VkImage image = exported->eyes[c.eye].image;
     auto pipelineBarrier = fn<PFN_vkCmdPipelineBarrier>(d, "vkCmdPipelineBarrier");
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}; barrier.image = image;

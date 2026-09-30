@@ -5,6 +5,7 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <chrono>
+#include <map>
 #include "windows_gpu_frame.h"
 
 namespace refract::host {
@@ -83,22 +84,10 @@ public:
                  UINT width, UINT height, DXGI_FORMAT targetFormat) {
         if (session_ == frame.session && sequence_ == sequence && cached_) return true;
         if (!frame.session || frame.formats[0] != frame.formats[1]) return false;
-        if (session_ != frame.session || width_ != width || height_ != height) {
-            cached_.Reset(); renderCache_.Reset(); shared_[0].Reset(); shared_[1].Reset();
+        // The cache only depends on size and format; the frame's id picks one slot of the runtime's export ring.
+        if (!cached_ || width_ != width || height_ != height || format_ != targetFormat) {
+            cached_.Reset(); renderCache_.Reset(); opened_.clear();
             if (cacheHandle_) { CloseHandle(cacheHandle_); cacheHandle_ = nullptr; }
-            Microsoft::WRL::ComPtr<ID3D11Device1> device1;
-            if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1)))) return false;
-            for (UINT eye = 0; eye < 2; ++eye) {
-                wchar_t name[96]; swprintf_s(name, L"Local\\REFRACT_GPU_%016llx_%u", frame.session, eye);
-                if (FAILED(device1->OpenSharedResourceByName(name, DXGI_SHARED_RESOURCE_READ, IID_PPV_ARGS(&shared_[eye])))) return false;
-                D3D11_TEXTURE2D_DESC source{}; shared_[eye]->GetDesc(&source);
-                if (source.Width != width || source.Height != height || source.ArraySize != 1 || source.SampleDesc.Count != 1) return false;
-                bool rgba = source.Format == DXGI_FORMAT_R8G8B8A8_UNORM || source.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-                bool targetRgba = targetFormat == DXGI_FORMAT_R8G8B8A8_UNORM || targetFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-                bool bgra = source.Format == DXGI_FORMAT_B8G8R8A8_UNORM || source.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-                bool targetBgra = targetFormat == DXGI_FORMAT_B8G8R8A8_UNORM || targetFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-                if (!(rgba && targetRgba) && !(bgra && targetBgra)) return false;
-            }
             D3D11_TEXTURE2D_DESC desc{}; desc.Width = width; desc.Height = height;
             desc.MipLevels = 1; desc.ArraySize = 2; desc.SampleDesc.Count = 1; desc.Format = targetFormat;
             desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -106,10 +95,13 @@ public:
             if (FAILED(device->CreateTexture2D(&desc, nullptr, &cached_))) return false;
             Microsoft::WRL::ComPtr<IDXGIResource1> resource;
             if (FAILED(cached_.As(&resource)) || FAILED(resource->CreateSharedHandle(nullptr,
-                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &cacheHandle_))) return false;
-            session_ = frame.session; width_ = width; height_ = height;
+                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &cacheHandle_))) { cached_.Reset(); return false; }
+            width_ = width; height_ = height; format_ = targetFormat;
         }
-        for (UINT eye = 0; eye < 2; ++eye) context->CopySubresourceRegion(cached_.Get(), eye, 0, 0, 0, shared_[eye].Get(), 0, nullptr);
+        const Opened* shared = open(device, frame.session, width, height, targetFormat);
+        if (!shared) return false;
+        session_ = frame.session;
+        for (UINT eye = 0; eye < 2; ++eye) context->CopySubresourceRegion(cached_.Get(), eye, 0, 0, 0, shared->eyes[eye].Get(), 0, nullptr);
         if (!receiveCompletion_.wait(device, context)) return false;
         sequence_ = sequence; return true;
     }
@@ -129,10 +121,41 @@ public:
         return renderCompletion_.wait(device.Get(), context);
     }
 private:
+    struct Opened { Microsoft::WRL::ComPtr<ID3D11Texture2D> eyes[2]; std::chrono::steady_clock::time_point used; };
+    // The GPU layer frees a pair after 10 s unused and may later create a new one under the same name, so pairs
+    // unused for 5 s are dropped here and opened again when needed.
+    const Opened* open(ID3D11Device* device, uint64_t session, UINT width, UINT height, DXGI_FORMAT targetFormat) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = opened_.begin(); it != opened_.end();) {
+            if (it->first != session && now - it->second.used > std::chrono::seconds(5)) it = opened_.erase(it);
+            else ++it;
+        }
+        auto found = opened_.find(session);
+        if (found != opened_.end()) { found->second.used = now; return &found->second; }
+        Microsoft::WRL::ComPtr<ID3D11Device1> device1;
+        if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1)))) return nullptr;
+        Opened pair{{}, now};
+        for (UINT eye = 0; eye < 2; ++eye) {
+            wchar_t name[96]; swprintf_s(name, L"Local\\REFRACT_GPU_%016llx_%u", session, eye);
+            if (FAILED(device1->OpenSharedResourceByName(name, DXGI_SHARED_RESOURCE_READ, IID_PPV_ARGS(&pair.eyes[eye])))) return nullptr;
+            D3D11_TEXTURE2D_DESC source{}; pair.eyes[eye]->GetDesc(&source);
+            if (source.Width != width || source.Height != height || source.ArraySize != 1 || source.SampleDesc.Count != 1) return nullptr;
+            bool rgba = source.Format == DXGI_FORMAT_R8G8B8A8_UNORM || source.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            bool targetRgba = targetFormat == DXGI_FORMAT_R8G8B8A8_UNORM || targetFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            bool bgra = source.Format == DXGI_FORMAT_B8G8R8A8_UNORM || source.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            bool targetBgra = targetFormat == DXGI_FORMAT_B8G8R8A8_UNORM || targetFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            if (!(rgba && targetRgba) && !(bgra && targetBgra)) return nullptr;
+        }
+        if (opened_.size() >= 32) opened_.clear();
+        return &opened_.emplace(session, std::move(pair)).first->second;
+    }
+
     uint64_t session_ = 0, sequence_ = UINT64_MAX;
     UINT width_ = 0, height_ = 0;
+    DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
     HANDLE cacheHandle_ = nullptr;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_[2], cached_, renderCache_;
+    std::map<uint64_t, Opened> opened_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> cached_, renderCache_;
     CopyCompletion receiveCompletion_, renderCompletion_;
 };
 }

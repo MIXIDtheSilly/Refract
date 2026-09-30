@@ -479,10 +479,17 @@ private:
     std::map<uint64_t, PendingCopy> pendingCopies_;
     using Pair = std::array<ComPtr<ID3D11Texture2D>, 2>;
 
+    // Each id is one slot of the runtime's export ring. The GPU layer frees a pair after 10 s unused and may later
+    // create a new one under the same name, so pairs unused for 5 s are dropped here and opened again when needed.
     Pair* open_shared(uint64_t session)
     {
+        const auto now = Clock::now();
+        for (auto it = sessions_.begin(); it != sessions_.end();) {
+            if (it->first != session && now - it->second.used > std::chrono::seconds(5)) it = sessions_.erase(it);
+            else ++it;
+        }
         auto found = sessions_.find(session);
-        if (found != sessions_.end()) return &found->second;
+        if (found != sessions_.end()) { found->second.used = now; return &found->second.pair; }
         ComPtr<ID3D11Device1> device1;
         if (FAILED(g_copyDevice.As(&device1))) return nullptr;
         Pair pair;
@@ -497,10 +504,11 @@ private:
         }
         if (sessions_.size() >= 32) sessions_.clear();
         std::fprintf(stderr, "viewer: opened shared textures for session %016llx\n", static_cast<unsigned long long>(session));
-        return &sessions_.emplace(session, std::move(pair)).first->second;
+        return &sessions_.emplace(session, Opened{std::move(pair), now}).first->second.pair;
     }
 
-    std::map<uint64_t, Pair> sessions_;
+    struct Opened { Pair pair; Clock::time_point used; };
+    std::map<uint64_t, Opened> sessions_;
     bool batchHasScene_ = false;
     H264Decoder decoder_;
 };
