@@ -226,7 +226,9 @@ export class Runtime {
     if (!game.apk) throw new Error('Import or download an APK first.');
     update('Starting Android'); await this.ensure(update);
     update('Installing APK');
-    await this.adb(['install', '--no-incremental', '--force-queryable', '-r', game.apk], { timeout: 240000 });
+    // -g grants the runtime permissions (microphone, notifications) up front: the hidden emulator's permission
+    // dialog takes focus, the game stops responding behind it and Android closes it (Yeeps' microphone request).
+    await this.adb(['install', '--no-incremental', '--force-queryable', '-r', '-g', game.apk], { timeout: 240000 });
     for (const file of game.files || []) {
       if (file.kind === 'apk') continue;
       update(`Copying ${file.name}`);

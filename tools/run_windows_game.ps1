@@ -231,6 +231,9 @@ try {
     # focus, and the game then never resumes: a black screen with no UI. Close any such dialog first.
     # (Invoke-Adb joins arguments into one command line: the script is one double-quoted argument, its pattern single-quoted for sh.)
     $null = Invoke-Adb @('shell', '"for i in 1 2 3 4 5; do dumpsys window | grep mCurrentFocus | grep -qE ''Application.Error|Not.Responding|isn.t.responding|keeps.stopping'' || break; am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null 2>&1; input keyevent KEYCODE_BACK; sleep 1; done"') 20000
+    # Nobody can answer a permission dialog in the hidden emulator: it takes focus, the game stops responding and
+    # Android closes it (Yeeps asks for the microphone). Grant the game's runtime permissions before it starts.
+    $null = Invoke-Adb @('shell', 'pm', 'grant', '--all-permissions', $Package) 20000
     $launch = Invoke-Adb @('shell', 'am', 'start', '-W', '-n', $Activity) 60000
     if ($launch.Code -ne 0 -or $launch.Text -match 'Error:') { throw "Game launch failed: $($launch.Text) $($launch.Error)" }
     $gameStarted = $true

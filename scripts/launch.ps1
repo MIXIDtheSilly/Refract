@@ -113,6 +113,8 @@ Start-Sleep -Seconds 1
 # System apps (safetyhub, switchaccess) sometimes crash at boot; their "Application Error" dialog keeps
 # focus, and Unity then idles without ever drawing a frame. Close any such dialog first.
 & $adb -s $Serial shell 'for i in 1 2 3 4 5; do dumpsys window | grep mCurrentFocus | grep -qE Application.Error\|Not.Responding || break; input keyevent KEYCODE_BACK; sleep 1; done'
+# A permission dialog (Yeeps' microphone) takes focus and the game is closed as not responding. Grant them up front.
+& $adb -s $Serial shell pm grant --all-permissions $Package
 # -UnityArgs is Unity's command line (e.g. '-job-worker-count 2'), passed as the 'unity' intent extra.
 if ($UnityArgs) {
     & $adb -s $Serial shell "am start -n $Package/$Activity -e unity '$UnityArgs'"
