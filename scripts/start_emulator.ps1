@@ -23,6 +23,8 @@
 # fixed 64 KiB, ~340 ms, made voice chat lag badly).
 # qemu is pinned to the P-cores (i7-12700: logical processors 0-15; 16-19 are E-cores) so Windows can't move
 # the vCPU threads to E-cores, e.g. while the window is minimized. -AnyCore turns that off.
+# The emulator's output (gfxstream messages such as leaked Vulkan objects, and the Refract GPU layer's) goes to
+# runs\emulator.log / emulator.err.log.
 param([switch]$NoGpuSharing, [switch]$Hidden, [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
       [ValidateRange(1, 6)][int]$Cores = 1, [string]$KernelArgs = 'tsc=nowatchdog idle=poll', [switch]$NoHostMic,
       [switch]$AnyCore, [ValidateRange(10, 200)][int]$AudioLatencyMs = 50, [ValidateRange(40, 340)][int]$AudioBufferMs = 70)
@@ -44,6 +46,9 @@ if ($Audio -eq 'dsound') {
     $env:QEMU_DSOUND_LATENCY_MILLIS = $AudioLatencyMs
     $env:QEMU_DSOUND_BUFSIZE_OUT = $AudioBufferMs * 192  # 48 kHz 16-bit stereo.
 }
+$runs = Join-Path (Split-Path $PSScriptRoot -Parent) 'runs'
+New-Item -ItemType Directory -Force $runs | Out-Null
+$log = Join-Path $runs 'emulator.log'; $errorLog = Join-Path $runs 'emulator.err.log'
 $arguments = @('-avd', 'refract-google-api36', '-port', '5582', '-gpu', 'host', '-accel', 'on', '-no-snapshot',
                '-no-boot-anim', '-memory', '8192', '-writable-system', '-audio', $Audio)
 if (!$NoHostMic) { $arguments += '-allow-host-audio' }
@@ -61,7 +66,9 @@ if ($Cores -gt 1) {
     # What emulator.exe sets up before starting qemu itself.
     $env:PATH = "$emulator\lib64;$emulator\lib64\qt\lib;$emulator\qemu\windows-x86_64;$env:PATH"
     $env:ANDROID_EMULATOR_LAUNCHER_DIR = $emulator
-    Start-Process $qemu -WindowStyle $(if ($Hidden) { 'Hidden' } else { 'Minimized' }) -ArgumentList ($arguments + @('-cores', $Cores) + $qemuArgs)
+    Start-Process $qemu -WindowStyle $(if ($Hidden) { 'Hidden' } else { 'Minimized' }) -ArgumentList ($arguments + @('-cores', $Cores) + $qemuArgs) `
+        -RedirectStandardOutput $log -RedirectStandardError $errorLog
 } else {
-    Start-Process "$emulator\emulator.exe" -WindowStyle $(if ($Hidden) { 'Hidden' } else { 'Minimized' }) -ArgumentList ($arguments + $qemuArgs)
+    Start-Process "$emulator\emulator.exe" -WindowStyle $(if ($Hidden) { 'Hidden' } else { 'Minimized' }) -ArgumentList ($arguments + $qemuArgs) `
+        -RedirectStandardOutput $log -RedirectStandardError $errorLog
 }
