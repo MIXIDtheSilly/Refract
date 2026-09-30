@@ -47,7 +47,9 @@ impl Backend {
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("Could not create {}: {e}", data_dir.display()))?;
         let server = launcher_dir().join("backend/server.mjs");
         let log = File::create(data_dir.join("launcher-backend.log")).map_err(|e| e.to_string())?;
-        let mut command = Command::new("node");
+        // A packaged Refract carries its own Node.js in node\ beside the executable (tools/package_release.ps1).
+        let bundled = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("node").join("node.exe"))).filter(|node| node.is_file());
+        let mut command = Command::new(bundled.as_deref().unwrap_or(Path::new("node")));
         command
             .arg(&server)
             .arg("--data")

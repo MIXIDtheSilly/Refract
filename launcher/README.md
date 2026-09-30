@@ -14,11 +14,30 @@ time; later runs rebuild only when the UI or shell sources changed). A launcher
 that is already open with older sources is closed and started again.
 
 Everything else is under **Settings > Setup**, which checks this PC and fixes what
-it can with one click: Python, the Android SDK (Android Studio), the Android 16
-system image and `refract-google-api36` AVD (`windows_android_emulator.ps1 -Action
-Setup`), Windows Hypervisor Platform, Refract's own build outputs (host bridge, GPU
-layer, Android runtime and Meta Platform stand-in APKs) and the PC's OpenXR runtime.
+it can with one click: Python, Android, the `refract-google-api36` AVD, Windows
+Hypervisor Platform, Refract's own build outputs (host bridge, PC viewer, GPU layer,
+Android runtime and Meta Platform stand-in APKs) and the PC's OpenXR runtime.
 The Library shows a banner while anything is missing.
+
+**Set up Android** (`core/android_sdk.mjs`) needs no Android Studio or Java. It downloads
+the exact packages Refract is tested with from Google's SDK repository, checking each
+one's SHA-1: emulator 37.1.11 (build 15917651), the Google APIs x86_64 Android 16 image
+revision 7 (the build the Digitalis translator matches), build-tools 36 and platform-tools.
+It then writes the multi-core qemu copy (see `tools/patch_emulator_cores.py`) and creates
+the AVD. A new AVD's first boot runs once on the stock single-core emulator, because the
+multi-core one is killed by the emulator's hang detector while Android encrypts `/data`.
+The first install or play then installs Digitalis and sets the Quest device identity
+(brand `oculus`, manufacturer `Oculus`, model `Quest 3`); each restarts Android once.
+
+## Share a build
+
+`powershell -ExecutionPolicy Bypass -File tools/package_release.ps1` builds the launcher
+and writes `dist/Refract-<version>-win64.zip` (about 50 MB). Unzipped on another PC,
+`Refract.exe` runs without a source checkout or developer tools. It carries its own
+Node.js, the built host programs, the OpenXR loader and Visual C++ runtime for the host
+bridge, the Android-side APKs and Digitalis. Android itself (about 2.4 GB) is downloaded
+by **Set up Android** on that PC. `tools/package_readme.txt` becomes the package's
+README.txt for the person receiving it.
 
 ## How it is put together
 
