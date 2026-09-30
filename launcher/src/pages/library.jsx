@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { Play, Plus, RefreshCw, Search } from 'lucide-react';
+import { Plus, RefreshCw, Search } from 'lucide-react';
 import { call } from '../api';
 import { ago, Cover, Empty, GameStatus, IconButton } from '../components/common';
+import { SetupBanner } from '../components/setup';
+import { HeadsetStatus, PlayButtons } from '../components/play';
 
 const filters = [['all', 'All'], ['installed', 'Installed'], ['downloaded', 'Downloaded']];
 
-export function Library({ state, run, pending, open, notify, connect }) {
+export function Library({ state, run, pending, open, notify, connect, setPage, headset }) {
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
   const games = state.games
@@ -20,7 +22,6 @@ export function Library({ state, run, pending, open, notify, connect }) {
     else if (info.meta?.partial) notify('Meta returned only part of your library.');
     else notify('Library refreshed');
   });
-  const play = game => run(`game-${game.id}`, () => call('play', game.id));
 
   return <div className="page">
     <header className="page-head">
@@ -28,7 +29,9 @@ export function Library({ state, run, pending, open, notify, connect }) {
         <h1 className="page-title">Library</h1>
         <div className="page-sub">{state.games.length} {state.games.length === 1 ? 'game' : 'games'} · {installed} installed</div>
       </div>
+      <HeadsetStatus {...headset} />
     </header>
+    <SetupBanner run={run} setPage={setPage} />
 
     {recent && !query && filter === 'all' && <section className="hero" aria-label="Continue playing">
       <Cover game={recent} />
@@ -37,10 +40,8 @@ export function Library({ state, run, pending, open, notify, connect }) {
         <h2 className="hero-title">{recent.name}</h2>
         <div className="hero-meta">Last played {ago(recent.lastPlayed)}</div>
         <div className="hero-actions">
-          {state.running === recent.id
-            ? <button type="button" className="btn btn-primary btn-lg" disabled={pending.has('stop')} onClick={() => run('stop', () => call('stop'))}>Stop</button>
-            : <button type="button" className="btn btn-primary btn-lg" disabled={Boolean(state.running) || state.busy || pending.has(`game-${recent.id}`)} onClick={() => play(recent)}><Play fill="currentColor" />Play</button>}
-          <button type="button" className="btn btn-outline btn-lg" onClick={() => open(recent.id)}>Details</button>
+          <PlayButtons game={recent} state={state} run={run} pending={pending} notify={notify} headset={headset.headset} />
+          <button type="button" className="btn btn-ghost btn-lg" onClick={() => open(recent.id)}>Details</button>
         </div>
       </div>
     </section>}

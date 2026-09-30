@@ -5,6 +5,7 @@ import { call, native, onChange, onLaunchError } from './api';
 import { Sidebar, TitleBar } from './components/chrome';
 import { activeStatuses, Empty } from './components/common';
 import { GameSheet } from './components/game-sheet';
+import { useHeadset } from './components/play';
 import { LogoMark } from './components/logo';
 import { Library } from './pages/library';
 import { Downloads } from './pages/downloads';
@@ -49,7 +50,8 @@ function App() {
   const game = state?.games.find(g => g.id === selected);
   const activeJobs = state?.jobs.filter(j => activeStatuses.includes(j.status)).length || 0;
   const running = state?.running && state.games.find(g => g.id === state.running);
-  const shared = { state, run, pending, notify, setPage, connect, open: setSelected };
+  const headset = useHeadset(state);
+  const shared = { state, run, pending, notify, setPage, connect, open: setSelected, headset };
 
   return <div className={`app ${native ? 'native' : 'browser'}`}>
     <TitleBar />
@@ -65,7 +67,7 @@ function App() {
 
     {running && <div className="now-playing" role="status">
       <span className="orbit"><LogoMark /></span>
-      <div><small>Now playing</small><strong>{running.name}</strong></div>
+      <div><small>Now playing {state.runningMode === 'pc' ? 'on PC' : 'in VR'}</small><strong>{running.name}</strong></div>
       <button type="button" className="btn btn-sm" disabled={pending.has('stop')} onClick={() => run('stop', async () => { await call('stop'); notify('Closing game'); })}>Stop</button>
     </div>}
     {notice && <div role={notice.error ? 'alert' : 'status'} className={`toast ${notice.error ? 'error' : ''}`}>

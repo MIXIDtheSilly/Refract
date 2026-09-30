@@ -29,8 +29,10 @@ export function card(item, owned = false) {
     platform: item.platform || '', price: item.current_offer?.price?.formatted || '', owned, source: 'meta' };
 }
 export async function post(url, fields, request = fetch) {
-  const response = await request(url, { method: 'POST', body: new URLSearchParams(fields),
-    signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json' } });
+  return read(await request(url, { method: 'POST', body: new URLSearchParams(fields),
+    signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json' } }));
+}
+async function read(response) {
   if (!response.ok) throw new Error(`Meta request failed (${response.status}). Try signing in again.`);
   const raw = await response.text();
   if (raw.length > 16 * 1024 * 1024) throw new Error('Meta returned an oversized response.');
@@ -102,8 +104,20 @@ export class QuestStore {
     if (!connection) throw new Error('Meta did not return your library. Try signing in again.');
     // Never silently treat Rift entitlements as Quest ownership.
     return { games: nodes(connection).map(e => e.item).filter(questApp).map(i => card(i, true)),
-      name: viewer.user?.alias || viewer.user?.display_name || 'Meta account',
       partial: Boolean(connection.page_info?.has_next_page) };
+  }
+  // The library query only returns the user's id; name and picture come from the REST node.
+  async profile() {
+    if (!this.token) throw new Error('Sign in to Meta first.');
+    const me = await read(await this.request('https://graph.oculus.com/me?fields=alias,display_name,profile_url', {
+      signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json', Authorization: `OAuth ${this.token}` } }));
+    let image = '';
+    try {
+      const url = new URL(me.profile_url);
+      // Only hosts the UI's img-src allows. The signed URL expires within days, so it is never stored.
+      if (url.protocol === 'https:' && /\.(oculuscdn\.com|fbcdn\.net)$/.test(url.hostname)) image = url.href;
+    } catch { /* No picture. */ }
+    return { name: String(me.alias || me.display_name || ''), image };
   }
   async details(id) {
     const result = await this.query('6549406941839522', { itemId: appId(id), hmdType: 'EUREKA' });

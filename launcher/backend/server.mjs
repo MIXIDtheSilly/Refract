@@ -18,6 +18,7 @@ import { MetaAuth, QuestStore, appId } from '../core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from '../core/download.mjs';
 import { State } from '../core/state.mjs';
 import { Runtime } from '../core/runtime.mjs';
+import { checkSetup, fixSetup, headsetStatus, refreshPath } from '../core/setup.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -31,7 +32,8 @@ const write = process.stdout.write.bind(process.stdout);
 console.log = console.info = console.warn = (...args) => process.stderr.write(`${args.join(' ')}\n`);
 const send = message => write(`${JSON.stringify(message)}\n`);
 
-let state, runtime, token = '', account = '', busy = false, auth = null;
+let headsetCheck = null;
+let state, runtime, token = '', account = '', accountImage = '', busy = false, fixing = '', starting = null, auth = null;
 const controllers = new Map();
 let artworkTask;
 function refreshArtwork() {
@@ -44,7 +46,7 @@ function refreshArtwork() {
 }
 const message = error => String(error?.message || error).replace(/(?:OC|FRL|EA)[A-Za-z0-9_|-]{30,}/g, '[redacted]').replace(/access_token=[^\s&]+/g, 'access_token=[redacted]');
 function publicState() {
-  return { ...state.data, signedIn: Boolean(token), account, running: runtime.game, busy,
+  return { ...state.data, signedIn: Boolean(token), account, accountImage, running: runtime.game, runningMode: runtime.mode || null, busy, fixing, starting,
     // Credentials and signed CDN URLs never reach the UI or library file.
     games: state.data.games.map(g => ({ ...g, files: g.files?.map(f => ({ name: f.name, path: f.path, kind: f.kind, size: f.size })) })) };
 }
@@ -75,10 +77,12 @@ async function syncInstalled() {
   await persist(); return true;
 }
 async function syncMeta() {
-  const result = await store().library();
+  const api = store();
+  const [result, profile] = await Promise.all([api.library(), api.profile().catch(() => null)]);
   for (const game of state.data.games) if (game.source === 'meta') game.owned = false;
   for (const game of result.games) state.put(game);
-  account = result.name; await persist();
+  if (profile) { account = profile.name; accountImage = profile.image; }
+  await persist();
   refreshArtwork().catch(() => {});
   return { partial: result.partial, count: result.games.length };
 }
@@ -145,7 +149,7 @@ const methods = {
     send({ event: 'secret', value: token }); changed();
     return syncMeta();
   },
-  logout: async () => { for (const controller of controllers.values()) controller.abort(); token = ''; account = ''; send({ event: 'secret', value: null }); changed(); },
+  logout: async () => { for (const controller of controllers.values()) controller.abort(); token = ''; account = ''; accountImage = ''; send({ event: 'secret', value: null }); changed(); },
   sync: async () => { const online = await syncInstalled(); const result = token ? await syncMeta() : null; return { online, meta: result }; },
   builds: id => store().builds(appId(id)).then(items => items.map(b => ({ id: String(b.id), version: b.version, code: b.version_code ?? b.versionCode }))),
   download: (id, binaryId) => downloadGame(appId(id), binaryId),
@@ -180,9 +184,20 @@ const methods = {
     catch (error) { job.status = 'failed'; job.error = message(error); throw error; }
     finally { await persist(); }
   }),
-  play: async id => {
+  // mode 'vr' plays in the headset, 'pc' in a window on this PC (keyboard, mouse or gamepad).
+  play: async (id, mode = 'vr') => {
+    if (mode !== 'vr' && mode !== 'pc') throw new Error('Invalid play mode.');
     const game = getGame(id); if (busy) throw new Error('Wait for installation to finish.');
     if (!game.installed) throw new Error('Install the game first.');
+    if (runtime.child) throw new Error('A game is already running.');
+    // Start and prepare Android here (not in the session script) so the Refract runtime is current.
+    starting = { gameId: id, stage: mode === 'vr' ? 'Checking VR headset' : 'Starting Android' }; changed();
+    try {
+      if (mode === 'vr') await runtime.checkHeadset();
+      starting = { gameId: id, stage: 'Starting Android' }; changed();
+      await exclusive(() => runtime.ensure(stage => { starting = { gameId: id, stage }; changed(); }));
+    }
+    finally { starting = null; changed(); }
     runtime.launch(game, async (code, tail) => {
       if (code) {
         const error = message(new Error(tail || `Game launcher exited with code ${code}.`));
@@ -190,10 +205,25 @@ const methods = {
         send({ event: 'launch-error', payload: `${game.name}: ${error}` });
       }
       await persist();
-    });
+    }, mode);
     game.lastPlayed = new Date().toISOString(); await persist();
   },
   stop: () => runtime.stop(),
+  // Not while a game runs: its session owns the headset, and a probe would compete with it.
+  headset: async () => runtime.child ? { connected: runtime.mode === 'vr', runtime: '', busy: true }
+    : headsetCheck ??= headsetStatus(runtime).finally(() => { headsetCheck = null; }),
+  setup: async () => {
+    // An SDK installed since the launcher started (Android Studio's first run) replaces a missing one.
+    if (!await isSdk(state.data.settings.sdk)) { const sdk = await findSdk(); if (sdk !== state.data.settings.sdk) { state.data.settings.sdk = sdk; await persist(); } }
+    return checkSetup(root, state.data.settings);
+  },
+  fixSetup: async action => {
+    if (fixing) throw new Error('A setup step is already running.');
+    if (runtime.child) throw new Error('Close the running game first.');
+    fixing = String(action); changed();
+    try { await fixSetup(root, state.data.settings, fixing); } finally { fixing = ''; changed(); }
+    return methods.setup();
+  },
   settings: async values => {
     const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir'];
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
@@ -218,11 +248,24 @@ async function handle({ id, method, args }) {
   } catch (error) { send({ id, ok: false, error: message(error) }); }
 }
 
+const isSdk = async dir => !!dir && fs.access(path.join(dir, 'platform-tools/adb.exe')).then(() => true, () => false);
+// Android Studio installs to %LOCALAPPDATA%\Android\Sdk; command-line installs often use ~\Android\Sdk.
+async function findSdk() {
+  const candidates = [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT,
+    path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk'), path.join(os.homedir(), 'Android/Sdk')];
+  for (const dir of candidates) if (await isSdk(dir)) return path.resolve(dir);
+  return path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk');
+}
+
 const loaded = (async () => {
+  // Python or the Android SDK may have been installed after the shell started.
+  if (scan) await refreshPath();
   state = new State(dataDirectory); await state.load();
   // Digitalis (the ARM64 translator Refract needs) is built for Android 16, so the default AVD is API 36.
-  state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk'), avd: 'refract-google-api36', port: 5580,
+  state.data.settings = { avd: 'refract-google-api36', port: 5580,
     memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'), ...state.data.settings };
+  // A saved SDK path that has no SDK in it came from an earlier default; look for the real one.
+  if (!await isSdk(state.data.settings.sdk)) state.data.settings.sdk = await findSdk();
   // Refract no longer needs games patched; drop the old ovrport setting.
   delete state.data.settings.ovrportCli;
   runtime = new Runtime(root, state.data.settings);
@@ -235,7 +278,13 @@ lines.on('line', async line => {
   handle(request);
 });
 // The shell closes stdin when the launcher window closes. A running game keeps going.
-lines.on('close', () => { for (const controller of controllers.values()) controller.abort(); state?.writes.finally(() => process.exit(0)); });
+lines.on('close', () => {
+  for (const controller of controllers.values()) controller.abort();
+  // The shell kills the backend after five seconds, so stopping Android gets a bounded share of that.
+  // Exiting on an empty event loop avoids a libuv assertion process.exit() can hit while child-process
+  // handles close on Windows; the timer covers anything still open (a running game's pipes, keep-alive sockets).
+  Promise.all([state?.writes, runtime?.shutdown()]).finally(() => setTimeout(() => process.exit(0), 1500).unref());
+});
 loaded.then(() => {
   if (scan) { syncInstalled().catch(() => {}); refreshArtwork().catch(() => {}); }
 }, error => { process.stderr.write(`Refract backend could not start: ${message(error)}\n`); process.exit(1); });

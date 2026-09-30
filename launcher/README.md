@@ -5,17 +5,20 @@ games, owned Quest game downloads, expansion files and DLC.
 
 ## Run
 
-Requires Windows 11 (WebView2 is built in), Node.js 22+, Python, Rust from
-[rustup.rs](https://rustup.rs) with the Visual Studio C++ build tools, and the
-project's existing Android SDK/Windows Refract setup. From the project root:
+Double-click **Refract Launcher.cmd** (or run
+`powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1` from the project root).
+On Windows 11 that is all: missing Node.js, Python, Rust and the Visual Studio C++
+build tools are installed with winget, the locked npm dependencies are installed,
+and `src-tauri/target/release/refract-launcher.exe` is built (a few minutes the first
+time; later runs rebuild only when the UI or shell sources changed). A launcher
+that is already open with older sources is closed and started again.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/run_launcher.ps1
-```
-
-or double-click **Refract Launcher.cmd**. The first run installs the locked npm
-dependencies and builds `src-tauri/target/release/refract-launcher.exe` (a few
-minutes); later runs rebuild only when the UI or shell sources changed.
+Everything else is under **Settings > Setup**, which checks this PC and fixes what
+it can with one click: Python, the Android SDK (Android Studio), the Android 16
+system image and `refract-google-api36` AVD (`windows_android_emulator.ps1 -Action
+Setup`), Windows Hypervisor Platform, Refract's own build outputs (host bridge, GPU
+layer, Android runtime and Meta Platform stand-in APKs) and the PC's OpenXR runtime.
+The Library shows a banner while anything is missing.
 
 ## How it is put together
 
@@ -67,16 +70,37 @@ in any browser without Windows, Android or a Meta account.
   report an error; the launcher does not uninstall the existing app. Assets are
   pushed into `/sdcard/Android/obb/<package>/`. After downloading more content,
   use **Update installation** to copy it into Android.
-- **Play:** Calls `tools/run_windows_game.ps1`, preserving automatic OpenXR eye
+- **Play in VR:** Calls `tools/run_windows_game.ps1`, preserving automatic OpenXR eye
   resolution, SteamVR name/icon, GPU texture sharing, and the save-aware shutdown.
-  Closing the game preview stops the game. Closing the launcher does not
-  intentionally stop a running game; stop it with its preview window.
+  Play first asks the PC VR runtime for a headset (`refract-host-bridge --probe-openxr`),
+  so a disconnected headset or a stopped Meta Horizon Link/SteamVR is reported in about
+  a second, before Android starts. The session starts the game only after the bridge
+  has an OpenXR session.
+- **Play on PC:** The same script with `-PcViewer`: the game shows in a window on this PC
+  (`viewer/build/refract_viewer.exe`, built by `viewer/build.bat`) and takes input from the
+  keyboard, mouse and Xbox controllers (`scripts/pose_input_server.py`). The game page
+  lists the controls. Screenshots (F2) go to `Pictures\Refract`.
+- **Headset status:** The library checks for a headset every 15 s while no game runs
+  (SteamVR only while it is open, since asking it would start it). With none connected
+  it says so, explains how to connect, and puts **Play on PC** first.
+- Closing the game window (VR preview or PC viewer) stops the game. Closing the launcher
+  does not intentionally stop a running game.
 
 The current default AVD is `refract-google-api36` on port 5580 with 8 GB guest RAM. It must be an
 Android 16 (API 36) AVD: games run on the Digitalis ARM64 translator, which is built for Android 16.
-Starting the emulator installs Digitalis into it if needed (`scripts/translator.ps1`).
-Change these in Settings for another existing Refract setup. The launcher does not
-provision WHPX, SteamVR, the system image, or an AVD from scratch.
+The Android SDK is found automatically (`ANDROID_HOME`, `ANDROID_SDK_ROOT`,
+`%LOCALAPPDATA%\Android\Sdk`, `~\Android\Sdk`). Change these in Settings for another setup.
+
+Before installing or playing, the launcher gets Android ready: it uses an emulator
+that already runs the selected AVD on any port (for example one from
+`scripts/start_emulator.ps1`, even while it is still booting) instead of starting a
+second copy, which the emulator refuses. Otherwise it starts one. It then installs
+Digitalis if missing (`scripts/translator.ps1`, reboots Android) and installs or
+updates the Refract OpenXR runtime and Meta Platform stand-in APKs whenever the
+built APK differs from the installed one. Games Meta lists as yours are reported
+to them as owned; `scripts/owned_games.txt` is only needed for other games.
+Script failures are shown as one plain message (for example why the emulator
+quit), not PowerShell's error record.
 
 ## Data and limitations
 

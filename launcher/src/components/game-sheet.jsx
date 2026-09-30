@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { Dialog } from 'radix-ui';
-import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, Play, RefreshCcw, X } from 'lucide-react';
+import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, RefreshCcw, X } from 'lucide-react';
 import { call } from '../api';
 import { activeStatuses, ago, bytes, Cover, GameStatus, IconButton } from './common';
+import { PcControls, PlayButtons } from './play';
 
-export function GameSheet({ game, state, onClose, run, pending, setPage, notify, connect }) {
+export function GameSheet({ game, state, onClose, run, pending, setPage, notify, connect, headset }) {
   const [extra, setExtra] = useState(null);
   const [build, setBuild] = useState('');
   const key = `game-${game.id}`;
@@ -24,8 +25,7 @@ export function GameSheet({ game, state, onClose, run, pending, setPage, notify,
 
   let primary;
   if (activeJob) primary = <button type="button" className="btn btn-primary btn-lg" onClick={toDownloads}><Loader2 className="spin" />{activeJob.status === 'downloading' ? 'Downloading' : activeJob.status === 'installing' ? 'Installing' : 'Queued'}</button>;
-  else if (running) primary = <button type="button" className="btn btn-primary btn-lg" disabled={pending.has('stop')} onClick={() => run('stop', async () => { await call('stop'); notify('Closing game'); })}>Stop</button>;
-  else if (game.installed) primary = <button type="button" className="btn btn-primary btn-lg" disabled={busy || Boolean(state.running)} onClick={() => operate(async () => { await call('play', game.id); onClose(); })}><Play fill="currentColor" />Play</button>;
+  else if (game.installed || running || state.starting?.gameId === game.id) primary = <PlayButtons game={game} state={state} run={run} pending={pending} notify={notify} headset={headset.headset} onStarted={onClose} />;
   else if (game.apk) primary = <button type="button" className="btn btn-primary btn-lg" disabled={busy} onClick={install}><ArrowDownToLine />Install</button>;
   else if (!state.signedIn) primary = <button type="button" className="btn btn-primary btn-lg" disabled={pending.has('account')} onClick={connect}>Connect Meta to download</button>;
   else primary = <button type="button" className="btn btn-primary btn-lg" disabled={busy} onClick={download}><ArrowDownToLine />Download</button>;
@@ -81,6 +81,7 @@ export function GameSheet({ game, state, onClose, run, pending, setPage, notify,
               </div>) : <span style={{ color: 'var(--muted)' }}>No downloadable add-ons</span>}
             </div>}
 
+            {game.installed && <PcControls />}
             {game.description && <p className="description">{game.description}</p>}
             {game.genres?.length > 0 && <div className="tags">{game.genres.map(g => <span key={g} className="tag">{g}</span>)}</div>}
 

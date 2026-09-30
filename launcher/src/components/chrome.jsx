@@ -1,4 +1,5 @@
 import { ArrowDownToLine, LayoutGrid, Loader2, Minus, Settings, Square, User, X } from 'lucide-react';
+import { useState } from 'react';
 import { windowControls } from '../api';
 import { LogoMark } from './logo';
 
@@ -20,6 +21,12 @@ const pages = [
   ['settings', 'Settings', Settings],
 ];
 
+function AccountAvatar({ name, image }) {
+  const [failed, setFailed] = useState('');
+  if (image && failed !== image) return <img className="avatar" src={image} alt="" referrerPolicy="no-referrer" onError={() => setFailed(image)} />;
+  return <div className="avatar">{name ? name[0].toUpperCase() : <User />}</div>;
+}
+
 export function Sidebar({ page, setPage, state, activeJobs, connecting, onConnect }) {
   return <aside className="sidebar">
     <button type="button" className="brand" onClick={() => setPage('library')} aria-label="Refract library">
@@ -35,7 +42,7 @@ export function Sidebar({ page, setPage, state, activeJobs, connecting, onConnec
     <div className="sidebar-spacer" />
     {state && (state.signedIn
       ? <div className="account">
-        <div className="avatar">{state.account ? state.account[0].toUpperCase() : <User />}</div>
+        <AccountAvatar name={state.account} image={state.accountImage} />
         <div className="account-text"><strong>{state.account || 'Meta account'}</strong><span>Connected to Meta</span></div>
       </div>
       : <div className="account account-signin">

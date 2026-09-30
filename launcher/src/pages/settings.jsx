@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { call } from '../api';
 import { activeStatuses } from '../components/common';
+import { SetupPanel } from '../components/setup';
 
 export function SettingsPage({ state, run, pending, notify, connect }) {
   const [draft, setDraft] = useState({ ...state.settings });
@@ -29,6 +30,7 @@ export function SettingsPage({ state, run, pending, notify, connect }) {
   return <div className="page">
     <header className="page-head"><div><h1 className="page-title">Settings</h1></div></header>
     <form id="settings-form" className="settings" onSubmit={save}>
+      <SetupPanel state={state} run={run} pending={pending} notify={notify} />
       <section className="panel">
         <div className="panel-row">
           <div><h2>Meta account</h2><p style={{ margin: '3px 0 0', color: 'var(--muted)' }}>{state.signedIn ? `Connected${state.account ? ` as ${state.account}` : ''}. Your owned Quest games appear in the library.` : 'Sign in on Meta’s page to list and download the Quest games you own.'}</p></div>

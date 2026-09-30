@@ -41,6 +41,17 @@ test('library keeps only Quest entitlements and identifies incomplete results', 
   ], page_info: { has_next_page: true } } } } } }));
   const result = await api.library(); assert.equal(result.games.length,1); assert.equal(result.games[0].owned,true); assert.equal(result.partial,true);
 });
+test('profile sends the token in a header and only passes Meta CDN pictures', async () => {
+  const picture = 'https://scontent.oculuscdn.com/v/photo.png?oh=signed';
+  let seen;
+  const api = new QuestStore('test-token', async (url, init) => { seen = { url: String(url), init }; return Response.json({ id: '1', alias: 'player_one', display_name: 'Player', profile_url: picture }); });
+  assert.deepEqual(await api.profile(), { name: 'player_one', image: picture });
+  assert.doesNotMatch(seen.url, /test-token/); assert.equal(seen.init.headers.Authorization, 'OAuth test-token');
+  for (const profile_url of ['http://scontent.oculuscdn.com/a.png', 'https://evil.example/oculuscdn.com.png', 'javascript:alert(1)', undefined]) {
+    const other = new QuestStore('t', async () => Response.json({ display_name: 'Player', profile_url }));
+    assert.deepEqual(await other.profile(), { name: 'Player', image: '' });
+  }
+});
 test('Quest download plan includes base APK, OBB and extra assets once', async () => {
   const api = new QuestStore('test', async (_url, options) => {
     const doc = options.body.get('doc_id');

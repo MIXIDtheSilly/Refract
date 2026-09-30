@@ -15,6 +15,8 @@
   --white: #ffffff;
   --on-white: #1d1d20;
   --danger: #ff8a80;
+  --warn: #ffc478;
+  --ok: #7ee2a8;
   --radius: 14px;
   --radius-sm: 10px;
   --titlebar: 40px;
@@ -81,6 +83,7 @@ input, textarea, .selectable { user-select: text; }
 .account { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: var(--radius); background: var(--surface); }
 .avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--raised); color: var(--text); flex-shrink: 0; font-size: 14px; }
 .avatar svg { width: 18px; }
+img.avatar { object-fit: cover; }
 .account-text { min-width: 0; flex: 1; line-height: 1.25; }
 .account-text strong { display: block; font-weight: 500; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-text span { color: var(--faint); font-size: 12.5px; white-space: nowrap; }
@@ -191,6 +194,37 @@ select.field-input option { background: var(--panel); }
 .panel > p { margin: 3px 0 18px; color: var(--muted); font-size: 14px; }
 .panel-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .field { display: grid; gap: 7px; margin-top: 14px; }
+.setup-list { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 2px; }
+.setup-list li { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line); }
+.setup-list li > svg { width: 20px; height: 20px; flex-shrink: 0; }
+.setup-list li.ok > svg { color: var(--muted); }
+.setup-list li.missing > svg { color: var(--danger); }
+.setup-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.setup-text strong { font-weight: 500; font-size: 14.5px; }
+.setup-text span, .setup-text small { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; user-select: text; }
+.setup-text small { color: var(--faint); }
+.setup-banner { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; padding: 16px 18px; border-radius: 18px; background: var(--surface); border: 1px solid rgba(255, 138, 128, 0.35); }
+.setup-banner > svg { width: 22px; height: 22px; color: var(--danger); flex-shrink: 0; }
+.setup-banner div { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.setup-banner strong { font-weight: 500; }
+.setup-banner span { color: var(--muted); font-size: 13px; }
+/* Headset status pill and its check-again button. */
+.headset-status { display: flex; align-items: center; gap: 8px; }
+.icon-btn-sm { width: 32px; height: 32px; }
+.icon-btn-sm svg { width: 15px; height: 15px; }
+.headset-chip { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 14px; border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 13px; white-space: nowrap; }
+.headset-chip .dot { background: var(--warn); }
+.headset-chip.ready { color: var(--text); }
+.headset-chip.ready .dot { background: var(--ok); }
+.pc-controls summary { margin-bottom: 0; cursor: pointer; list-style: none; }
+.pc-controls summary::-webkit-details-marker { display: none; }
+.pc-controls summary::after { content: '+'; color: var(--muted); font-weight: 400; }
+.pc-controls[open] summary { margin-bottom: 10px; }
+.pc-controls[open] summary::after { content: '\2212'; }
+.pc-controls dl { display: grid; gap: 6px; margin: 0; font-size: 13.5px; }
+.pc-controls dl div { display: flex; justify-content: space-between; gap: 16px; }
+.pc-controls dt { color: var(--muted); }
+.pc-controls dd { margin: 0; text-align: right; }
 .field label { font-size: 13.5px; color: var(--muted); }
 .field-row { display: flex; gap: 10px; }
 .fields-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
@@ -209,7 +243,7 @@ select.field-input option { background: var(--panel); }
 .sheet-title { margin: 0; font-size: 30px; font-weight: 400; line-height: 1.12; }
 .sheet-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; color: var(--muted); font-size: 13.5px; }
 .sheet-actions { display: flex; gap: 10px; margin: 22px 0 6px; }
-.sheet-actions .btn-primary { flex: 1; }
+.sheet-actions > .btn { flex: 1; padding: 0 18px; }
 .working { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 13px; }
 .working svg { width: 14px; height: 14px; }
 .description { margin: 18px 0 0; color: var(--muted); font-size: 14.5px; line-height: 1.6; user-select: text; }

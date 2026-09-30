@@ -34,6 +34,17 @@ const state = {
   ],
 };
 
+// One missing item so the preview shows the setup banner and a fix button.
+const setupChecks = [
+  { id: 'python', title: 'Python', ok: true, detail: 'Python 3.13.15' },
+  { id: 'sdk', title: 'Android SDK', ok: true, detail: 'C:\\Users\\you\\AppData\\Local\\Android\\Sdk' },
+  { id: 'avd', title: 'Virtual device', ok: false, detail: 'There is no virtual device named refract-google-api36.',
+    fix: { action: 'android', label: 'Set up Android', note: 'Downloads about 2 GB and accepts the Android SDK licenses.' } },
+  { id: 'hypervisor', title: 'Hardware acceleration', ok: true, detail: 'WHPX(10.0.26200) is installed and usable.' },
+  { id: 'components', title: 'Refract components', ok: true, detail: 'Host bridge, GPU sharing layer, Android runtime and platform stand-in are built.' },
+  { id: 'openxr', title: 'PC VR runtime', ok: true, detail: 'Meta Horizon Link is the active OpenXR runtime.' },
+];
+
 const snapshot = () => structuredClone(state);
 const emit = () => { const value = snapshot(); for (const listener of listeners) listener(value); };
 const find = id => { const game = state.games.find(g => g.id === id); if (!game) throw new Error('Game is no longer in your library.'); return game; };
@@ -78,8 +89,20 @@ const methods = {
     for (const stage of ['Starting Android', 'Installing APK', 'Copying expansion files']) { job.stage = stage; emit(); await wait(700); }
     game.installed = true; job.status = 'complete'; job.stage = 'Installed'; state.busy = false; emit();
   },
-  play: async id => { const game = find(id); if (!game.installed) throw new Error('Install the game first.'); await wait(400); state.running = id; game.lastPlayed = new Date().toISOString(); emit(); },
-  stop: async () => { await wait(500); state.running = null; emit(); },
+  play: async (id, mode = 'vr') => {
+    const game = find(id); if (!game.installed) throw new Error('Install the game first.');
+    if (mode === 'vr') throw new Error('No VR headset is connected. Connect your headset (Meta Horizon Link or Air Link, or SteamVR) and press Play again.');
+    await wait(400); state.running = id; state.runningMode = mode; game.lastPlayed = new Date().toISOString(); emit();
+  },
+  stop: async () => { await wait(500); state.running = null; state.runningMode = null; emit(); },
+  // The preview has no headset, so it shows the notice and puts Play on PC first.
+  headset: async () => { await wait(300); return state.running ? { connected: false, busy: true } : { connected: false, runtime: 'Meta Horizon Link', title: 'No VR headset connected', detail: 'Put on your Quest and connect it with Quest Link (USB cable) or Air Link.' }; },
+  setup: async () => { await wait(600); return structuredClone(setupChecks); },
+  fixSetup: async action => {
+    state.fixing = action; emit(); await wait(1500);
+    for (const check of setupChecks) if (check.fix?.action === action) { check.ok = true; delete check.fix; }
+    state.fixing = ''; emit(); return structuredClone(setupChecks);
+  },
   settings: async values => {
     if (!/^[A-Za-z0-9_-]+$/.test(values.avd) || values.port % 2 || values.port < 5554 || values.port > 5682) throw new Error('Check the Android AVD, even-numbered port, and memory settings.');
     state.settings = { ...state.settings, ...values }; emit();
