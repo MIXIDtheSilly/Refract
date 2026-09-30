@@ -10,6 +10,7 @@ import { LogoMark } from './components/logo';
 import { Library } from './pages/library';
 import { Downloads } from './pages/downloads';
 import { SettingsPage } from './pages/settings';
+import { EmulatorPage } from './pages/emulator';
 import './styles.css';
 
 function App() {
@@ -61,6 +62,7 @@ function App() {
         {!state ? <Empty title="Loading library" action={<Loader2 className="spin" />} />
           : page === 'library' ? <Library {...shared} />
           : page === 'downloads' ? <Downloads {...shared} />
+          : page === 'emulator' ? <EmulatorPage {...shared} />
           : <SettingsPage key={JSON.stringify(state.settings)} {...shared} />}
       </main>
     </div>

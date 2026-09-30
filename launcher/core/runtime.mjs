@@ -53,7 +53,7 @@ export function powershellArgs(script, parameters) {
   return ['-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(invocation, 'utf16le').toString('base64')];
 }
 const hashes = new Map();
-async function sha256(file) {
+export async function sha256(file) {
   const stat = await fs.stat(file), key = `${file}|${stat.size}|${stat.mtimeMs}`;
   if (!hashes.has(key)) hashes.set(key, await new Promise((resolve, reject) => {
     const hash = createHash('sha256');
@@ -69,6 +69,12 @@ export const guestPackages = [
   { package: 'com.oculus.systemdriver', label: 'Refract XR driver', apk: 'build-android-runtime-windows-arm64-v8a/refract-systemdriver-debug.apk' },
   { package: 'com.oculus.horizon', label: 'Meta Platform stand-in', apk: 'build-platform-sdk/refract-platform-debug.apk' },
 ];
+// Emulator page settings, as tools/windows_android_emulator.ps1 parameters. Switches are only passed when on.
+export const audioBackends = ['dsound', 'winaudio', 'sdl'];
+export function emulatorOptions(settings) {
+  return { Cores: settings.cores ?? 6, Audio: settings.audio || 'dsound',
+    ...(settings.showWindow ? { ShowWindow: true } : {}), ...(settings.hostMic === false ? { NoHostMic: true } : {}) };
+}
 export function validPackage(value) {
   if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(value || '')) throw new Error('Invalid Android package name.');
   return value;
@@ -84,13 +90,18 @@ export class Runtime {
   // The emulator locks its AVD, so while the same AVD runs on another port (scripts\start_emulator.ps1
   // uses 5582) a copy on the configured port exits at once. Use the running one instead.
   async locate() {
-    this.found = null;
+    const port = await this.findPort();
+    this.found = port && port !== this.settings.port ? port : null;
+    return port;
+  }
+  // locate() without remembering the result, for status checks that run beside a starting game.
+  async findPort() {
     const ready = async port => { try { return (await this.adbAt(port, ['get-state'], { timeout: 2500 })).trim() === 'device'; } catch { return false; } };
     if (await ready(this.settings.port)) return this.settings.port;
     let devices = '';
     try { devices = await this.adbAt(null, ['devices'], { timeout: 5000 }); } catch { return null; }
     for (const [, port] of devices.matchAll(/^emulator-(\d+)\s+device\s*$/gm)) {
-      if (await this.avdName(Number(port)).catch(() => '') === this.settings.avd) return this.found = Number(port);
+      if (await this.avdName(Number(port)).catch(() => '') === this.settings.avd) return Number(port);
     }
     return null;
   }
@@ -140,7 +151,7 @@ export class Runtime {
         Action: 'Start', Avd: this.settings.avd, Port: this.settings.port, Sdk: this.settings.sdk,
         // No clock correction: it only works with emulator 36.5.11 and runs a single vCPU; the start
         // script's tsc=nowatchdog and TSC reboots keep the guest on the TSC clock instead.
-        Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, GpuSharing: true
+        Abi: 'arm64-v8a', MemoryMB: this.settings.memoryMB, GpuSharing: true, ...emulatorOptions(this.settings)
       }), { timeout: 25 * 60 * 1000, onOutput: text => {  // Room for a new AVD's first boot and the TSC reboots.
         for (const [, stage] of text.matchAll(/^REFRACT-STAGE: (.+)$/gm)) update(stage.trim());
       } });
@@ -259,7 +270,7 @@ export class Runtime {
   }
   // The emulator runs hidden, so one the launcher started stops with the launcher (a running game keeps it).
   async shutdown() {
-    if (!this.started || this.child) return;
+    if (!this.started || this.child || this.settings.keepEmulator) return;
     await this.adbAt(this.settings.port, ['shell', 'sync'], { timeout: 2000 }).catch(() => {});
     await this.adbAt(this.settings.port, ['emu', 'kill'], { timeout: 2000 }).catch(() => {});
   }

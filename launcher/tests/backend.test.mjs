@@ -35,6 +35,14 @@ test('backend answers over stdio, validates settings and keeps secrets out of st
   assert.equal(state.value.settings.avd, 'refract-google-api36');
 
   assert.match((await request('settings', { port: 5581 })).error, /even-numbered port/);
+  assert.equal(state.value.settings.cores, 6);
+  assert.match((await request('settings', { cores: 9 })).error, /CPU cores/);
+  assert.match((await request('settings', { audio: 'alsa' })).error, /audio/);
+  assert.match((await request('settings', { showWindow: 'yes' })).error, /CPU cores/);
+  assert.match((await request('emulatorAction', 'format')).error, /Unknown emulator action/);
+  assert.match((await request('openLogs', '../../Windows')).error, /Unknown folder/);
+  assert.match((await request('logFile', 'C:/Windows/win.ini')).error, /Unknown log file/);
+  assert.match((await request('pidOf', 'bad; rm -rf /')).error, /Invalid Android package/);
   assert.match((await request('nope')).error, /Unknown launcher request/);
   assert.match((await request('toString')).error, /Unknown launcher request/);
   assert.match((await request('patch', 'local:com.example.game')).error, /Unknown launcher request/);

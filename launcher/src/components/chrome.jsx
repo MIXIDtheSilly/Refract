@@ -1,4 +1,4 @@
-import { ArrowDownToLine, LayoutGrid, Loader2, Minus, Settings, Square, User, X } from 'lucide-react';
+import { ArrowDownToLine, Cpu, LayoutGrid, Loader2, Minus, Settings, Square, User, X } from 'lucide-react';
 import { useState } from 'react';
 import { windowControls } from '../api';
 import { LogoMark } from './logo';
@@ -18,6 +18,7 @@ export function TitleBar() {
 const pages = [
   ['library', 'Library', LayoutGrid],
   ['downloads', 'Downloads', ArrowDownToLine],
+  ['emulator', 'Emulator', Cpu],
   ['settings', 'Settings', Settings],
 ];
 

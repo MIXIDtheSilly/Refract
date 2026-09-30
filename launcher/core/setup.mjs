@@ -53,7 +53,7 @@ async function android(sdk, avd) {
   return results;
 }
 
-async function hypervisor(sdk) {
+export async function hypervisor(sdk) {
   const check = { id: 'hypervisor', title: 'Hardware acceleration' };
   const emulator = path.join(sdk, 'emulator/emulator.exe');
   if (!await exists(emulator)) return { ...check, ok: false, detail: 'Needs the Android emulator first.' };

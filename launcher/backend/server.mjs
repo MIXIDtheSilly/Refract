@@ -17,7 +17,8 @@ import { randomUUID, createHash } from 'node:crypto';
 import { MetaAuth, QuestStore, appId } from '../core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from '../core/download.mjs';
 import { State } from '../core/state.mjs';
-import { Runtime } from '../core/runtime.mjs';
+import { Runtime, run, validPackage, audioBackends } from '../core/runtime.mjs';
+import { Emulator, redact } from '../core/emulator.mjs';
 import { checkSetup, fixSetup, headsetStatus, refreshPath } from '../core/setup.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
 
@@ -33,7 +34,7 @@ console.log = console.info = console.warn = (...args) => process.stderr.write(`$
 const send = message => write(`${JSON.stringify(message)}\n`);
 
 let headsetCheck = null;
-let state, runtime, token = '', account = '', accountImage = '', busy = false, fixing = '', fixProgress = '', starting = null, auth = null;
+let state, runtime, emulator, token = '', account = '', accountImage = '', busy = false, fixing = '', fixProgress = '', starting = null, auth = null, emulatorTask = null;
 const controllers = new Map();
 let artworkTask;
 function refreshArtwork() {
@@ -44,9 +45,9 @@ function refreshArtwork() {
   }).finally(() => { artworkTask = null; });
   return artworkTask;
 }
-const message = error => String(error?.message || error).replace(/(?:OC|FRL|EA)[A-Za-z0-9_|-]{30,}/g, '[redacted]').replace(/access_token=[^\s&]+/g, 'access_token=[redacted]');
+const message = error => redact(error?.message || error);
 function publicState() {
-  return { ...state.data, signedIn: Boolean(token), account, accountImage, running: runtime.game, runningMode: runtime.mode || null, busy, fixing, fixProgress, starting,
+  return { ...state.data, signedIn: Boolean(token), account, accountImage, running: runtime.game, runningMode: runtime.mode || null, busy, fixing, fixProgress, starting, emulatorTask,
     // Credentials and signed CDN URLs never reach the UI or library file.
     games: state.data.games.map(g => ({ ...g, files: g.files?.map(f => ({ name: f.name, path: f.path, kind: f.kind, size: f.size })) })) };
 }
@@ -225,8 +226,46 @@ const methods = {
     finally { fixing = ''; fixProgress = ''; changed(); }
     return methods.setup();
   },
+  // Emulator page. Status is polled while the page is open; logcat is read incrementally by sequence number.
+  emulatorStatus: () => emulator.status(),
+  emulatorInfo: () => emulator.info(),
+  emulatorAction: async (action, arg) => {
+    if (!Object.hasOwn(emulatorActions, action)) throw new Error('Unknown emulator action.');
+    if (emulatorTask) throw new Error('Wait for the current emulator task to finish.');
+    const update = stage => { emulatorTask = { action, stage }; changed(); };
+    update('');
+    try { return await emulatorActions[action](arg, update); } finally { emulatorTask = null; changed(); }
+  },
+  logcat: (after, generation, follow) => emulator.logcat.read(Number(after) || 0, Number(generation) || 0, follow !== false),
+  logcatClear: () => emulator.logcat.clear(),
+  logcatExport: async text => {
+    if (typeof text !== 'string' || text.length > 64 * 1024 * 1024) throw new Error('Nothing to export.');
+    const directory = path.join(state.directory, 'diagnostics'); await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, `logcat-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.txt`), text);
+    return { openPath: directory };
+  },
+  logFiles: () => emulator.logFiles(),
+  logFile: id => emulator.logFile(String(id)),
+  adbShell: command => emulator.shell(command),
+  pidOf: async pkg => {
+    validPackage(pkg);
+    const port = await runtime.findPort(); if (!port) return [];
+    return (await runtime.adbAt(port, ['shell', 'pidof', pkg], { timeout: 5000 }).catch(() => '')).trim().split(/\s+/).filter(Boolean).map(Number);
+  },
+  exportDiagnostics: async () => {
+    const setup = await checkSetup(root, state.data.settings).catch(e => ({ error: message(e) }));
+    const result = await emulator.exportDiagnostics({ settings: state.data.settings, running: runtime.game, runningMode: runtime.mode || null, setup,
+      jobs: state.data.jobs.slice(0, 10).map(j => ({ name: j.name, status: j.status, stage: j.stage, error: j.error })) });
+    return { openPath: result.base, ...result };
+  },
+  openLogs: async which => {
+    const folders = { emulator: path.join(root, 'build-windows-emulator'), game: path.join(root, 'build-windows-game'), data: state.directory,
+      screenshots: path.join(state.directory, 'screenshots'), diagnostics: path.join(state.directory, 'diagnostics') };
+    const target = folders[which]; if (!target) throw new Error('Unknown folder.');
+    await fs.mkdir(target, { recursive: true }); return { openPath: target };
+  },
   settings: async values => {
-    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir'];
+    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'cores', 'showWindow', 'audio', 'hostMic', 'keepEmulator'];
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
     if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
     const settings = { ...state.data.settings };
@@ -234,11 +273,49 @@ const methods = {
     if (!/^[A-Za-z0-9_-]+$/.test(settings.avd) || !Number.isInteger(settings.port) || settings.port < 5554 || settings.port > 5682 || settings.port % 2 ||
       !Number.isInteger(settings.memoryMB) || settings.memoryMB < 2048 || settings.memoryMB > 16384) throw new Error('Check the Android AVD, even-numbered port, and memory settings.');
     for (const key of ['sdk', 'downloadDir']) if (typeof settings[key] !== 'string' || !path.isAbsolute(settings[key])) throw new Error('Select absolute Windows paths.');
+    if (!Number.isInteger(settings.cores) || settings.cores < 1 || settings.cores > 6 || !audioBackends.includes(settings.audio) ||
+      ['showWindow', 'hostMic', 'keepEmulator'].some(key => typeof settings[key] !== 'boolean')) throw new Error('Check the emulator CPU cores (1 to 6) and audio settings.');
     state.data.settings = settings; runtime.settings = settings; await persist();
   },
   // The shell opens these after validating them.
   openFolder: async id => { const game = getGame(id); const target = game.apk ? path.dirname(game.apk) : state.data.settings.downloadDir; await fs.mkdir(target, { recursive: true }); return { openPath: target }; },
   openStore: async id => ({ openUrl: `https://www.meta.com/experiences/${appId(id)}/` }),
+};
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function androidPort() { const port = await runtime.findPort(); if (!port) throw new Error('Android is not running.'); return port; }
+const noGame = () => { if (runtime.child) throw new Error('Close the running game first.'); };
+const adbExe = () => path.join(state.data.settings.sdk, 'platform-tools/adb.exe');
+// Debug tools on the Emulator page. Each gets the page's argument and a progress callback.
+const emulatorActions = {
+  start: (_, update) => exclusive(() => runtime.ensure(update)),
+  stop: async (_, update) => {
+    noGame();
+    const port = await runtime.findPort() ?? await runtime.avdProcessPort();
+    if (!port) return;
+    update('Stopping Android');
+    await runtime.adbAt(port, ['shell', 'sync'], { timeout: 5000 }).catch(() => {});
+    await runtime.adbAt(port, ['emu', 'kill'], { timeout: 10000 }).catch(() => {});
+    // An emulator that never reached adb ignores `emu kill`; end its process instead.
+    for (let i = 0; i < 15 && (await emulator.processes()).some(p => p.avd === state.data.settings.avd); i++) await sleep(1000);
+    for (const p of (await emulator.processes()).filter(p => p.avd === state.data.settings.avd)) try { process.kill(p.pid); } catch { /* Already gone. */ }
+    runtime.started = false; runtime.found = null;
+  },
+  reboot: async (_, update) => {
+    noGame(); const port = await androidPort();
+    update('Restarting Android');
+    await runtime.adbAt(port, ['reboot'], { timeout: 30000 }).catch(() => {});
+    await sleep(5000); update('Waiting for Android to start'); await runtime.waitBoot(port);
+  },
+  prepare: (_, update) => exclusive(async () => { noGame(); await runtime.locate(); await androidPort(); await runtime.prepare(update); }),
+  reconnect: async () => { await run(adbExe(), ['reconnect', 'offline'], { timeout: 15000 }); },
+  restartAdb: async (_, update) => {
+    noGame(); emulator.logcat.stop();
+    update('Restarting adb'); await run(adbExe(), ['kill-server'], { timeout: 15000 }).catch(() => {});
+    await run(adbExe(), ['start-server'], { timeout: 30000 });
+  },
+  forceStop: async pkg => { await runtime.adbAt(await androidPort(), ['shell', 'am', 'force-stop', validPackage(pkg)], { timeout: 15000 }); },
+  screenshot: () => emulator.screenshot(),
 };
 
 async function handle({ id, method, args }) {
@@ -263,13 +340,14 @@ const loaded = (async () => {
   if (scan) await refreshPath();
   state = new State(dataDirectory); await state.load();
   // Digitalis (the ARM64 translator Refract needs) is built for Android 16, so the default AVD is API 36.
-  state.data.settings = { avd: 'refract-google-api36', port: 5580,
-    memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'), ...state.data.settings };
+  state.data.settings = { avd: 'refract-google-api36', port: 5580, memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'),
+    cores: 6, showWindow: false, audio: 'dsound', hostMic: true, keepEmulator: false, ...state.data.settings };
   // A saved SDK path that has no SDK in it came from an earlier default; look for the real one.
   if (!await isSdk(state.data.settings.sdk)) state.data.settings.sdk = await findSdk();
   // Refract no longer needs games patched; drop the old ovrport setting.
   delete state.data.settings.ovrportCli;
   runtime = new Runtime(root, state.data.settings);
+  emulator = new Emulator(runtime, root, state.directory);
 })();
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on('line', async line => {
@@ -281,6 +359,7 @@ lines.on('line', async line => {
 // The shell closes stdin when the launcher window closes. A running game keeps going.
 lines.on('close', () => {
   for (const controller of controllers.values()) controller.abort();
+  emulator?.logcat.stop();
   // The shell kills the backend after five seconds, so stopping Android gets a bounded share of that.
   // Exiting on an empty event loop avoids a libuv assertion process.exit() can hit while child-process
   // handles close on Windows; the timer covers anything still open (a running game's pipes, keep-alive sockets).

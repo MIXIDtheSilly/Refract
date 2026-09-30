@@ -41,7 +41,8 @@ async fn call(app: AppHandle, window: WebviewWindow, backend: State<'_, Backend>
             }
         }
         "chooseFolder" => Ok(pick(&window, Pick::Folder).await.and_then(|p| p.into_iter().next()).unwrap_or(Value::Null)),
-        "openFolder" | "openStore" => {
+        // The backend builds these paths itself (game folders, Refract's log and diagnostics folders).
+        "openFolder" | "openStore" | "openLogs" | "exportDiagnostics" | "logcatExport" => {
             let target = backend.request(&method, args).await?;
             if let Some(path) = target.get("openPath").and_then(Value::as_str) {
                 app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())?;
