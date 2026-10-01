@@ -132,7 +132,10 @@ async function downloadGame(id, binaryId, dlcId) {
       }
       state.put(game);
       job.completed = completed; job.total = completed; job.status = 'complete'; job.stage = dlcId ? 'Add-on downloaded' : 'Ready to install';
-    } catch (error) { job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = message(error); }
+    } catch (error) {
+      job.status = controller.signal.aborted ? 'cancelled' : 'failed'; job.error = message(error);
+      if (job.status === 'failed') console.warn(`Download of ${job.name} failed at ${job.stage}: ${job.error}`);
+    }
     finally { controllers.delete(job.id); await persist(); }
   })();
   return job.id;
@@ -182,7 +185,7 @@ const methods = {
     }
     const job = { id: randomUUID(), gameId: id, name: game.name, status: 'installing', stage: 'Preparing install' }; state.data.jobs.unshift(job); await persist();
     try { await runtime.install(game, stage => { job.stage = stage; changed(); }); game.installed = true; job.status = 'complete'; job.stage = 'Installed'; }
-    catch (error) { job.status = 'failed'; job.error = message(error); throw error; }
+    catch (error) { job.status = 'failed'; job.error = message(error); console.warn(`Install of ${job.name} failed at ${job.stage}: ${job.error}`); throw error; }
     finally { await persist(); }
   }),
   // mode 'vr' plays in the headset, 'pc' in a window on this PC (keyboard, mouse or gamepad).
