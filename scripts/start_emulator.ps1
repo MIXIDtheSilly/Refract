@@ -27,7 +27,7 @@
 # runs\emulator.log / emulator.err.log.
 param([switch]$NoGpuSharing, [switch]$Hidden, [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
       [ValidateRange(1, 6)][int]$Cores = 1, [string]$KernelArgs = 'tsc=nowatchdog idle=poll', [switch]$NoHostMic,
-      [switch]$AnyCore, [ValidateRange(10, 200)][int]$AudioLatencyMs = 50, [ValidateRange(40, 340)][int]$AudioBufferMs = 70)
+      [switch]$AnyCore, [ValidateRange(10, 200)][int]$AudioLatencyMs = 20, [ValidateRange(30, 340)][int]$AudioBufferMs = 40)
 $emulator = 'C:\Users\mixid\Android\Sdk\emulator'
 if (!$AnyCore) {
     . (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\p_core_affinity.ps1')

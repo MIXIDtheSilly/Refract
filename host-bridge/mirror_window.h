@@ -14,6 +14,8 @@ public:
     ~MirrorWindow();
     bool open(ID3D11Device* device, const std::string& gameName);
     bool pump();
+    // F1 in the mirror window toggles the headset's performance panel; true once per press.
+    bool take_stats_toggle() { const bool toggle = statsToggle_; statsToggle_ = false; return toggle; }
     void present(ID3D11DeviceContext* context, ID3D11Texture2D* source,
                  UINT width, UINT height, DXGI_FORMAT format, uint64_t sequence);
 private:
@@ -22,7 +24,7 @@ private:
     HWND window_ = nullptr, surface_ = nullptr;
     uint64_t sequence_ = UINT64_MAX;
     bool dirty_ = true;
-    bool closed_ = false, failed_ = false;
+    bool closed_ = false, failed_ = false, statsToggle_ = false;
     HANDLE closeRequest_ = nullptr, closeReady_ = nullptr;
     ULONGLONG closeDeadline_ = 0;
     UINT width_ = 1, height_ = 1;

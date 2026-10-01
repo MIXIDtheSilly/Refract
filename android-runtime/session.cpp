@@ -153,7 +153,7 @@ std::array<SwapchainRecord, 64> g_swapchains{};
 SwapchainRecord* g_lastReleasedSwapchain = nullptr;
 uint32_t g_actionCount = 0;
 uint64_t g_nextPath = 1;
-uint64_t g_imageFrameSequence = 0;
+std::atomic<uint64_t> g_imageFrameSequence{0};  // Bumped by xrEndFrame and the export publisher thread.
 XrTime g_nextFrameStart = 0;
 uint32_t g_renderWidth = 1024, g_renderHeight = 1024;
 // Half-angles of each eye's field of view. The horizontal one comes from
@@ -199,6 +199,48 @@ void query_render_extent() {
 #endif
 }
 refract::protocol::PoseFrame g_lastViewPoseFrame{};
+
+#if defined(__ANDROID__)
+int int_property(const char* name, int fallback, int low, int high);
+#endif
+
+// debug.refract.frame_sync=1 (the SteamVR host bridge): see xrWaitFrame.
+bool frame_sync_enabled()
+{
+#if defined(__ANDROID__)
+    static const bool enabled = int_property("debug.refract.frame_sync", 0, 0, 1) != 0;
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+// The pose stream sequence each frame's views came from, by the frame's display time: xrLocateViews
+// records it on the game's main thread, xrEndFrame looks it up on its render thread. Frames sent to
+// the SteamVR host bridge carry it, so the bridge can show every frame a fixed number of display frames
+// after the pose it was rendered with, instead of whichever frame happens to be newest.
+struct ViewPoseRecord { XrTime displayTime = 0; uint64_t sequence = 0; };
+std::array<ViewPoseRecord, 8> g_viewPoses{};
+size_t g_viewPoseNext = 0;
+std::mutex g_viewPoseMutex;
+
+void record_view_pose(XrTime displayTime, uint64_t sequence)
+{
+    std::lock_guard<std::mutex> lock(g_viewPoseMutex);
+    auto& last = g_viewPoses[(g_viewPoseNext + g_viewPoses.size() - 1) % g_viewPoses.size()];
+    if (last.displayTime == displayTime) { last.sequence = sequence; return; }
+    g_viewPoses[g_viewPoseNext++ % g_viewPoses.size()] = {displayTime, sequence};
+}
+
+// The tag for a frame's image header: pose sequence + 1, or 0 when unknown.
+uint32_t view_pose_tag(XrTime displayTime)
+{
+    std::lock_guard<std::mutex> lock(g_viewPoseMutex);
+    for (const auto& record : g_viewPoses) {
+        if (record.displayTime == displayTime && displayTime) return static_cast<uint32_t>(record.sequence) + 1;
+    }
+    return 0;
+}
 #if defined(__ANDROID__)
 VulkanBackend g_vulkan;
 // GLES sessions may also run g_vulkan (a private device for GPU export), so "the app renders
@@ -654,7 +696,7 @@ public:
         const uint8_t* payload,
         uint64_t payloadSize,
         const refract::protocol::ImageProjection* projection = nullptr, bool gpu = false, uint32_t batchPart = 0,
-        bool waitAck = true)
+        bool waitAck = true, uint32_t poseTag = 0)
     {
         static refract::protocol::PerfStats stats("image-send");
         // The async sender thread and synchronous GPU messages share the socket.
@@ -683,6 +725,7 @@ public:
                 header.reserved = batchPart;
             }
             if (gpu) header.type = refract::protocol::kWindowsGpuFrameType;
+            if (gpu && !batchPart) header.reserved = poseTag;
             header.header_size += sizeof(*projection);
         }
 
@@ -1354,18 +1397,112 @@ void maybe_send_swapchain_image(const SwapchainRecord&) {}
 #endif
 
 #if defined(__ANDROID__)
-// Pipelined shared export: submit this frame's copy, then publish the previous frame,
-// whose copy has normally finished by now. The viewer shows each frame one frame later,
-// but the app's render thread no longer waits for the GPU copy and the viewer's
-// acknowledgment (~5 ms per frame, and the app's main thread often waits on this thread).
+// Pipelined shared export: xrEndFrame submits the frame's copy into the next ring pair and returns,
+// and the publisher thread sends the frame as soon as that copy completes. The app's render thread
+// never waits for the GPU copy or the consumer's acknowledgment (~5 ms per frame, and the app's main
+// thread often waits on this thread). Publishing the previous frame from the next xrEndFrame instead
+// held every frame back a whole app frame (~11 ms of extra head and controller latency in VR).
 // Scene-only (v3) and composite (v10) frames share this one ordered pipeline.
 struct PendingExport {
     int slot = -1;
     uint32_t width = 0, height = 0;
     refract::protocol::ImageProjection projection{};
     std::vector<uint8_t> composite;  // Composite table (after the WindowsGpuFrame); empty for v3.
+    uint32_t poseTag = 0;  // view_pose_tag of the frame (v3 only).
 };
-PendingExport g_pendingExport;
+
+bool publish_export(const PendingExport& pending)
+{
+    refract::protocol::WindowsGpuMarker marker{};
+    if (!g_vulkan.export_wait(pending.slot, &marker)) return false;
+    refract::protocol::WindowsGpuFrame gpu{marker.session, {marker.formats[0], marker.formats[1]}};
+    const uint64_t sequence = g_imageFrameSequence++;
+    const bool sent = pending.composite.empty()
+        ? image_transport_client().send_frame(sequence, pending.width, pending.height, 2,
+              reinterpret_cast<const uint8_t*>(&gpu), sizeof(gpu), &pending.projection, true, 0, false, pending.poseTag)
+        : image_transport_client().send_composite_frame(sequence, pending.width, pending.height, pending.projection, gpu,
+              pending.composite);
+    if (!sent) return false;
+    if (sequence % 90 == 0) __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "shared GPU %s seq=%llu %ux%u; published on copy completion",
+        pending.composite.empty() ? "eyes" : "composite", static_cast<unsigned long long>(sequence), pending.width, pending.height);
+    return true;
+}
+
+class ExportPublisher {
+public:
+    // Queues a submitted export; frames are published in order.
+    void push(PendingExport&& frame)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!started_) {
+                std::thread([this] { run(); }).detach();
+                started_ = true;
+            }
+            queue_.push_back(std::move(frame));
+        }
+        ready_.notify_one();
+    }
+
+    // Waits until at most `unpublished` queued exports are not yet sent. False once a publication
+    // failed (the consumer went away); the exports after it were dropped.
+    bool wait(size_t unpublished)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        idle_.wait(lock, [&] { return queue_.size() + (busy_ ? 1 : 0) <= unpublished; });
+        return !failed_;
+    }
+
+    // Drops the unsent exports and forgets a failure, once the one being sent is done.
+    void drop()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        queue_.clear();
+        idle_.wait(lock, [&] { return !busy_; });
+        failed_ = false;
+    }
+
+private:
+    void run()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (;;) {
+            ready_.wait(lock, [this] { return !queue_.empty(); });
+            PendingExport frame = std::move(queue_.front());
+            queue_.pop_front();
+            busy_ = true;
+            lock.unlock();
+            const bool published = publish_export(frame);
+            lock.lock();
+            busy_ = false;
+            if (!published) {
+                failed_ = true;
+                queue_.clear();
+            }
+            idle_.notify_all();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable ready_, idle_;
+    std::deque<PendingExport> queue_;
+    bool busy_ = false, failed_ = false, started_ = false;
+};
+
+ExportPublisher& export_publisher()
+{
+    static auto* publisher = new ExportPublisher;  // Never destroyed: its thread is detached.
+    return *publisher;
+}
+
+// Before an export refills a ring pair, the frame that used it kExportRing exports ago must be
+// published and acknowledged: with at most the newest export unpublished, at most kExportRing - 2
+// sent frames may be unacknowledged. (The copies finish within a frame, so this rarely waits.)
+bool export_ring_pair_free()
+{
+    return export_publisher().wait(1) && image_transport_client().await_acks(VulkanBackend::kExportRing - 2);
+}
+
 // Shared export stops when its consumer goes away (e.g. the viewer restarts);
 // resume it once the image stream has connected again.
 bool g_gpuConsumerLost = false;
@@ -1383,30 +1520,11 @@ void resume_gpu_export_if_reconnected()
 void gpu_consumer_lost()
 {
     // Never reuse shared images after an uncertain consumer completion.
+    export_publisher().drop();
     g_vulkan.disable_gpu_export();
     g_gpuConsumerLost = true;
     g_gpuLostAtConnection = image_transport_client().connections();
-    g_pendingExport.slot = -1;
     __android_log_print(ANDROID_LOG_WARN, "Refract.GPU", "GPU consumer unavailable; disabling shared export for this session");
-}
-
-bool publish_pending_export()
-{
-    auto& pending = g_pendingExport;
-    if (pending.slot < 0) return true;
-    refract::protocol::WindowsGpuMarker marker{};
-    if (!g_vulkan.export_wait(std::exchange(pending.slot, -1), &marker)) return false;
-    refract::protocol::WindowsGpuFrame gpu{marker.session, {marker.formats[0], marker.formats[1]}};
-    const uint64_t sequence = g_imageFrameSequence++;
-    const bool sent = pending.composite.empty()
-        ? image_transport_client().send_frame(sequence, pending.width, pending.height, 2,
-              reinterpret_cast<const uint8_t*>(&gpu), sizeof(gpu), &pending.projection, true, 0, false)
-        : image_transport_client().send_composite_frame(sequence, pending.width, pending.height, pending.projection, gpu,
-              pending.composite);
-    if (!sent) return false;
-    if (sequence % 90 == 0) __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "shared GPU %s seq=%llu %ux%u; pipelined, no pixel readback",
-        pending.composite.empty() ? "eyes" : "composite", static_cast<unsigned long long>(sequence), pending.width, pending.height);
-    return true;
 }
 
 bool valid_subimage(const XrSwapchainSubImage& sub, SwapchainRecord*& sc)
@@ -1594,8 +1712,7 @@ bool submit_composite_frame(const XrFrameEndInfo& info, XrResult& result)
     if (!entries.empty()) std::memcpy(tableBytes.data() + sizeof(table), entries.data(), entries.size() * sizeof(proto::CompositeQuad));
 
     resume_gpu_export_if_reconnected();
-    // The ring pair about to be refilled carried the frame sent kExportRing - 1 frames ago.
-    if (!image_transport_client().await_acks(VulkanBackend::kExportRing - 2)) { gpu_consumer_lost(); result = XR_SUCCESS; return true; }
+    if (!export_ring_pair_free()) { gpu_consumer_lost(); result = XR_SUCCESS; return true; }
     const int slot = g_vulkan.export_atlas_async(blits.data(), static_cast<uint32_t>(blits.size()), atlasWidth, atlasHeight);
     if (slot < 0) return false;
     static bool reported = false;
@@ -1604,9 +1721,7 @@ bool submit_composite_frame(const XrFrameEndInfo& info, XrResult& result)
                             sceneWidth, sceneHeight, entries.size(), atlasWidth, atlasHeight);
         reported = true;
     }
-    const bool published = publish_pending_export();
-    g_pendingExport = {slot, atlasWidth, atlasHeight, projection, std::move(tableBytes)};
-    if (!published) gpu_consumer_lost();
+    export_publisher().push({slot, atlasWidth, atlasHeight, projection, std::move(tableBytes)});
     result = XR_SUCCESS;
     return true;
 }
@@ -1845,23 +1960,18 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart 
             if (slot >= 0) async_frame_sender().submit_readback(slot, nv12, g_imageFrameSequence++, width, height, streamLayers, projection);
             return XR_SUCCESS;
         }
-        auto& pending = g_pendingExport;
         const auto consumerLost = gpu_consumer_lost;
-        const auto publishPending = publish_pending_export;
         if (!batchPart) {
-            // The ring pair about to be refilled carried the frame sent kExportRing - 1 frames ago.
-            if (!image_transport_client().await_acks(VulkanBackend::kExportRing - 2)) { consumerLost(); return XR_SUCCESS; }
+            if (!export_ring_pair_free()) { consumerLost(); return XR_SUCCESS; }
             const int slot = g_vulkan.export_async(vkSwapchains, indices, subimages, width, height);
             if (slot >= 0) {
-                const bool published = publishPending();
-                pending = {slot, width, height, projection};
-                if (!published) consumerLost();
+                export_publisher().push({slot, width, height, projection, {}, frame_sync_enabled() ? view_pose_tag(info.displayTime) : 0});
                 return XR_SUCCESS;
             }
             // No ring for this configuration: the synchronous export below still works.
         }
-        // Keep frames in order: a mixed-layer batch goes out after the pending frame.
-        if (!publishPending()) {
+        // Keep frames in order: a mixed-layer batch goes out after every queued frame.
+        if (!export_publisher().wait(0)) {
             consumerLost();
             return batchPart ? XR_ERROR_RUNTIME_FAILURE : XR_SUCCESS;
         }
@@ -3381,6 +3491,7 @@ XrResult XRAPI_CALL xrLocateViews_impl(
     SpaceRecord* baseRecord = find_space(viewLocateInfo->space);
     const refract::protocol::PoseFrame& poseFrame = pose_client().latest_pose_frame();
     g_lastViewPoseFrame = poseFrame;
+    if (frame_sync_enabled()) record_view_pose(viewLocateInfo->displayTime, poseFrame.sequence);
     if (poseFrame.version >= 5) {
         viewState->viewStateFlags = poseFrame.hmd_flags & 15;
         if (baseRecord->kind == SpaceKind::Local) viewState->viewStateFlags &= poseFrame.local_origin_flags;
@@ -3439,12 +3550,7 @@ XrResult XRAPI_CALL xrWaitFrame_impl(
     // the two frame loops, so the game renders with the newest pose and can finish in time for the host's
     // next frame. A free-running timer beat against the host's clock: poses waited up to a frame, finished
     // images up to another, and ~4 frames a second were missed. Without a live pose stream, pace by timer.
-#if defined(__ANDROID__)
-    static const bool frameSync = int_property("debug.refract.frame_sync", 0, 0, 1) != 0;
-#else
-    constexpr bool frameSync = false;
-#endif
-    if (frameSync) {
+    if (frame_sync_enabled()) {
         static uint64_t lastSequence = UINT64_MAX;
         static XrTime lastNewPose = 0;
         auto frame = pose_client().latest_pose_frame();

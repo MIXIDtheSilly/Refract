@@ -26,10 +26,10 @@ param(
     # Audio as in scripts\start_emulator.ps1: the default winaudio backend plays silence on this PC, and
     # qemu's 10 ms DirectSound queue crackles under load. Without -allow-host-audio the guest mic gets zeros.
     [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
-    [ValidateRange(10, 200)][int]$AudioLatencyMs = 50,
+    [ValidateRange(10, 200)][int]$AudioLatencyMs = 20,
     # DirectSound buffer size: qemu fills all of it, so once guest and host audio clocks drift apart the
     # sound runs this far behind. 64 KiB (~340 ms) made Yeeps voice chat lag badly.
-    [ValidateRange(40, 340)][int]$AudioBufferMs = 70,
+    [ValidateRange(30, 340)][int]$AudioBufferMs = 40,
     [switch]$NoHostMic
 )
 $ErrorActionPreference = 'Stop'
@@ -152,6 +152,18 @@ function Use-Digitalis($Process) {
     Start-Sleep -Seconds 5
     Wait-Boot $Process
     if ((Get-Prop ro.dalvik.vm.native.bridge) -ne 'libberberis_arm64.so') { throw 'Digitalis did not become the native bridge; see scripts\translator.ps1.' }
+}
+# Android turns on its zram swap at boot from the zram module in /system_dlkm, but on this AVD the module is
+# sometimes not loaded (seen after adb remount gave the system partitions a writable overlay). Without swap a
+# big game thrashes: Yeeps uses ~3 GB of the 4 and dropped to ~0.1 fps. Load it and turn swap on if missing.
+function Ensure-Swap {
+    $size = [int]($MemoryMB * 3 / 4)
+    $script = ('grep -q zram0 /proc/swaps && exit 0; d=/system_dlkm/lib/modules; [ -e /sys/block/zram0 ] || {{ insmod $d/zsmalloc.ko; insmod $d/zram.ko; }}; [ -e /sys/block/zram0 ] || exit 1; echo {0}M > /sys/block/zram0/disksize && mkswap /dev/block/zram0 > /dev/null && swapon /dev/block/zram0' -f $size)
+    $ErrorActionPreference = 'Continue'
+    & $adb -s $serial shell "su 0 sh -c '$script'" 2>$null | Out-Null
+    $ok = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = 'Stop'
+    if ($ok) { Write-Host 'Guest swap: on.' } else { Write-Warning 'Could not turn on the guest zram swap; big games may stall.' }
 }
 function Get-Clocksource {
     $ErrorActionPreference = 'Continue'
@@ -295,6 +307,7 @@ switch ($Action) {
         if ($clock -eq 'tsc') { Write-Host 'Guest clock: TSC.' }
         elseif ($clock) { Write-Warning "Guest clock is '$clock', not the TSC; games will run slower." }
         else { Write-Warning 'Could not read the guest clocksource.' }
+        Ensure-Swap
         Run $adb @('-s', $serial, 'reverse', 'tcp:38490', 'tcp:38490')
         Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')
         Run $adb @('-s', $serial, 'shell', 'setprop', 'debug.refract.gpu_share', $(if ($GpuSharing) { '1' } else { '0' }))

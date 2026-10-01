@@ -213,7 +213,11 @@ export class Runtime {
   }
   async importInstalled(packageName, imagePath) {
     validPackage(packageName);
-    const activity = (await this.adb(['shell', 'cmd', 'package', 'resolve-activity', '--brief', packageName])).split(/\r?\n/).find(s => s.startsWith(`${packageName}/`));
+    const launchable = async (...intent) => (await this.adb(['shell', 'cmd', 'package', ...intent, packageName]))
+      .split(/\r?\n/).map(s => s.trim()).find(s => s.startsWith(`${packageName}/`));
+    // Many Quest games (AC Nexus) start only from Meta's VR category, not Android's launcher.
+    const activity = await launchable('resolve-activity', '--brief') ||
+      await launchable('query-activities', '--brief', '-a', 'android.intent.action.MAIN', '-c', 'com.oculus.intent.category.VR');
     if (!activity) return null;
     const metadata = JSON.parse(await run('python', [path.join(this.root, 'tools/android_app_label.py'), '--sdk', this.settings.sdk,
       '--serial', `emulator-${this.port}`, '--package', packageName, '--icon-output', imagePath]));

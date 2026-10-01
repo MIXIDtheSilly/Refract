@@ -212,8 +212,13 @@ try {
         $previousCloseEvent = $env:REFRACT_CLOSE_EVENT
         try {
             $env:REFRACT_CLOSE_EVENT = $closeEventName
+            # The headset's performance panel (hold Y + B) polls Android CPU and the game's threads over adb.
+            $env:REFRACT_ADB = $adb; $env:REFRACT_SERIAL = $serial; $env:REFRACT_PACKAGE = $Package
             $sessionProcess = Start-Process -FilePath $HostExe -ArgumentList @('--serve-openxr', '38490', '0', $titleArgument) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\host.log" -RedirectStandardError "$logs\host.err"
-        } finally { $env:REFRACT_CLOSE_EVENT = $previousCloseEvent }
+        } finally {
+            $env:REFRACT_CLOSE_EVENT = $previousCloseEvent
+            Remove-Item Env:REFRACT_ADB, Env:REFRACT_SERIAL, Env:REFRACT_PACKAGE -ErrorAction SilentlyContinue
+        }
         $null = $sessionProcess.Handle  # Keeps ExitCode readable after the process ends.
         # Start the game only once the bridge has an OpenXR session (it then prints the tracking origin).
         for ($waited = 0; $waited -lt 15000 -and !$sessionProcess.HasExited; $waited += 250) {

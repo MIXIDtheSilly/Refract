@@ -76,46 +76,58 @@ private:
 
 class WindowsGpuReceiver {
 public:
-    ~WindowsGpuReceiver() { if (cacheHandle_) CloseHandle(cacheHandle_); }
+    // Host-owned copies of received frames: the one on screen plus a few waiting to be shown in order.
+    static constexpr int kSlots = 4;
+    ~WindowsGpuReceiver() { for (auto& slot : slots_) if (slot.handle) CloseHandle(slot.handle); }
     // Keep a host-owned GPU copy so the guest can reuse shared images as soon
     // as this copy finishes, even when OpenXR rotates through swapchain images.
     bool receive(ID3D11Device* device, ID3D11DeviceContext* context,
                  const protocol::WindowsGpuFrame& frame, uint64_t sequence,
-                 UINT width, UINT height, DXGI_FORMAT targetFormat) {
-        if (session_ == frame.session && sequence_ == sequence && cached_) return true;
+                 UINT width, UINT height, DXGI_FORMAT targetFormat, int slotIndex = 0) {
+        if (slotIndex < 0 || slotIndex >= kSlots) return false;
+        Slot& slot = slots_[slotIndex];
+        if (slot.session == frame.session && slot.sequence == sequence && slot.cached) return true;
         if (!frame.session || frame.formats[0] != frame.formats[1]) return false;
-        // The cache only depends on size and format; the frame's id picks one slot of the runtime's export ring.
-        if (!cached_ || width_ != width || height_ != height || format_ != targetFormat) {
-            cached_.Reset(); renderCache_.Reset(); opened_.clear();
-            if (cacheHandle_) { CloseHandle(cacheHandle_); cacheHandle_ = nullptr; }
+        // The caches only depend on size and format; the frame's id picks one slot of the runtime's export ring.
+        if (width_ != width || height_ != height || format_ != targetFormat) {
+            for (auto& old : slots_) {
+                if (old.handle) CloseHandle(old.handle);
+                old = {};
+            }
+            opened_.clear();
+            width_ = width; height_ = height; format_ = targetFormat;
+        }
+        if (!slot.cached) {
             D3D11_TEXTURE2D_DESC desc{}; desc.Width = width; desc.Height = height;
             desc.MipLevels = 1; desc.ArraySize = 2; desc.SampleDesc.Count = 1; desc.Format = targetFormat;
             desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
             desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
-            if (FAILED(device->CreateTexture2D(&desc, nullptr, &cached_))) return false;
+            if (FAILED(device->CreateTexture2D(&desc, nullptr, &slot.cached))) return false;
             Microsoft::WRL::ComPtr<IDXGIResource1> resource;
-            if (FAILED(cached_.As(&resource)) || FAILED(resource->CreateSharedHandle(nullptr,
-                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &cacheHandle_))) { cached_.Reset(); return false; }
-            width_ = width; height_ = height; format_ = targetFormat;
+            if (FAILED(slot.cached.As(&resource)) || FAILED(resource->CreateSharedHandle(nullptr,
+                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &slot.handle))) { slot.cached.Reset(); return false; }
         }
         const Opened* shared = open(device, frame.session, width, height, targetFormat);
         if (!shared) return false;
-        session_ = frame.session;
-        for (UINT eye = 0; eye < 2; ++eye) context->CopySubresourceRegion(cached_.Get(), eye, 0, 0, 0, shared->eyes[eye].Get(), 0, nullptr);
+        slot.session = frame.session;
+        slot.sequence = UINT64_MAX;
+        for (UINT eye = 0; eye < 2; ++eye) context->CopySubresourceRegion(slot.cached.Get(), eye, 0, 0, 0, shared->eyes[eye].Get(), 0, nullptr);
         if (!receiveCompletion_.wait(device, context)) return false;
-        sequence_ = sequence; return true;
+        slot.sequence = sequence; return true;
     }
-    bool copy_to(ID3D11DeviceContext* context, ID3D11Texture2D* destination, UINT firstSlice = 0, UINT sliceCount = 2) {
+    bool copy_to(ID3D11DeviceContext* context, ID3D11Texture2D* destination, UINT firstSlice = 0, UINT sliceCount = 2, int slotIndex = 0) {
         D3D11_TEXTURE2D_DESC destinationInfo{}; destination->GetDesc(&destinationInfo);
         if (sliceCount < 1 || sliceCount > 2 || firstSlice + sliceCount > destinationInfo.ArraySize) return false;
+        if (slotIndex < 0 || slotIndex >= kSlots || !slots_[slotIndex].handle) return false;
+        Slot& slot = slots_[slotIndex];
         Microsoft::WRL::ComPtr<ID3D11Device> device;
         context->GetDevice(&device);
-        if (!renderCache_) {
+        if (!slot.renderCache) {
             Microsoft::WRL::ComPtr<ID3D11Device1> device1;
             if (FAILED(device.As(&device1)) || FAILED(device1->OpenSharedResource1(
-                    cacheHandle_, IID_PPV_ARGS(&renderCache_)))) return false;
+                    slot.handle, IID_PPV_ARGS(&slot.renderCache)))) return false;
         }
-        for (UINT eye = 0; eye < sliceCount; ++eye) context->CopySubresourceRegion(destination, firstSlice + eye, 0, 0, 0, renderCache_.Get(), eye, nullptr);
+        for (UINT eye = 0; eye < sliceCount; ++eye) context->CopySubresourceRegion(destination, firstSlice + eye, 0, 0, 0, slot.renderCache.Get(), eye, nullptr);
         // The caller holds the cache mutex until this cross-device read is
         // finished. The receiver may then safely overwrite the shared cache.
         return renderCompletion_.wait(device.Get(), context);
@@ -150,12 +162,15 @@ private:
         return &opened_.emplace(session, std::move(pair)).first->second;
     }
 
-    uint64_t session_ = 0, sequence_ = UINT64_MAX;
+    struct Slot {
+        uint64_t session = 0, sequence = UINT64_MAX;
+        HANDLE handle = nullptr;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> cached, renderCache;  // Receive device / render device.
+    };
+    Slot slots_[kSlots];
     UINT width_ = 0, height_ = 0;
     DXGI_FORMAT format_ = DXGI_FORMAT_UNKNOWN;
-    HANDLE cacheHandle_ = nullptr;
     std::map<uint64_t, Opened> opened_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> cached_, renderCache_;
     CopyCompletion receiveCompletion_, renderCompletion_;
 };
 }
