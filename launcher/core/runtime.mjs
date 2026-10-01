@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -44,6 +44,15 @@ export function run(executable, args, { timeout = 120000, onOutput = () => {}, c
     child.on('exit', code => finish(code === 0 ? null : new Error(readableError(`${output.slice(-16384)}\n${errors}`) || `${path.basename(executable)} exited with code ${code}`)));
   });
 }
+// The Meta user id Refract's Platform SDK stand-in reports to games (debug.refract.platform.user_id). Online games
+// tell players apart by it, so every install picks its own. New ids look like Meta's (16-17 digits) and stay below
+// 2^53, so a game that reads them as a double still gets them exactly.
+export function newUserId() {
+  const low = 10n ** 15n, span = 2n ** 53n - low;
+  return String(low + BigInt(`0x${randomBytes(8).toString('hex')}`) % span);
+}
+// Players may enter their own id: any positive integer that fits a signed 64-bit value.
+export const validUserId = id => typeof id === 'string' && /^[1-9]\d{0,18}$/.test(id) && BigInt(id) < 2n ** 63n;
 const psLiteral = value => `'${String(value).replaceAll("'", "''")}'`;
 export function powershellArgs(script, parameters) {
   const invocation = `$ProgressPreference = 'SilentlyContinue'; try { & ${psLiteral(script)} ${Object.entries(parameters).map(([key, value]) => {
@@ -251,7 +260,8 @@ export class Runtime {
     if (!/^[A-Za-z0-9_./]+$/.test(game.activity || '') || game.activity.split('/')[0] !== game.package) throw new Error('Invalid launch activity. Refresh installed games.');
     const args = powershellArgs(path.join(this.root, 'tools/run_windows_game.ps1'), { Avd: this.settings.avd, Port: this.port,
       Sdk: this.settings.sdk, MemoryMB: this.settings.memoryMB, Package: game.package, Activity: game.activity, GameName: game.name,
-      ...(game.owned ? { Owned: true } : {}), ...(mode === 'pc' ? { PcViewer: true } : {}) });
+      ...(game.owned ? { Owned: true } : {}), ...(mode === 'pc' ? { PcViewer: true } : {}),
+      ...(validUserId(this.settings.userId) ? { UserId: this.settings.userId } : {}) });
     // Windows PowerShell can exit successfully without executing its command
     // when CREATE_NEW_PROCESS_GROUP/detached is combined with no console.
     const child = spawn('powershell.exe', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });

@@ -13,6 +13,9 @@ param(
     [switch]$GpuSharing,
     # The launcher passes -Owned for games Meta lists as the signed-in account's entitlements.
     [switch]$Owned,
+    # The Meta user id games see (debug.refract.platform.user_id). The launcher passes its per-install id, so
+    # online games tell Refract players apart. Without it the platform stand-in derives one from ANDROID_ID.
+    [ValidatePattern('^[1-9][0-9]{0,18}$')][string]$UserId,
     # -PcViewer shows the game in a window on this PC (viewer\build\refract_viewer.exe) with keyboard, mouse and
     # gamepad input (scripts\pose_input_server.py) instead of in a VR headset through the host bridge.
     [switch]$PcViewer,
@@ -117,6 +120,10 @@ try {
     $ownedProp = if ($Owned -or $Package -in $ownedGames) { '1' } else { '0' }
     $ownership = Invoke-Adb @('shell', 'setprop', "debug.refract.platform.owned.$Package", $ownedProp)
     if ($ownership.Code -ne 0) { throw "Could not apply the owned-game setting for ${Package}: $($ownership.Error)" }
+    if ($UserId) {
+        $user = Invoke-Adb @('shell', 'setprop', 'debug.refract.platform.user_id', $UserId)
+        if ($user.Code -ne 0) { throw "Could not set the Meta user id: $($user.Error)" }
+    }
     # Meta's OVRPlugin rejects an otherwise functional OpenXR runtime when its
     # reported name does not identify the Oculus compatibility environment.
     $runtimeName = Invoke-Adb @('shell', 'setprop', 'debug.refract.runtime_name', 'Oculus')

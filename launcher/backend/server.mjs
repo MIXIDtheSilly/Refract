@@ -17,7 +17,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { MetaAuth, QuestStore, appId } from '../core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from '../core/download.mjs';
 import { State } from '../core/state.mjs';
-import { Runtime, run, validPackage, audioBackends } from '../core/runtime.mjs';
+import { Runtime, run, validPackage, audioBackends, newUserId, validUserId } from '../core/runtime.mjs';
 import { Emulator, redact } from '../core/emulator.mjs';
 import { checkSetup, fixSetup, headsetStatus, refreshPath } from '../core/setup.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
@@ -268,7 +268,7 @@ const methods = {
     await fs.mkdir(target, { recursive: true }); return { openPath: target };
   },
   settings: async values => {
-    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'cores', 'showWindow', 'audio', 'hostMic', 'keepEmulator'];
+    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'cores', 'showWindow', 'audio', 'hostMic', 'keepEmulator', 'userId'];
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
     if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
     const settings = { ...state.data.settings };
@@ -278,6 +278,8 @@ const methods = {
     for (const key of ['sdk', 'downloadDir']) if (typeof settings[key] !== 'string' || !path.isAbsolute(settings[key])) throw new Error('Select absolute Windows paths.');
     if (!Number.isInteger(settings.cores) || settings.cores < 1 || settings.cores > 6 || !audioBackends.includes(settings.audio) ||
       ['showWindow', 'hostMic', 'keepEmulator'].some(key => typeof settings[key] !== 'boolean')) throw new Error('Check the emulator CPU cores (1 to 6) and audio settings.');
+    settings.userId = String(settings.userId ?? '').trim();
+    if (!validUserId(settings.userId)) throw new Error('The user ID must be a whole number from 1 to 9223372036854775807.');
     state.data.settings = settings; runtime.settings = settings; await persist();
   },
   // The shell opens these after validating them.
@@ -349,6 +351,14 @@ const loaded = (async () => {
   if (!await isSdk(state.data.settings.sdk)) state.data.settings.sdk = await findSdk();
   // Refract no longer needs games patched; drop the old ovrport setting.
   delete state.data.settings.ovrportCli;
+  // Every install gets its own Meta user id, or online games see all Refract players as one person. A checkout that
+  // already has one for scripts\launch.ps1 (scripts\platform_user_id.txt) keeps it, so its game accounts stay.
+  if (!validUserId(state.data.settings.userId)) {
+    const kept = (await fs.readFile(path.join(root, 'scripts/platform_user_id.txt'), 'utf8').catch(() => ''))
+      .split(/\r?\n/).map(s => s.trim()).find(s => s && !s.startsWith('#'));
+    state.data.settings.userId = validUserId(kept) ? kept : newUserId();
+    await state.save();
+  }
   runtime = new Runtime(root, state.data.settings);
   emulator = new Emulator(runtime, root, state.directory);
 })();

@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Runtime, headsetProblem, readableError, run, powershellArgs } from '../core/runtime.mjs';
+import { Runtime, headsetProblem, readableError, run, powershellArgs, newUserId, validUserId } from '../core/runtime.mjs';
+
+test('each install gets its own Meta user id', () => {
+  const ids = new Set(Array.from({ length: 1000 }, newUserId));
+  assert.equal(ids.size, 1000);
+  for (const id of ids) { assert.ok(validUserId(id)); assert.ok(BigInt(id) >= 10n ** 15n && BigInt(id) < 2n ** 53n); }
+  assert.ok(validUserId('28315021954821081') && validUserId('1') && validUserId('9223372036854775807'));
+  for (const bad of ['', '0', '012', '-5', '1.5', '12a', '9223372036854775808', 123]) assert.equal(validUserId(bad), false, String(bad));
+});
 
 test('PowerShell CLIXML errors become the one readable message', () => {
   // What Windows PowerShell wrote when the emulator quit (seen in the launcher before this fix).
@@ -29,13 +37,13 @@ test('Play on PC runs the session script with -PcViewer, VR without it', { skip:
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'tools'));
   await fs.writeFile(path.join(root, 'tools/run_windows_game.ps1'), `
-param($Avd, $Port, $Sdk, $MemoryMB, $Package, $Activity, $GameName, [switch]$Owned, [switch]$PcViewer)
-Write-Output "PC:$PcViewer"
+param($Avd, $Port, $Sdk, $MemoryMB, $Package, $Activity, $GameName, [switch]$Owned, [switch]$PcViewer, $UserId)
+Write-Output "PC:$PcViewer USER:$UserId"
 exit 3
 `);
-  const runtime = new Runtime(root, { avd:'test',port:5580,sdk:root,memoryMB:8192 });
+  const runtime = new Runtime(root, { avd:'test',port:5580,sdk:root,memoryMB:8192,userId:'28315021954821081' });
   const game = { id:'local:com.example.game',package:'com.example.game',activity:'com.example.game/.Main',name:'Test' };
-  for (const [mode, expected] of [['pc', 'PC:True'], ['vr', 'PC:False']]) {
+  for (const [mode, expected] of [['pc', 'PC:True USER:28315021954821081'], ['vr', 'PC:False USER:28315021954821081']]) {
     const output = await new Promise(resolve => { runtime.launch(game, (code, text) => resolve(text), mode); assert.equal(runtime.mode, mode); });
     assert.match(output, new RegExp(expected));
     assert.equal(runtime.mode, null);
