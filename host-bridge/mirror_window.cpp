@@ -73,6 +73,7 @@ LRESULT CALLBACK MirrorWindow::window_proc(HWND window, UINT message, WPARAM w, 
         }
         if (message == WM_DESTROY) { self->closed_ = true; self->window_ = nullptr; return 0; }
         if (message == WM_SIZE) { self->layout(); return 0; }
+        if (message == WM_KEYDOWN && w == VK_F1 && !(l & (1 << 30))) { self->statsToggle_ = true; return 0; }
     }
     return DefWindowProcW(window, message, w, l);
 }

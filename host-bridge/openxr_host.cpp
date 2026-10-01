@@ -3,6 +3,7 @@
 #include "perf_stats.h"
 #include "mirror_window.h"
 #include "loading_screen.h"
+#include "stats_overlay.h"
 #include "windows_gpu_receiver.h"
 #include "debug_frame_capture.h"
 #include "windows_gpu_frame.h"
@@ -21,9 +22,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <array>
 #include <memory>
 #include <mutex>
+#include <atomic>
+#include <condition_variable>
 #include <string_view>
 #include <string>
 #include <thread>
@@ -42,6 +46,8 @@
 #include <d3d11.h>
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
+#include <timeapi.h>
+#include "android_stats.h"
 #endif
 
 #include <openxr/openxr.h>
@@ -304,37 +310,106 @@ private:
 #endif
 };
 
+// Received game images waiting to be shown, in arrival order, and the one on screen ("current").
+// A GPU frame lives in one of the receiver's cache slots; other frames carry their pixels.
 struct HostImageFrame {
+    struct Entry {
+        refract::protocol::ImageFrameHeader header{};
+        refract::protocol::ImageProjection projection{};
+        std::shared_ptr<std::vector<uint8_t>> pixels;
+        int slot = -1;
+        int64_t poseFrame = -1;  // The display frame whose pose it was rendered with; -1: unknown.
+    };
+
+    // Receive thread, before copying a GPU frame: a cache slot that is neither on screen nor queued.
+    // When all are taken, the oldest queued frame gives up its slot (it would have been shown late).
+    int free_slot(int slots)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (int slot = 0; slot < slots; ++slot) {
+            bool used = hasFrame && current.slot == slot;
+            for (const auto& entry : queue) used = used || entry.slot == slot;
+            if (!used) return slot;
+        }
+        for (auto it = queue.begin(); it != queue.end(); ++it) {
+            if (it->slot < 0) continue;
+            const int slot = it->slot;
+            queue.erase(it);
+            ++dropped;
+            return slot;
+        }
+        return -1;
+    }
+
     void store(const refract::protocol::ImageFrameHeader& newHeader, std::vector<uint8_t>&& newPixels,
-               const refract::protocol::ImageProjection& newProjection = {})
+               const refract::protocol::ImageProjection& newProjection = {}, int slot = -1, int64_t poseFrame = -1)
     {
         static refract::protocol::FrameIntervals stats("host-image-arrival");
         stats.record();
-        std::lock_guard<std::mutex> lock(mutex);
-        header = newHeader;
-        projection = newProjection;
-        pixels = std::make_shared<std::vector<uint8_t>>(std::move(newPixels));
-        hasFrame = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            queue.push_back({newHeader, newProjection, std::make_shared<std::vector<uint8_t>>(std::move(newPixels)), slot, poseFrame});
+            while (queue.size() > 8) { queue.pop_front(); ++dropped; }
+        }
+        arrived.notify_all();
     }
 
-    bool snapshot(refract::protocol::ImageFrameHeader* outHeader, std::shared_ptr<const std::vector<uint8_t>>* outPixels,
-                  refract::protocol::ImageProjection* outProjection)
+    // A failed GPU import may have left a cache slot partly written: show nothing old until the next frame.
+    void invalidate()
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if (!hasFrame || pixels == nullptr) {
-            return false;
+        hasFrame = false;
+        queue.clear();
+    }
+
+    // Main thread, once per display frame: picks the frame to show. Pose-tagged frames: the newest one
+    // rendered from a pose no newer than targetPose, waiting until deadlineNs for targetPose's own frame
+    // (frames arrive in pose order, so a newer one means the game skipped it). Untagged frames (mixed
+    // layer batches, loading, older runtimes): the newest, waiting for one while the newest is on screen.
+    // Returns whether a new frame went on screen; *skipped counts frames passed over to reach it.
+    bool advance(int64_t targetPose, uint64_t deadlineNs, uint64_t* waitedNs, uint32_t* skipped)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        auto showable = [&](const Entry& entry) { return entry.poseFrame < 0 || targetPose < 0 || entry.poseFrame <= targetPose; };
+        auto ready = [&] {
+            if (queue.empty()) return false;
+            const Entry& newest = queue.back();
+            return newest.poseFrame < 0 || targetPose < 0 || newest.poseFrame >= targetPose;
+        };
+        const uint64_t start = monotonic_time_ns();
+        // Nothing on screen yet (loading): no waiting. Windows timer waits overshoot by up to a
+        // millisecond, so the last stretch is polled.
+        for (uint64_t now = start; hasFrame && now < deadlineNs && !ready(); now = monotonic_time_ns()) {
+            const uint64_t left = deadlineNs - now;
+            if (left > 1'500'000) arrived.wait_for(lock, std::chrono::nanoseconds(left - 1'000'000));
+            else { lock.unlock(); std::this_thread::yield(); lock.lock(); }
         }
-        *outHeader = header;
-        *outProjection = projection;
-        *outPixels = pixels;
+        *waitedNs = monotonic_time_ns() - start;
+        size_t pick = SIZE_MAX;
+        for (size_t i = 0; i < queue.size(); ++i) if (showable(queue[i])) pick = i;
+        *skipped = 0;
+        if (pick == SIZE_MAX) return false;
+        *skipped = static_cast<uint32_t>(pick);
+        current = std::move(queue[pick]);
+        queue.erase(queue.begin(), queue.begin() + pick + 1);
+        hasFrame = true;
+        return true;
+    }
+
+    bool snapshot(Entry* out)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!hasFrame || current.pixels == nullptr) return false;
+        *out = current;
         return true;
     }
 
     std::mutex mutex;
-    refract::protocol::ImageFrameHeader header{};
-    refract::protocol::ImageProjection projection{};
-    std::shared_ptr<std::vector<uint8_t>> pixels;
+    std::condition_variable arrived;
+    std::deque<Entry> queue;
+    Entry current;
     bool hasFrame = false;
+    uint64_t dropped = 0;
 };
 
 class OpenXrPoseSource {
@@ -357,6 +432,7 @@ public:
         }
         if (appLocalSpace_ != XR_NULL_HANDLE && destroySpace_) destroySpace_(appLocalSpace_);
 #if defined(_WIN32)
+        if (statsSwapchain_ != XR_NULL_HANDLE && destroySwapchain_ != nullptr) destroySwapchain_(statsSwapchain_);
         if (projectionSwapchain_ != XR_NULL_HANDLE && destroySwapchain_ != nullptr) {
             destroySwapchain_(projectionSwapchain_);
             projectionSwapchain_ = XR_NULL_HANDLE;
@@ -465,6 +541,15 @@ public:
             if (handDataSourceEnabled_) extensions.push_back(XR_EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME);
         }
         XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
+        gameName_ = gameName;
+        if (const char* lag = std::getenv("REFRACT_FRAME_LAG"); lag && std::atoi(lag) >= 1 && std::atoi(lag) <= 3) {
+            fixedLag_ = frameLag_ = std::atoi(lag);
+        }
+#if defined(_WIN32)
+        timeBeginPeriod(1);  // The frame pickup waits a few milliseconds; default timers overshoot by up to 15.6 ms.
+        start_android_stats();
+        if (const char* shown = std::getenv("REFRACT_VR_STATS"); shown && std::strcmp(shown, "1") == 0) toggle_stats();
+#endif
         std::string applicationName = gameName + " \xe2\x80\x93 Refract";
         size_t nameLength = (std::min)(applicationName.size(), size_t(XR_MAX_APPLICATION_NAME_SIZE - 1));
         while (nameLength < applicationName.size() && nameLength &&
@@ -612,6 +697,16 @@ public:
                 result = waitFrame_(session_, &waitInfo, &frameState);
             }
             if (result == XR_SUCCESS) {
+                frameStartNs_ = monotonic_time_ns();
+                displayPeriod_ = frameState.predictedDisplayPeriod;
+                {
+                    std::lock_guard lock(pacingMutex_);
+                    pacingFrame_ = static_cast<int64_t>(sequence);
+                    pacingFrameStartNs_ = frameStartNs_.load();
+                    frameStartByFrame_[sequence % frameStartByFrame_.size()] = {static_cast<int64_t>(sequence), pacingFrameStartNs_};
+                    if (!pickupBudgetNs_) pickupBudgetNs_ = pickup_budget(frameState.predictedDisplayPeriod, &fixedBudget_);
+                }
+                count_missed_frames(frameState.predictedDisplayTime, frameState.predictedDisplayPeriod);
                 frameDisplayTime = frameState.predictedDisplayTime;
                 // Poses are predicted to the runtime's display time (~38 ms ahead over Steam Link).
                 // REFRACT_POSE_PREDICTION=0 locates the newest tracked poses instead: nothing overshoots, but
@@ -730,10 +825,11 @@ public:
             std::array<XrCompositionLayerProjectionView, 2> projectionViews{};
             XrCompositionLayerProjection projectionLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
             std::array<XrCompositionLayerQuad, refract::protocol::kMaxCompositionLayers> quadLayers{};
-            const XrCompositionLayerBaseHeader* layers[refract::protocol::kMaxCompositionLayers]{};
+            const XrCompositionLayerBaseHeader* layers[refract::protocol::kMaxCompositionLayers + 2]{};
             bool mixedProjection = false;
             uint32_t layerCount = 0;
 #if defined(_WIN32)
+            pick_image(static_cast<int64_t>(sequence));
             if (projectionSwapchain_ != XR_NULL_HANDLE &&
                 update_projection_layer(frameDisplayTime, projectionViews, projectionLayer, quadLayers, layerCount, mixedProjection)) {
                 if (layerCount) {
@@ -747,6 +843,9 @@ public:
                     layerCount = 1;
                 }
             }
+            if (mirror_.take_stats_toggle()) toggle_stats();
+            XrCompositionLayerQuad statsQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+            if (place_stats_panel(statsQuad)) layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&statsQuad);
 #endif
 
             XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
@@ -754,10 +853,16 @@ public:
             endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             endInfo.layerCount = layerCount;
             endInfo.layers = layerCount > 0 ? layers : nullptr;
+            const uint64_t submitNs = monotonic_time_ns();
             {
                 static refract::protocol::PerfStats stats("host-end-frame");
                 refract::protocol::PerfScope scope(stats);
                 result = endFrame_(session_, &endInfo);
+            }
+            if (statsVisible_) {
+                ++statsHostFrames_;
+                statsWork_.push_back((submitNs - frameStartNs_.load()) / 1e6);
+                statsEndFrame_.push_back((monotonic_time_ns() - submitNs) / 1e6);
             }
             if (result != XR_SUCCESS) {
                 std::fprintf(stderr, "Refract OpenXR: xrEndFrame failed: %s (%d)\n", xr_result_name(result), result);
@@ -771,6 +876,24 @@ public:
     refract::protocol::PoseFrame latest_frame(uint64_t sequence)
     {
         std::lock_guard<std::mutex> lock(frameMutex_);
+        refract::protocol::PoseFrame frame = latest_;
+        frame.sequence = sequence;
+        frame.monotonic_time_ns = monotonic_time_ns();
+        return frame;
+    }
+
+    // The pose stream sends each pose the moment make_frame locates it: one per frame of the PC runtime,
+    // which the Android runtime's frame_sync starts the game's frame on. A timer here ran on its own
+    // clock (Windows rounded its 11.1 ms sleep up to ~15.6 ms), so the game rendered at ~64 fps with
+    // poses up to a frame old, beating against the 90 Hz display. Without a frame loop (no session
+    // yet), the newest pose goes out every ~11 ms.
+    refract::protocol::PoseFrame next_frame(uint64_t sequence)
+    {
+        std::unique_lock<std::mutex> lock(frameMutex_);
+        frameReady_.wait_for(lock, std::chrono::microseconds(11111), [&] { return sentFrames_ != publishedFrames_; });
+        sentFrames_ = publishedFrames_;
+        // Frames come back tagged with the stream sequence of their pose; remember its display frame.
+        poseFrameBySequence_[sequence % poseFrameBySequence_.size()] = {sequence, latest_.sequence};
         refract::protocol::PoseFrame frame = latest_;
         frame.sequence = sequence;
         frame.monotonic_time_ns = monotonic_time_ns();
@@ -806,6 +929,7 @@ public:
                 activeMixedBank_ = pendingMixedBank_; activeMixedCount_ = count;
                 auto complete = mixedFrames_[activeMixedBank_][0].header;
                 complete.sequence = header.sequence; // Publish only after all GPU copies complete.
+                record_arrival(-1);
                 imageFrame_->store(complete, std::move(pixels), mixedFrames_[activeMixedBank_][0].projection);
                 pendingMixedCount_ = 0;
             }
@@ -816,30 +940,405 @@ public:
                 header.width > projectionWidth_ || header.height > projectionHeight_) return false;
             refract::protocol::WindowsGpuFrame gpu{};
             std::memcpy(&gpu, pixels.data(), sizeof(gpu));
-            if (!gpuReceiver_.receive(receiveDevice_.get(), receiveContext_.get(), gpu,
+            const int slot = imageFrame_->free_slot(WindowsGpuReceiver::kSlots);
+            if (slot < 0 || !gpuReceiver_.receive(receiveDevice_.get(), receiveContext_.get(), gpu,
                     header.sequence, header.width, header.height,
-                    static_cast<DXGI_FORMAT>(projectionFormat_))) {
+                    static_cast<DXGI_FORMAT>(projectionFormat_), slot)) {
                 // A failed import may invalidate the receiver cache. Do not
                 // display old metadata against a partial or missing cache.
-                std::lock_guard frameLock(imageFrame_->mutex);
-                imageFrame_->hasFrame = false;
+                imageFrame_->invalidate();
                 return false;
             }
+            const int64_t poseFrame = pose_frame_of_tag(header.reserved);
+            record_arrival(poseFrame);
+            imageFrame_->store(header, std::move(pixels), projection, slot, poseFrame);
+            return true;
         }
 #else
         if ((header.version == refract::protocol::kWindowsGpuFrameVersion || header.version == refract::protocol::kQuadGpuFrameVersion)) return false;
 #endif
+        record_arrival(-1);
         imageFrame_->store(header, std::move(pixels), projection);
         return true; // ACK only after the GPU copy and metadata publication.
     }
+
+    // How long into a display frame the bridge may wait for the game frame it should show. The longer,
+    // the more game frames make it one display frame after their pose instead of two (SteamVR holds the
+    // bridge ~9 ms of each 11 ms frame, so its own work leaves room), but past the runtime's submit
+    // deadline SteamVR misses frames: adapt_budget starts at half a frame and backs off when it does.
+    // REFRACT_PICKUP_MS=<ms> holds a fixed budget instead.
+    static uint64_t pickup_budget(XrDuration period, bool* fixed)
+    {
+        if (const char* text = std::getenv("REFRACT_PICKUP_MS"); text && *text) {
+            const double ms = std::atof(text);
+            if (ms >= 0 && ms < 20) {
+                *fixed = true;
+                return static_cast<uint64_t>(ms * 1e6);
+            }
+        }
+        return refract::protocol::valid_display_period(period) ? static_cast<uint64_t>(period) / 2 : 5'500'000;
+    }
+
+    // Frame loop: display frames SteamVR skipped, seen as a jump in its predicted display time.
+    void count_missed_frames(XrTime displayTime, XrDuration period)
+    {
+        const uint64_t now = monotonic_time_ns();
+        if (lastDisplayTime_ && refract::protocol::valid_display_period(period) && displayTime > lastDisplayTime_) {
+            const int64_t missed = (displayTime - lastDisplayTime_ + period / 2) / period - 1;
+            if (missed > 0) {
+                for (int64_t i = 0; i < (std::min<int64_t>)(missed, 8); ++i) missedFrameNs_.push_back(now);
+                statsMissed_ += static_cast<uint64_t>(missed);
+            }
+        }
+        lastDisplayTime_ = displayTime;
+        while (!missedFrameNs_.empty() && now - missedFrameNs_.front() > 10'000'000'000ull) missedFrameNs_.pop_front();
+    }
+
+    // Twice a second, with adapt_lag: half a millisecond less budget after two SteamVR misses within 2 s,
+    // half a millisecond more (up to 65% of the frame) after 10 s without any.
+    void adapt_budget(uint64_t now)
+    {
+        const XrDuration period = displayPeriod_;
+        if (fixedBudget_ || !refract::protocol::valid_display_period(period)) return;
+        const auto recent = std::count_if(missedFrameNs_.begin(), missedFrameNs_.end(),
+            [&](uint64_t at) { return now - at <= 2'000'000'000ull; });
+        std::lock_guard lock(pacingMutex_);
+        const uint64_t floor = static_cast<uint64_t>(period) / 4, cap = static_cast<uint64_t>(period) * 65 / 100;
+        if (recent >= 2 && pickupBudgetNs_ > floor && now - budgetChangedNs_ >= 1'000'000'000ull) {
+            pickupBudgetNs_ = (std::max)(floor, pickupBudgetNs_ - 500'000);
+            budgetChangedNs_ = now;
+            std::fprintf(stderr, "Refract Pacing: SteamVR missed %d frames; pickup budget lowered to %.1f ms\n",
+                static_cast<int>(recent), pickupBudgetNs_ / 1e6);
+        } else if (missedFrameNs_.empty() && pickupBudgetNs_ < cap && now - budgetChangedNs_ >= 10'000'000'000ull) {
+            pickupBudgetNs_ = (std::min)(cap, pickupBudgetNs_ + 500'000);
+            budgetChangedNs_ = now;
+        }
+    }
+
+    // Main thread, before the frame's layers: puts the game frame due now on screen (see HostImageFrame::advance).
+    void pick_image(int64_t frame)
+    {
+        const uint64_t now = monotonic_time_ns();
+        adapt_lag(now);
+        uint64_t deadline = 0;
+        {
+            std::lock_guard lock(pacingMutex_);
+            deadline = pacingFrameStartNs_ + pickupBudgetNs_;
+        }
+        uint64_t waited = 0;
+        uint32_t skipped = 0;
+        const bool fresh = imageFrame_->advance(frame - frameLag_, deadline, &waited, &skipped);
+        HostImageFrame::Entry shown;
+        if (statsVisible_) {
+            statsWaits_.push_back(waited / 1e6);
+            statsSkipped_ += skipped;
+            if (fresh && imageFrame_->snapshot(&shown) && shown.poseFrame >= 0) statsLags_.push_back(static_cast<double>(frame - shown.poseFrame));
+        }
+    }
+
+    // The display frame whose pose a tagged image was rendered with (-1: untagged or too old).
+    int64_t pose_frame_of_tag(uint32_t tag)
+    {
+        if (!tag) return -1;
+        std::lock_guard<std::mutex> lock(frameMutex_);
+        const auto& entry = poseFrameBySequence_[(tag - 1) % poseFrameBySequence_.size()];
+        return static_cast<uint32_t>(entry.first) == tag - 1 ? static_cast<int64_t>(entry.second) : -1;
+    }
+
+    // Image thread, per arriving game image. For a pose-tagged one: the turnaround from sending its pose
+    // to its arrival, and the lag (in display frames after its pose) it could be shown at, which pacing
+    // uses to choose the lag it holds.
+    void record_arrival(int64_t poseFrame)
+    {
+        const uint64_t now = monotonic_time_ns();
+        double turnaroundMs = -1;
+        {
+            std::lock_guard lock(pacingMutex_);
+            if (!pacingFrameStartNs_) return;
+            const auto& sent = frameStartByFrame_[static_cast<size_t>(poseFrame < 0 ? 0 : poseFrame) % frameStartByFrame_.size()];
+            if (poseFrame >= 0 && sent.first == poseFrame && poseFrame <= pacingFrame_) {
+                // Shown this frame if it beat this frame's pickup deadline, else the next one.
+                const int64_t lag = pacingFrame_ - poseFrame + (now > pacingFrameStartNs_ + pickupBudgetNs_ ? 1 : 0);
+                neededLags_[neededLagCount_++ % neededLags_.size()] = static_cast<uint8_t>((std::min<int64_t>)(lag, 255));
+                turnaroundMs = (now - sent.second) / 1e6;
+            }
+        }
+        static refract::protocol::PerfStats stats("host-image-turnaround");
+        if (turnaroundMs >= 0) stats.record(turnaroundMs);
+        if (!statsVisible_) return;
+        std::lock_guard lock(statsMutex_);
+        if (turnaroundMs >= 0) statsTurnarounds_.push_back(turnaroundMs);
+        if (statsLastArrivalNs_) statsIntervals_.push_back((now - statsLastArrivalNs_) / 1e6);
+        statsLastArrivalNs_ = now;
+    }
+
+    // Twice a second: the smallest lag that 98% of the last ~2 s of frames arrived in time for. It rises
+    // at once when frames start arriving late, and drops only after 3 s in which 99% would have made it.
+    // REFRACT_FRAME_LAG=<n> holds a fixed lag instead.
+    void adapt_lag(uint64_t now)
+    {
+        if (now - lagCheckedNs_ < 500'000'000ull) return;
+        lagCheckedNs_ = now;
+        adapt_budget(now);
+        if (fixedLag_ > 0) return;
+        std::array<uint32_t, 6> counts{};
+        size_t samples = 0;
+        {
+            std::lock_guard lock(pacingMutex_);
+            samples = (std::min<size_t>)(neededLagCount_, 180);
+            for (size_t i = 0; i < samples; ++i) {
+                const uint8_t lag = neededLags_[(neededLagCount_ - 1 - i) % neededLags_.size()];
+                ++counts[(std::min<size_t>)(lag, counts.size() - 1)];
+            }
+        }
+        if (samples < 30) return;
+        auto within = [&](int lag) {
+            uint32_t total = 0;
+            for (int i = 0; i <= lag && i < static_cast<int>(counts.size()); ++i) total += counts[i];
+            return static_cast<double>(total) / samples;
+        };
+        if (within(frameLag_) < 0.98 && frameLag_ < 3) {  // Lag 3 fills the receiver: on screen + three queued.
+            ++frameLag_;
+            lagChangedNs_ = now;
+            std::fprintf(stderr, "Refract Pacing: lag raised to %d frames\n", frameLag_);
+        } else if (frameLag_ > 1 && samples >= 180 && now - lagChangedNs_ >= 3'000'000'000ull && within(frameLag_ - 1) >= 0.99) {
+            --frameLag_;
+            lagChangedNs_ = now;
+            std::fprintf(stderr, "Refract Pacing: lag lowered to %d frames\n", frameLag_);
+        }
+    }
+
+#if defined(_WIN32)
+    // The headset's performance panel: Y + B held for a second, F1 in the mirror window, or
+    // REFRACT_VR_STATS=1 from the start. Head-locked, up and to the left of the view centre.
+    void toggle_stats()
+    {
+        statsVisible_ = !statsVisible_;
+        std::fprintf(stderr, "Refract Stats: panel %s\n", statsVisible_ ? "shown" : "hidden");
+        if (androidStats_) androidStats_->enabled = statsVisible_.load();
+        std::lock_guard lock(statsMutex_);
+        statsIntervals_.clear();
+        statsTurnarounds_.clear();
+        statsLastArrivalNs_ = 0;
+        statsWaits_.clear();
+        statsLags_.clear();
+        statsSkipped_ = statsMissed_ = 0;
+        statsWindowStartNs_ = 0;
+        statsUpdatedNs_ = 0;
+    }
+
+    // Android CPU and the game's busiest threads, polled over adb like the PC viewer's overlay.
+    // run_windows_game.ps1 passes where adb is and which device and game to watch.
+    void start_android_stats()
+    {
+        const char* adb = std::getenv("REFRACT_ADB");
+        const char* serial = std::getenv("REFRACT_SERIAL");
+        const char* package = std::getenv("REFRACT_PACKAGE");
+        if (!adb || !serial || !package || !*adb || !*serial || !*package) return;
+        androidStats_ = std::make_unique<AndroidStats>(adb, serial, package);
+        androidStats_->enabled = false;
+        androidStats_->start();
+    }
+
+    bool create_stats_swapchain()
+    {
+        constexpr uint32_t kWidth = 1200, kHeight = 620, kRows = 10;
+        if (!statsOverlay_.prepare(kWidth, kHeight, kRows)) return false;
+        uint32_t count = 0;
+        if (enumerateSwapchainFormats_(session_, 0, &count, nullptr) != XR_SUCCESS || !count) return false;
+        std::vector<int64_t> formats(count);
+        if (enumerateSwapchainFormats_(session_, count, &count, formats.data()) != XR_SUCCESS) return false;
+        // The panel's bytes are display (sRGB) values.
+        int64_t chosen = 0;
+        for (int64_t preferred : {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+                                  DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM}) {
+            if (!chosen && std::find(formats.begin(), formats.end(), preferred) != formats.end()) chosen = preferred;
+        }
+        if (!chosen) return false;
+        statsSwapRedBlue_ = chosen == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || chosen == DXGI_FORMAT_B8G8R8A8_UNORM;
+        XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        info.format = chosen;
+        info.sampleCount = 1;
+        info.width = kWidth;
+        info.height = kHeight;
+        info.faceCount = 1;
+        info.arraySize = 1;
+        info.mipCount = 1;
+        if (createSwapchain_(session_, &info, &statsSwapchain_) != XR_SUCCESS) return false;
+        if (enumerateSwapchainImages_(statsSwapchain_, 0, &count, nullptr) != XR_SUCCESS || !count) return false;
+        statsImages_.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+        return enumerateSwapchainImages_(statsSwapchain_, count, &count,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(statsImages_.data())) == XR_SUCCESS;
+    }
+
+    // Recomputes the numbers twice a second and fills the quad that shows them. False: nothing to show.
+    bool place_stats_panel(XrCompositionLayerQuad& quad)
+    {
+        if (!statsVisible_ || statsFailed_) return false;
+        if (statsSwapchain_ == XR_NULL_HANDLE && !create_stats_swapchain()) {
+            std::fprintf(stderr, "Refract Stats: could not create the panel; hiding it\n");
+            statsFailed_ = true;
+            return false;
+        }
+        const uint64_t now = monotonic_time_ns();
+        if (!statsUpdatedNs_ || now - statsUpdatedNs_ >= 500'000'000ull) {
+            statsUpdatedNs_ = now;
+            statsOverlay_.draw(stats_lines(now));
+            upload_stats_panel();
+        }
+        if (!statsUploaded_) return false;
+        // Facing the eye from up and to the left of the view centre.
+        const XrVector3f position{-0.17f, 0.10f, -0.9f};
+        const float length = std::sqrt(position.x * position.x + position.y * position.y + position.z * position.z);
+        const XrVector3f toEye{-position.x / length, -position.y / length, -position.z / length};
+        // Shortest rotation of the quad's +Z normal onto toEye.
+        XrQuaternionf orientation{-toEye.y, toEye.x, 0.0f, 1.0f + toEye.z};
+        const float norm = std::sqrt(orientation.x * orientation.x + orientation.y * orientation.y + orientation.w * orientation.w);
+        orientation = {orientation.x / norm, orientation.y / norm, 0.0f, orientation.w / norm};
+        constexpr float kPanelWidth = 0.42f;
+        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;  // Premultiplied.
+        quad.space = viewSpace_;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = statsSwapchain_;
+        quad.subImage.imageRect.extent = {static_cast<int32_t>(statsOverlay_.width()), static_cast<int32_t>(statsOverlay_.height())};
+        quad.pose = {orientation, position};
+        quad.size = {kPanelWidth, kPanelWidth * statsOverlay_.height() / statsOverlay_.width()};
+        return true;
+    }
+
+    void upload_stats_panel()
+    {
+        uint32_t index = 0;
+        XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (acquireSwapchainImage_(statsSwapchain_, &acquire, &index) != XR_SUCCESS || index >= statsImages_.size()) return;
+        XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wait.timeout = XR_INFINITE_DURATION;
+        if (waitSwapchainImage_(statsSwapchain_, &wait) == XR_SUCCESS) {
+            const uint8_t* pixels = statsOverlay_.pixels();
+            if (statsSwapRedBlue_) {
+                statsBgra_.assign(pixels, pixels + static_cast<size_t>(statsOverlay_.width()) * statsOverlay_.height() * 4);
+                for (size_t i = 0; i < statsBgra_.size(); i += 4) std::swap(statsBgra_[i], statsBgra_[i + 2]);
+                pixels = statsBgra_.data();
+            }
+            d3dContext_.get()->UpdateSubresource(statsImages_[index].texture, 0, nullptr, pixels, statsOverlay_.width() * 4, 0);
+        }
+        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        if (releaseSwapchainImage_(statsSwapchain_, &release) == XR_SUCCESS) statsUploaded_ = true;
+    }
+
+    std::vector<StatsOverlay::Line> stats_lines(uint64_t now)
+    {
+        constexpr uint32_t kGood = 0x6FDC8C, kWarn = 0xF2C94C, kBad = 0xFF6B6B, kText = 0xEDEDED, kDim = 0x9A9A9A;
+        std::vector<double> intervals, turnarounds;
+        {
+            std::lock_guard lock(statsMutex_);
+            intervals.swap(statsIntervals_);
+            turnarounds.swap(statsTurnarounds_);
+        }
+        const double seconds = statsWindowStartNs_ ? (now - statsWindowStartNs_) / 1e9 : 0.0;
+        statsWindowStartNs_ = now;
+        auto percentile = [](std::vector<double>& values, double fraction) {
+            if (values.empty()) return 0.0;
+            std::sort(values.begin(), values.end());
+            return values[static_cast<size_t>((values.size() - 1) * fraction)];
+        };
+        auto average = [](const std::vector<double>& values) {
+            double total = 0;
+            for (double value : values) total += value;
+            return values.empty() ? 0.0 : total / values.size();
+        };
+        const double hz = displayPeriod_ > 0 ? 1e9 / displayPeriod_ : 0.0;
+        const double periodMs = displayPeriod_ > 0 ? displayPeriod_ / 1e6 : 0.0;
+        const double hostRate = seconds > 0 ? statsHostFrames_ / seconds : 0.0;
+        const double newRate = seconds > 0 ? statsNewFrames_ / seconds : 0.0;
+        const double gameFps = seconds > 0 ? intervals.size() / seconds : 0.0;
+        const double frameMs = percentile(intervals, 0.5);
+        const double worstMs = percentile(intervals, 0.99);
+        const double turnaroundMs = percentile(turnarounds, 0.5), turnaroundP95 = percentile(turnarounds, 0.95);
+        const double workMs = average(statsWork_), waitMs = average(statsEndFrame_);
+        const double pickupWaitMs = average(statsWaits_), lagFrames = average(statsLags_);
+        const bool tagged = !statsLags_.empty();
+        const double skippedRate = seconds > 0 ? statsSkipped_ / seconds : 0.0;
+        const double missedRate = seconds > 0 ? statsMissed_ / seconds : 0.0;
+        double budgetMs = 0;
+        {
+            std::lock_guard pacingLock(pacingMutex_);
+            budgetMs = pickupBudgetNs_ / 1e6;
+        }
+        statsHostFrames_ = statsNewFrames_ = statsSkipped_ = statsMissed_ = 0;
+        statsWork_.clear();
+        statsEndFrame_.clear();
+        statsWaits_.clear();
+        statsLags_.clear();
+
+        std::vector<StatsOverlay::Line> lines;
+        wchar_t text[160];
+        auto add = [&](uint32_t color) { lines.push_back({text, color}); };
+        std::wstring title(gameName_.begin(), gameName_.end());
+        swprintf_s(text, L"Refract \x00b7 %.40ls", title.c_str());
+        add(kDim);
+        if (!seconds) {
+            swprintf_s(text, L"Measuring\x2026");
+            add(kText);
+            return lines;
+        }
+        const double ratio = hz > 0 ? gameFps / hz : 1.0;
+        swprintf_s(text, L"Game     %5.1f fps  %5.1f ms  1%% low %3.0f fps", gameFps, frameMs, worstMs > 0 ? 1000.0 / worstMs : 0.0);
+        add(gameFps < 1.0 ? kDim : ratio >= 0.97 ? kGood : ratio >= 0.85 ? kWarn : kBad);
+        const double repeated = (std::max)(0.0, hostRate - newRate);
+        swprintf_s(text, L"Headset  %3.0f Hz  new %3.0f/s  repeated %3.0f/s", hz, newRate, repeated);
+        add(hostRate <= 0 ? kDim : repeated <= 0.03 * hostRate ? kGood : repeated <= 0.15 * hostRate ? kWarn : kBad);
+        if (tagged && periodMs > 0) {
+            swprintf_s(text, L"Delay    %4.1f ms (%.1f frames after pose)", lagFrames * periodMs, lagFrames);
+            add(lagFrames <= 1.2 ? kGood : lagFrames <= 2.2 ? kWarn : kBad);
+        } else if (latencyMedianMs_ >= 0 && periodMs > 0) {
+            const double frames = latencyMedianMs_ / periodMs;
+            swprintf_s(text, L"Delay    %4.1f ms (%.1f frames)  p90 %4.1f", latencyMedianMs_, frames, latencyP90Ms_);
+            add(frames <= 2.2 ? kGood : frames <= 3.2 ? kWarn : kBad);
+        } else {
+            swprintf_s(text, L"Delay    move your head to measure");
+            add(kDim);
+        }
+        swprintf_s(text, L"Pacing   lag %d  wait %3.1f/%3.1f ms  skipped %2.0f/s", frameLag_, pickupWaitMs, budgetMs, skippedRate);
+        add(skippedRate <= 1.5 ? kText : kWarn);
+        if (!turnarounds.empty()) {
+            swprintf_s(text, L"Pipeline %4.1f ms pose to image  p95 %4.1f", turnaroundMs, turnaroundP95);
+            add(kText);
+        }
+        swprintf_s(text, L"SteamVR  wait %3.1f  bridge %3.1f ms  missed %2.0f/s", waitMs, workMs, missedRate);
+        add(missedRate <= 0.5 ? kText : kWarn);
+        const AndroidSnapshot android = androidStats_ ? androidStats_->snapshot() : AndroidSnapshot{};
+        if (android.valid) {
+            swprintf_s(text, L"Android  CPU %3.0f%% of %d cores", android.cpuPercent, android.cores);
+            add(android.cpuPercent < 75 ? kText : kWarn);
+            std::wstring threads = L"Threads ";
+            for (size_t i = 0; i < (std::min<size_t>)(2, android.threads.size()); ++i) {
+                wchar_t item[64];
+                swprintf_s(item, L" %.15hs %.0f%%", android.threads[i].name.c_str(), android.threads[i].percent);
+                threads += item;
+            }
+            const bool pegged = !android.threads.empty() && android.threads[0].percent >= 90;
+            lines.push_back({threads.substr(0, 49), pegged ? kWarn : kText});
+        }
+        swprintf_s(text, L"Hold Y + B to hide");
+        add(kDim);
+        return lines;
+    }
+#endif
 
     bool drives_frame_loop() const { return sessionRunning_ && useFrameLoop_; }
 
 private:
     void publish_pose(const refract::protocol::PoseFrame& frame)
     {
-        std::lock_guard<std::mutex> lock(frameMutex_);
-        latest_ = frame;
+        {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            latest_ = frame;
+            // Only a frame loop's poses wake the stream; others (no session yet) go out on its timeout.
+            if (sessionRunning_ && useFrameLoop_) ++publishedFrames_;
+        }
+        frameReady_.notify_one();
     }
 
     template <typename T>
@@ -1157,10 +1656,10 @@ private:
         // Ordinary stereo games keep their original two-slice allocation.
         {
             std::lock_guard lock(gpuMutex_);
-            refract::protocol::ImageFrameHeader header{};
-            refract::protocol::ImageProjection composition{};
-            std::shared_ptr<const std::vector<uint8_t>> payload;
-            if (imageFrame_ && imageFrame_->snapshot(&header, &payload, &composition) && refract::protocol::mixed_gpu_version(header.version)) {
+            HostImageFrame::Entry entry;
+            const auto& header = entry.header;
+            const auto& composition = entry.projection;
+            if (imageFrame_ && imageFrame_->snapshot(&entry) && refract::protocol::mixed_gpu_version(header.version)) {
                 const uint32_t needed = activeMixedCount_ + (composition.view_count == 2 ? 1 : 0);
                 if (needed > projectionArraySize_) {
                     d3dContext_.get()->Flush();
@@ -1263,6 +1762,10 @@ private:
                 projectionViews[i].subImage.imageRect.extent = uploadedExtentByImage_[imageIndex];
             }
         }
+        if (uploadedAndroidSequenceByImage_[imageIndex] != statsShownSequence_) {
+            statsShownSequence_ = uploadedAndroidSequenceByImage_[imageIndex];
+            ++statsNewFrames_;
+        }
         if (uploadedProjectionByImage_[imageIndex].view_count == 2)
             measure_pose_latency(uploadedProjectionByImage_[imageIndex], uploadedAndroidSequenceByImage_[imageIndex], displayTime);
 
@@ -1308,6 +1811,8 @@ private:
         const XrDuration median = latencySamples_[latencySamples_.size() / 2];
         const XrDuration p90 = latencySamples_[latencySamples_.size() * 9 / 10];
         latencySamples_.clear();
+        latencyMedianMs_ = median / 1e6;
+        latencyP90Ms_ = p90 / 1e6;
         std::fprintf(stderr, "Refract Latency: rendered pose shown %.1f ms after its frame's display time (p90 %.1f ms)\n",
             median / 1e6, p90 / 1e6);
     }
@@ -1423,12 +1928,13 @@ private:
             return false;
         }
 
-        refract::protocol::ImageFrameHeader header{};
-        refract::protocol::ImageProjection projection{};
-        std::shared_ptr<const std::vector<uint8_t>> pixels;
-        if (!imageFrame_->snapshot(&header, &pixels, &projection)) {
+        HostImageFrame::Entry shown;
+        if (!imageFrame_->snapshot(&shown)) {
             return false;
         }
+        const refract::protocol::ImageFrameHeader& header = shown.header;
+        const refract::protocol::ImageProjection& projection = shown.projection;
+        const std::shared_ptr<std::vector<uint8_t>>& pixels = shown.pixels;
         if (header.width == 0 || header.height == 0 || header.layers == 0 || pixels == nullptr || pixels->empty()) {
             return false;
         }
@@ -1471,7 +1977,7 @@ private:
                     static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
                 return true;
             }
-            if (!gpuReceiver_.copy_to(d3dContext_.get(), texture)) return false;
+            if (!gpuReceiver_.copy_to(d3dContext_.get(), texture, 0, 2, shown.slot < 0 ? 0 : shown.slot)) return false;
             uploadedGpuSessionByImage_[imageIndex] = gpu.session;
             uploadedAndroidSequenceByImage_[imageIndex] = header.sequence;
             uploadedProjectionByImage_[imageIndex] = projection;
@@ -1900,9 +2406,12 @@ private:
             locatedAny = true;
         }
 
-        menuShortcut_.apply(frame.controllers, static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count()));
+        const auto inputNow = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+#if defined(_WIN32)
+        if (statsShortcut_.toggled(frame.controllers, inputNow)) toggle_stats();
+#endif
+        menuShortcut_.apply(frame.controllers, inputNow);
 
         if (locatedAny) {
             if (sequence % 90 == 0) {
@@ -1984,6 +2493,48 @@ private:
     bool reportedSyncFailure_ = false;
     refract::protocol::PoseFrame latest_{};
     std::mutex frameMutex_;
+    std::condition_variable frameReady_;
+    std::atomic<uint64_t> frameStartNs_{0};  // When the newest xrWaitFrame returned (monotonic_time_ns).
+    // Performance panel. The image thread adds arrivals under statsMutex_; the rest is the frame loop's.
+    std::atomic<bool> statsVisible_{false};
+    StatsShortcut statsShortcut_;
+    std::string gameName_;
+    std::mutex statsMutex_;
+    std::vector<double> statsIntervals_, statsTurnarounds_;
+    std::vector<double> statsWaits_, statsLags_;
+    uint64_t statsSkipped_ = 0;
+    uint64_t statsLastArrivalNs_ = 0;
+    uint64_t statsWindowStartNs_ = 0, statsUpdatedNs_ = 0, statsHostFrames_ = 0, statsNewFrames_ = 0;
+    uint64_t statsShownSequence_ = UINT64_MAX;
+    std::vector<double> statsWork_, statsEndFrame_;
+    double latencyMedianMs_ = -1, latencyP90Ms_ = -1;
+    XrDuration displayPeriod_ = 0;
+#if defined(_WIN32)
+    StatsOverlay statsOverlay_;
+    XrSwapchain statsSwapchain_ = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageD3D11KHR> statsImages_;
+    std::vector<uint8_t> statsBgra_;
+    bool statsSwapRedBlue_ = false, statsUploaded_ = false, statsFailed_ = false;
+    std::unique_ptr<AndroidStats> androidStats_;
+#endif
+    uint64_t publishedFrames_ = 0, sentFrames_ = 0;  // Frame loop poses located / sent (frameMutex_).
+    std::array<std::pair<uint64_t, uint64_t>, 256> poseFrameBySequence_{};  // Stream sequence -> display frame (frameMutex_).
+    // Frame pacing. pacingMutex_ guards the current frame, its start, when each frame's pose went out,
+    // the pickup budget and the lags arriving images needed; the frame loop owns the rest.
+    std::mutex pacingMutex_;
+    int64_t pacingFrame_ = -1;
+    uint64_t pacingFrameStartNs_ = 0, pickupBudgetNs_ = 0;
+    std::array<std::pair<int64_t, uint64_t>, 256> frameStartByFrame_{};
+    std::array<uint8_t, 256> neededLags_{};
+    size_t neededLagCount_ = 0;
+    int frameLag_ = 2;
+    int fixedLag_ = 0;
+    uint64_t lagCheckedNs_ = 0, lagChangedNs_ = 0;
+    bool fixedBudget_ = false;
+    uint64_t budgetChangedNs_ = 0;
+    XrTime lastDisplayTime_ = 0;
+    std::deque<uint64_t> missedFrameNs_;  // When SteamVR skipped display frames, the last 10 s (frame loop).
+    uint64_t statsMissed_ = 0;
     struct PublishedPose { refract::protocol::Pose hmd; XrTime displayTime = 0; };
     std::array<PublishedPose, 32> publishedPoses_{};
     uint64_t publishedPoseCount_ = 0;
@@ -2309,8 +2860,8 @@ int OpenXrHost::run(int argc, char** argv)
         std::thread poseThread([poseSource, imageFrame, port, frames] {
             refract::protocol::TcpPoseServer poseServer;
             poseServer.serve_with_producer(port, frames, [&](uint64_t sequence) {
-                return poseSource->latest_frame(sequence);
-            });
+                return poseSource->next_frame(sequence);
+            }, true);
         });
         poseThread.detach();
 
