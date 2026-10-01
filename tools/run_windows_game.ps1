@@ -139,10 +139,11 @@ try {
         [ordered]@{ 'debug.refract.composite' = '1'; 'debug.refract.frame_sync' = '0'; 'debug.refract.hfov' = '109'
                     'debug.refract.stream_eyes' = '2'; 'debug.refract.stream_scale' = '100'; 'debug.refract.direct_host' = '0' }
     } else {
-        # The host bridge cannot decode refract_viewer's atlas frames; it needs panels as separate quad
-        # layers, which the host OpenXR runtime composites. It sends one pose per frame of the host OpenXR
-        # runtime, and the game starts its frames on them. The field of view is the runtime default ('').
-        [ordered]@{ 'debug.refract.composite' = '0'; 'debug.refract.frame_sync' = '1'; 'debug.refract.hfov' = "''" }
+        # The host bridge unpacks atlas frames too and hands each panel to the host OpenXR runtime as a quad
+        # layer (composite=0 sends every layer separately, which cost AC Nexus ~14 ms of each frame). It sends
+        # one pose per frame of the host OpenXR runtime, and the game starts its frames on them. The field of
+        # view is the runtime default ('').
+        [ordered]@{ 'debug.refract.composite' = '1'; 'debug.refract.frame_sync' = '1'; 'debug.refract.hfov' = "''" }
     }
     foreach ($name in $sessionProps.Keys) {
         $set = Invoke-Adb @('shell', 'setprop', $name, $sessionProps[$name])

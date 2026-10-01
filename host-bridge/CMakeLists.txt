@@ -27,7 +27,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
-  target_link_libraries(refract-host-bridge PRIVATE d3d11 dxgi user32 gdi32 winmm)
+  target_link_libraries(refract-host-bridge PRIVATE d3d11 d3dcompiler dxgi user32 gdi32 winmm)
   include(loading_screen.cmake)
   refract_add_loading_screen(refract-host-bridge)
 endif()

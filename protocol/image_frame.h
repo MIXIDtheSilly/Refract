@@ -99,13 +99,17 @@ inline bool valid_projection(const ImageProjection& projection) {
     return true;
 }
 
+// ImageQuad::layer_flags bit beside the OpenXR core flags: the panel image is stored bottom-up
+// (XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB), so the host flips it before display.
+constexpr uint32_t kQuadLayerFlipped = 1u << 8;
+
 inline bool valid_quad(const ImageQuad& q) {
     const auto& p = q.pose;
     for (float f : {p.x,p.y,p.z,p.qx,p.qy,p.qz,p.qw,q.width,q.height})
         if (!std::isfinite(f)) return false;
     const float norm = p.qx*p.qx+p.qy*p.qy+p.qz*p.qz+p.qw*p.qw;
     return std::fabs(norm-1.0f)<=0.01f && q.width>0 && q.height>0 &&
-        q.eye_visibility<=2 && !(q.layer_flags & ~7u);
+        q.eye_visibility<=2 && !(q.layer_flags & ~(7u | kQuadLayerFlipped));
 }
 
 inline bool valid_quads(const ImageProjection& composition) {

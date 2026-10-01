@@ -762,13 +762,14 @@ public:
     // GPU frames; the caller waits for that with await_acks.
     bool send_composite_frame(uint64_t sequence, uint32_t width, uint32_t height,
         const refract::protocol::ImageProjection& projection, const refract::protocol::WindowsGpuFrame& gpu,
-        const std::vector<uint8_t>& table)
+        const std::vector<uint8_t>& table, uint32_t poseTag = 0)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!ensure_connected() || !directWindows_) return false;
         refract::protocol::ImageFrameHeader header{};
         header.version = refract::protocol::kCompositeGpuFrameVersion;
         header.type = refract::protocol::kWindowsGpuFrameType;
+        header.reserved = poseTag;
         header.header_size += sizeof(projection);
         header.width = width;
         header.height = height;
@@ -1396,6 +1397,19 @@ void maybe_send_swapchain_image(const SwapchainRecord& sc,
 void maybe_send_swapchain_image(const SwapchainRecord&) {}
 #endif
 
+// XR_FB_composition_layer_image_layout: OVRPlugin marks layers whose texture has a bottom-left
+// origin (e.g. some of AC Nexus's UI panels); without the flag they show upside down.
+bool layer_vertically_flipped(const XrCompositionLayerBaseHeader* layer)
+{
+    for (auto* next = static_cast<const XrCompositionLayerBaseHeader*>(layer->next); next;
+         next = static_cast<const XrCompositionLayerBaseHeader*>(next->next)) {
+        if (next->type == XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB)
+            return (reinterpret_cast<const XrCompositionLayerImageLayoutFB*>(next)->flags &
+                    XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB) != 0;
+    }
+    return false;
+}
+
 #if defined(__ANDROID__)
 // Pipelined shared export: xrEndFrame submits the frame's copy into the next ring pair and returns,
 // and the publisher thread sends the frame as soon as that copy completes. The app's render thread
@@ -1408,7 +1422,7 @@ struct PendingExport {
     uint32_t width = 0, height = 0;
     refract::protocol::ImageProjection projection{};
     std::vector<uint8_t> composite;  // Composite table (after the WindowsGpuFrame); empty for v3.
-    uint32_t poseTag = 0;  // view_pose_tag of the frame (v3 only).
+    uint32_t poseTag = 0;  // view_pose_tag of the frame.
 };
 
 bool publish_export(const PendingExport& pending)
@@ -1421,7 +1435,7 @@ bool publish_export(const PendingExport& pending)
         ? image_transport_client().send_frame(sequence, pending.width, pending.height, 2,
               reinterpret_cast<const uint8_t*>(&gpu), sizeof(gpu), &pending.projection, true, 0, false, pending.poseTag)
         : image_transport_client().send_composite_frame(sequence, pending.width, pending.height, pending.projection, gpu,
-              pending.composite);
+              pending.composite, pending.poseTag);
     if (!sent) return false;
     if (sequence % 90 == 0) __android_log_print(ANDROID_LOG_INFO, "Refract.GPU", "shared GPU %s seq=%llu %ux%u; published on copy completion",
         pending.composite.empty() ? "eyes" : "composite", static_cast<unsigned long long>(sequence), pending.width, pending.height);
@@ -1542,25 +1556,12 @@ bool valid_subimage(const XrSwapchainSubImage& sub, SwapchainRecord*& sc)
 // the viewer draws each panel at its pose. Returns false, having sent nothing, when the frame
 // cannot take this path (no panels, no shared GPU export, other layer types, bad input);
 // the other paths then handle it (and report errors).
-// XR_FB_composition_layer_image_layout: OVRPlugin marks layers whose texture has a bottom-left
-// origin (e.g. some of AC Nexus's UI panels); without the flag they show upside down.
-bool layer_vertically_flipped(const XrCompositionLayerBaseHeader* layer)
-{
-    for (auto* next = static_cast<const XrCompositionLayerBaseHeader*>(layer->next); next;
-         next = static_cast<const XrCompositionLayerBaseHeader*>(next->next)) {
-        if (next->type == XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB)
-            return (reinterpret_cast<const XrCompositionLayerImageLayoutFB*>(next)->flags &
-                    XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB) != 0;
-    }
-    return false;
-}
-
 bool submit_composite_frame(const XrFrameEndInfo& info, XrResult& result)
 {
     namespace proto = refract::protocol;
     if (!g_vulkanSession || !direct_to_host() || !info.layers) return false;
-    // Only refract_viewer decodes atlas frames. The SteamVR host bridge sets debug.refract.composite=0
-    // and gets the mixed GPU batch instead, whose quads its OpenXR runtime composites natively.
+    // debug.refract.composite=0 sends the mixed GPU batch instead: one synchronous copy and
+    // acknowledgment per layer inside xrEndFrame (~5 ms each), kept for consumers without v10.
     static const bool compositeEnabled = int_property("debug.refract.composite", 1, 0, 1) != 0;
     if (!compositeEnabled) return false;
     // After a lost consumer nothing else reconnects for panel frames (the batch path needs export
@@ -1721,7 +1722,8 @@ bool submit_composite_frame(const XrFrameEndInfo& info, XrResult& result)
                             sceneWidth, sceneHeight, entries.size(), atlasWidth, atlasHeight);
         reported = true;
     }
-    export_publisher().push({slot, atlasWidth, atlasHeight, projection, std::move(tableBytes)});
+    export_publisher().push({slot, atlasWidth, atlasHeight, projection, std::move(tableBytes),
+                             frame_sync_enabled() ? view_pose_tag(info.displayTime) : 0});
     result = XR_SUCCESS;
     return true;
 }
@@ -1857,6 +1859,9 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart 
             projection.quads[i] = {{pose.position.x, pose.position.y, pose.position.z,
                 pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w},
                 quad->size.width, quad->size.height, static_cast<uint32_t>(quad->eyeVisibility), static_cast<uint32_t>(quad->layerFlags)};
+            // Copied as stored; the host flips it (a flipping blit is slow under gfxstream, see the composite path).
+            if (layer_vertically_flipped(reinterpret_cast<const XrCompositionLayerBaseHeader*>(quad)))
+                projection.quads[i].layer_flags |= refract::protocol::kQuadLayerFlipped;
             subimages[i] = &quad->subImage;
         }
         if (!refract::protocol::valid_quads(projection)) return invalid("quad pose/size/visibility");
@@ -3550,9 +3555,19 @@ XrResult XRAPI_CALL xrWaitFrame_impl(
     // the two frame loops, so the game renders with the newest pose and can finish in time for the host's
     // next frame. A free-running timer beat against the host's clock: poses waited up to a frame, finished
     // images up to another, and ~4 frames a second were missed. Without a live pose stream, pace by timer.
+    // Diagnostics: the app's own work between waits, and how long each wait blocks.
+    static refract::protocol::PerfStats appFrameStats("app-frame"), waitStats("wait-frame");
+    static XrTime lastWaitReturn = 0;
+    const XrTime waitStart = monotonic_time_ns();
+    if (lastWaitReturn) appFrameStats.record((waitStart - lastWaitReturn) / 1e6);
+    struct RecordWait {
+        XrTime start;
+        ~RecordWait() { lastWaitReturn = monotonic_time_ns(); waitStats.record((lastWaitReturn - start) / 1e6); }
+    } recordWait{waitStart};
     if (frame_sync_enabled()) {
         static uint64_t lastSequence = UINT64_MAX;
         static XrTime lastNewPose = 0;
+        static refract::protocol::PerfStats stepStats("pose-step");  // Host frames per app frame (not ms).
         auto frame = pose_client().latest_pose_frame();
         const XrTime framePeriod = refract::protocol::display_period_or_default(frame);
         XrTime now = monotonic_time_ns();
@@ -3565,6 +3580,7 @@ XrResult XRAPI_CALL xrWaitFrame_impl(
             }
         }
         if (frame.sequence != lastSequence) {
+            if (lastSequence != UINT64_MAX) stepStats.record(static_cast<double>(frame.sequence - lastSequence));
             lastSequence = frame.sequence;
             lastNewPose = now;
             g_nextFrameStart = now + framePeriod;

@@ -1,5 +1,6 @@
 package com.refract.openxrruntime;
 
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
@@ -16,10 +17,32 @@ import java.net.Socket;
 final class PoseProxy {
     private static final String TAG = "Refract.PoseProxy";
     private static final int BRIDGE_PORT = 38490;
-    // adb reverse first (emulator and phones), then the emulator's host alias.
-    private static final String[] HOSTS = {"127.0.0.1", "10.0.2.2"};
+    private static final boolean EMULATOR = "ranchu".equals(Build.HARDWARE) || "goldfish".equals(Build.HARDWARE);
+    // The emulator reaches the PC directly at its host alias, as the runtime's own pose client does; through
+    // adb reverse, poses arrived in bursts every ~45 ms, so frame-synced games (SteamVR) waited between them
+    // (AC Nexus: ~67 fps of 90). No adb fallback there: adb reverse accepts even before the bridge listens, so
+    // a relay started early stayed on it for the whole session. Phones only have adb reverse.
+    static final String[] HOSTS = EMULATOR ? new String[] {"10.0.2.2"} : new String[] {"127.0.0.1", "10.0.2.2"};
+    // A refused connection through the emulator's NAT takes ~2 s (Windows retries refused loopback connects).
+    private static final int CONNECT_TIMEOUT_MS = EMULATOR ? 3000 : 1000;
 
     private PoseProxy() {
+    }
+
+    // The bridge at the first of HOSTS that accepts, with Nagle off; null if none does.
+    static Socket connectBridge(int port, String tag, String what) {
+        for (String host : HOSTS) {
+            try {
+                Socket socket = new Socket();
+                socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+                socket.setTcpNoDelay(true);
+                Log.i(tag, "relaying " + what + " from host=" + host + " through provider FD");
+                return socket;
+            } catch (IOException ex) {
+                Log.i(tag, "connect failed host=" + host + ": " + ex);
+            }
+        }
+        return null;
     }
 
     static void relayFileDescriptor(final ParcelFileDescriptor descriptor) {
@@ -33,25 +56,10 @@ final class PoseProxy {
         thread.start();
     }
 
-    private static Socket connectHost() {
-        for (String host : HOSTS) {
-            try {
-                Socket socket = new Socket();
-                socket.connect(new InetSocketAddress(host, BRIDGE_PORT), 1000);
-                socket.setTcpNoDelay(true);
-                Log.i(TAG, "relaying pose stream from host=" + host + " through provider FD");
-                return socket;
-            } catch (IOException ex) {
-                Log.i(TAG, "connect failed host=" + host + ": " + ex);
-            }
-        }
-        return null;
-    }
-
     private static void forward(ParcelFileDescriptor descriptor) {
         // Poses are read once per frame; a late one is a late head turn.
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
-        final Socket host = connectHost();
+        final Socket host = connectBridge(BRIDGE_PORT, TAG, "pose stream");
         try (ParcelFileDescriptor app = descriptor) {
             if (host == null) return;  // Closing the FD tells the runtime to retry later.
             try (Socket hostSocket = host) {

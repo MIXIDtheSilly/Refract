@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 #include <chrono>
 #include <map>
+#include "flip_blit.h"
 #include "windows_gpu_frame.h"
 
 namespace refract::host {
@@ -115,24 +116,60 @@ public:
         if (!receiveCompletion_.wait(device, context)) return false;
         slot.sequence = sequence; return true;
     }
-    bool copy_to(ID3D11DeviceContext* context, ID3D11Texture2D* destination, UINT firstSlice = 0, UINT sliceCount = 2, int slotIndex = 0) {
+    // Slices whose bit is set in flipSlices are drawn upside down by flip (panels stored bottom-up).
+    bool copy_to(ID3D11DeviceContext* context, ID3D11Texture2D* destination, UINT firstSlice = 0, UINT sliceCount = 2, int slotIndex = 0,
+                 FlipBlit* flip = nullptr, uint32_t flipSlices = 0) {
         D3D11_TEXTURE2D_DESC destinationInfo{}; destination->GetDesc(&destinationInfo);
         if (sliceCount < 1 || sliceCount > 2 || firstSlice + sliceCount > destinationInfo.ArraySize) return false;
-        if (slotIndex < 0 || slotIndex >= kSlots || !slots_[slotIndex].handle) return false;
-        Slot& slot = slots_[slotIndex];
         Microsoft::WRL::ComPtr<ID3D11Device> device;
         context->GetDevice(&device);
-        if (!slot.renderCache) {
-            Microsoft::WRL::ComPtr<ID3D11Device1> device1;
-            if (FAILED(device.As(&device1)) || FAILED(device1->OpenSharedResource1(
-                    slot.handle, IID_PPV_ARGS(&slot.renderCache)))) return false;
+        ID3D11Texture2D* cache = render_cache(device.Get(), slotIndex);
+        if (!cache) return false;
+        for (UINT eye = 0; eye < sliceCount; ++eye) {
+            if (flip && (flipSlices >> eye & 1)) {
+                if (!flip->copy(context, cache, eye, destination, firstSlice + eye, width_, height_, format_)) return false;
+            } else {
+                context->CopySubresourceRegion(destination, firstSlice + eye, 0, 0, 0, cache, eye, nullptr);
+            }
         }
-        for (UINT eye = 0; eye < sliceCount; ++eye) context->CopySubresourceRegion(destination, firstSlice + eye, 0, 0, 0, slot.renderCache.Get(), eye, nullptr);
         // The caller holds the cache mutex until this cross-device read is
         // finished. The receiver may then safely overwrite the shared cache.
         return renderCompletion_.wait(device.Get(), context);
     }
+    // A rectangle of a cached frame (an atlas, protocol v10), copied to (0, 0) of a destination slice.
+    struct Region { ID3D11Texture2D* destination; UINT sourceSlice; D3D11_BOX box; UINT destinationSlice; bool flipped; };
+    bool copy_regions(ID3D11DeviceContext* context, const Region* regions, size_t count, int slotIndex, FlipBlit* flip) {
+        Microsoft::WRL::ComPtr<ID3D11Device> device;
+        context->GetDevice(&device);
+        ID3D11Texture2D* cache = render_cache(device.Get(), slotIndex);
+        if (!cache) return false;
+        for (size_t i = 0; i < count; ++i) {
+            const Region& r = regions[i];
+            D3D11_TEXTURE2D_DESC destinationInfo{}; r.destination->GetDesc(&destinationInfo);
+            if (r.sourceSlice > 1 || r.destinationSlice >= destinationInfo.ArraySize || r.box.right > width_ || r.box.bottom > height_ ||
+                r.box.left >= r.box.right || r.box.top >= r.box.bottom ||
+                r.box.right - r.box.left > destinationInfo.Width || r.box.bottom - r.box.top > destinationInfo.Height) return false;
+            if (r.flipped) {
+                if (!flip || !flip->copy(context, cache, r.sourceSlice, r.destination, r.destinationSlice, r.box.right - r.box.left,
+                        r.box.bottom - r.box.top, format_, r.box.left, r.box.top)) return false;
+            } else {
+                context->CopySubresourceRegion(r.destination, r.destinationSlice, 0, 0, 0, cache, r.sourceSlice, &r.box);
+            }
+        }
+        return renderCompletion_.wait(device.Get(), context);
+    }
 private:
+    // The slot's cache opened on the render device (it is created on the receive device).
+    ID3D11Texture2D* render_cache(ID3D11Device* device, int slotIndex) {
+        if (slotIndex < 0 || slotIndex >= kSlots || !slots_[slotIndex].handle) return nullptr;
+        Slot& slot = slots_[slotIndex];
+        if (!slot.renderCache) {
+            Microsoft::WRL::ComPtr<ID3D11Device1> device1;
+            if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))) || FAILED(device1->OpenSharedResource1(
+                    slot.handle, IID_PPV_ARGS(&slot.renderCache)))) return nullptr;
+        }
+        return slot.renderCache.Get();
+    }
     struct Opened { Microsoft::WRL::ComPtr<ID3D11Texture2D> eyes[2]; std::chrono::steady_clock::time_point used; };
     // The GPU layer frees a pair after 10 s unused and may later create a new one under the same name, so pairs
     // unused for 5 s are dropped here and opened again when needed.

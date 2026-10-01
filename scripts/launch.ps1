@@ -66,7 +66,7 @@ if (Test-Path $userIdFile) {
 }
 & $adb -s $Serial shell setprop debug.refract.platform.verbose $(if ($PlatformVerbose) { '1' } else { '0' })
 & $adb -s $Serial shell setprop debug.refract.runtime_name Oculus
-& $adb -s $Serial shell setprop debug.refract.composite 1  # refract_viewer decodes atlas frames; the SteamVR bridge sets 0.
+& $adb -s $Serial shell setprop debug.refract.composite 1  # Atlas frames (scene + panels in one image); refract_viewer and the SteamVR bridge decode them.
 & $adb -s $Serial shell setprop debug.refract.frame_sync 0  # pose_input_server's poses don't follow a display clock.
 & $adb -s $Serial shell setprop debug.refract.hfov $Fov
 & $adb -s $Serial shell setprop debug.refract.gpu_share $(if ($PixelStream -or -not $Serial.StartsWith('emulator-')) { '0' } else { '1' })

@@ -226,8 +226,8 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
             const bool gpu = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion || mixed || composite;
             const bool projected = header.version == kProjectionImageFrameVersion || gpu || quads || video;
             const uint32_t expectedHeaderSize = sizeof(ImageFrameHeader) + (projected ? sizeof(ImageProjection) : 0);
-            // Single GPU frames (v3/v5) may carry the pose they were rendered with (Android runtime view_pose_tag).
-            const bool tagged = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion;
+            // Single GPU frames (v3/v5/v10) may carry the pose they were rendered with (Android runtime view_pose_tag).
+            const bool tagged = header.version == kWindowsGpuFrameVersion || header.version == kQuadGpuFrameVersion || composite;
             if ((mixed ? !valid_mixed_part(header.version, header.reserved) :
                  !tagged && header.reserved > (video ? kVideoFrameKey : 0)) ||
                 header.magic != kImageFrameMagic || (header.version != kImageFrameVersion && !projected) ||

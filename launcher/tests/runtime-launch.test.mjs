@@ -74,6 +74,11 @@ test('a script that throws reports only its message', { skip: process.platform !
   const script = path.join(dir, 'fails.ps1');
   await fs.writeFile(script, "param($Name)\n$ErrorActionPreference = 'Stop'\nWrite-Host 'working'\nthrow \"$Name could not start.\"\n");
   await assert.rejects(run('powershell.exe', powershellArgs(script, { Name: "Game's emulator" })), { message: "Game's emulator could not start." });
+  // PowerShell treats curly single quotes as quotes too. Compare code points: the console mangles the text itself.
+  const codes = path.join(dir, 'codes.ps1');
+  await fs.writeFile(codes, "param($Name)\nthrow (([int[]][char[]]$Name) -join ',')\n");
+  const curly = 'Assassin’s Creed® Nexus ‘VR’';
+  await assert.rejects(run('powershell.exe', powershellArgs(codes, { Name: curly })), { message: [...curly].map(c => c.charCodeAt(0)).join(',') });
 });
 
 test('Windows game launch actually executes PowerShell and reports its exit', { skip: process.platform !== 'win32', timeout: 15000 }, async t => {

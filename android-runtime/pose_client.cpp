@@ -454,7 +454,12 @@ void PoseClient::read_available_frames()
     for (int batch = 0; batch < 64; ++batch) {
         const ssize_t received = recv(socket_, bytes, sizeof(bytes), MSG_DONTWAIT);
         if (received > 0) {
-            if (decoder_.append(bytes, static_cast<size_t>(received), latest_)) { continue; }
+            const uint64_t before = latest_.sequence;
+            if (decoder_.append(bytes, static_cast<size_t>(received), latest_)) {
+                static refract::protocol::FrameIntervals arrivals("pose-arrival");
+                if (latest_.sequence != before) arrivals.record();
+                continue;
+            }
             log_pose_client("invalid pose record");
         } else if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return;

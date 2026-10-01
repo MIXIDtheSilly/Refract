@@ -53,7 +53,8 @@ export function newUserId() {
 }
 // Players may enter their own id: any positive integer that fits a signed 64-bit value.
 export const validUserId = id => typeof id === 'string' && /^[1-9]\d{0,18}$/.test(id) && BigInt(id) < 2n ** 63n;
-const psLiteral = value => `'${String(value).replaceAll("'", "''")}'`;
+// PowerShell also ends a quoted string at curly single quotes (as in "Assassin’s Creed"), so double those too.
+const psLiteral = value => `'${String(value).replace(/['‘’‚‛]/g, '$&$&')}'`;
 export function powershellArgs(script, parameters) {
   const invocation = `$ProgressPreference = 'SilentlyContinue'; try { & ${psLiteral(script)} ${Object.entries(parameters).map(([key, value]) => {
     if (!/^[a-zA-Z]+$/.test(key)) throw new Error('Invalid PowerShell parameter.');

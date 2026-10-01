@@ -60,9 +60,10 @@ final class ImageProxy {
     private static void forwardFileDescriptor(ParcelFileDescriptor descriptor) {
         // Every frame waits on this hop and its acknowledgment, so relay at display priority.
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
-        try (ParcelFileDescriptor app = descriptor; Socket host = new Socket("127.0.0.1", 38491)) {
-            host.setTcpNoDelay(true);
-            Log.i(TAG, "relaying image stream through provider FD to Windows viewer");
+        // Same route as the poses (PoseProxy.HOSTS); closing the FD without a host tells the runtime to retry.
+        final Socket bridge = PoseProxy.connectBridge(38491, TAG, "image stream");
+        try (ParcelFileDescriptor app = descriptor; Socket host = bridge) {
+            if (host == null) return;
             Thread acknowledgments = new Thread(new Runnable() {
                 @Override
                 public void run() {

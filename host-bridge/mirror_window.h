@@ -16,6 +16,10 @@ public:
     bool pump();
     // F1 in the mirror window toggles the headset's performance panel; true once per press.
     bool take_stats_toggle() { const bool toggle = statsToggle_; statsToggle_ = false; return toggle; }
+    // M held while the mirror window has focus holds the left menu button, as the flat viewer does.
+    bool menu_key_held() const {
+        return window_ && GetForegroundWindow() == window_ && (GetAsyncKeyState('M') & 0x8000);
+    }
     void present(ID3D11DeviceContext* context, ID3D11Texture2D* source,
                  UINT width, UINT height, DXGI_FORMAT format, uint64_t sequence);
 private:

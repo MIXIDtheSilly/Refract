@@ -830,8 +830,12 @@ public:
             uint32_t layerCount = 0;
 #if defined(_WIN32)
             pick_image(static_cast<int64_t>(sequence));
-            if (projectionSwapchain_ != XR_NULL_HANDLE &&
-                update_projection_layer(frameDisplayTime, projectionViews, projectionLayer, quadLayers, layerCount, mixedProjection)) {
+            const bool updated = projectionSwapchain_ != XR_NULL_HANDLE &&
+                update_projection_layer(frameDisplayTime, projectionViews, projectionLayer, quadLayers, layerCount, mixedProjection);
+            // A failed update may have set the panel count already; submitting that many empty layers was
+            // XR_ERROR_LAYER_INVALID.
+            if (!updated) layerCount = 0;
+            if (updated) {
                 if (layerCount) {
                     const uint32_t offset = mixedProjection ? 1 : 0;
                     if (mixedProjection) layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
@@ -865,8 +869,13 @@ public:
                 statsEndFrame_.push_back((monotonic_time_ns() - submitNs) / 1e6);
             }
             if (result != XR_SUCCESS) {
-                std::fprintf(stderr, "Refract OpenXR: xrEndFrame failed: %s (%d)\n", xr_result_name(result), result);
-                useFrameLoop_ = false;
+                // One rejected frame (a bad layer) must not end the frame loop: that froze the view for good
+                // while the game ran on. Only a session that is gone stops it.
+                static uint32_t reported = 0;
+                if (reported++ < 20)
+                    std::fprintf(stderr, "Refract OpenXR: xrEndFrame failed: %s (%d) layers=%u\n", xr_result_name(result), result, layerCount);
+                if (result == XR_ERROR_SESSION_LOST || result == XR_ERROR_SESSION_NOT_RUNNING || result == XR_ERROR_INSTANCE_LOST)
+                    useFrameLoop_ = false;
             }
         }
 
@@ -913,16 +922,32 @@ public:
         static refract::protocol::PerfStats lockStats("host-receive-lock");
         lockStats.record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lockStart).count());
         if (refract::protocol::mixed_gpu_version(header.version)) {
+            static uint64_t drops[4]{}, completed = 0;
+            static auto reported = std::chrono::steady_clock::now();
+            const auto drop = [&](int reason) {
+                ++drops[reason];
+                if (std::chrono::steady_clock::now() - reported > std::chrono::seconds(5)) {
+                    reported = std::chrono::steady_clock::now();
+                    std::fprintf(stderr, "Refract Mixed: completed=%llu dropped invalid=%llu order=%llu import=%llu (last %ux%u fmt=%u/%u part %u/%u)\n",
+                        static_cast<unsigned long long>(completed), static_cast<unsigned long long>(drops[0]),
+                        static_cast<unsigned long long>(drops[1]), static_cast<unsigned long long>(drops[2]),
+                        header.width, header.height, pixels.size() >= sizeof(refract::protocol::WindowsGpuFrame) ?
+                            reinterpret_cast<const refract::protocol::WindowsGpuFrame*>(pixels.data())->formats[0] : 0,
+                        static_cast<unsigned>(projectionFormat_), header.reserved & 0xffff, header.reserved >> 16);
+                }
+                return false;
+            };
             if (!refract::protocol::valid_mixed_part(header.version, header.reserved) ||
                 pixels.size() != sizeof(refract::protocol::WindowsGpuFrame) ||
-                header.width > projectionWidth_ || header.height > projectionHeight_) return false;
+                header.width > projectionWidth_ || header.height > projectionHeight_) return drop(0);
             const uint32_t count = header.reserved >> 16, index = header.reserved & 0xffff;
             if (index == 0) { pendingMixedBank_ = 1 - activeMixedBank_; pendingMixedCount_ = count; pendingMixedIndex_ = 0; pendingMixedSequence_ = header.sequence; }
-            if (count != pendingMixedCount_ || index != pendingMixedIndex_ || header.sequence != pendingMixedSequence_) return false;
+            if (count != pendingMixedCount_ || index != pendingMixedIndex_ || header.sequence != pendingMixedSequence_) return drop(1);
             auto& part = mixedFrames_[pendingMixedBank_][index];
             refract::protocol::WindowsGpuFrame gpu{}; std::memcpy(&gpu, pixels.data(), sizeof(gpu));
             if (!part.receiver.receive(receiveDevice_.get(), receiveContext_.get(), gpu, header.sequence,
-                    header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_))) { pendingMixedCount_ = 0; return false; }
+                    header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_))) { pendingMixedCount_ = 0; return drop(2); }
+            if (index + 1 == count) ++completed;
             part.header = header; part.projection = projection;
             ++pendingMixedIndex_; ++pendingMixedSequence_;
             if (pendingMixedIndex_ == count) {
@@ -933,6 +958,26 @@ public:
                 imageFrame_->store(complete, std::move(pixels), mixedFrames_[activeMixedBank_][0].projection);
                 pendingMixedCount_ = 0;
             }
+            return true;
+        }
+        if (header.version == refract::protocol::kCompositeGpuFrameVersion) {
+            // The scene and every panel in one atlas pair: one copy and acknowledgment per frame, where the
+            // mixed batch above costs the game ~5 ms of xrEndFrame per layer. The image server checked the table.
+            refract::protocol::CompositeHeader table{};
+            std::memcpy(&table, pixels.data() + sizeof(refract::protocol::WindowsGpuFrame), sizeof(table));
+            if (table.scene_width > projectionWidth_ || table.scene_height > projectionHeight_) return false;
+            if (!table.scene_width && !table.quad_count) return true;  // Nothing to show.
+            refract::protocol::WindowsGpuFrame gpu{};
+            std::memcpy(&gpu, pixels.data(), sizeof(gpu));
+            const int slot = imageFrame_->free_slot(WindowsGpuReceiver::kSlots);
+            if (slot < 0 || !compositeReceiver_.receive(receiveDevice_.get(), receiveContext_.get(), gpu,
+                    header.sequence, header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_), slot)) {
+                imageFrame_->invalidate();
+                return false;
+            }
+            const int64_t poseFrame = pose_frame_of_tag(header.reserved);
+            record_arrival(poseFrame);
+            imageFrame_->store(header, std::move(pixels), projection, slot, poseFrame);
             return true;
         }
         if ((header.version == refract::protocol::kWindowsGpuFrameVersion || header.version == refract::protocol::kQuadGpuFrameVersion)) {
@@ -955,7 +1000,8 @@ public:
             return true;
         }
 #else
-        if ((header.version == refract::protocol::kWindowsGpuFrameVersion || header.version == refract::protocol::kQuadGpuFrameVersion)) return false;
+        if ((header.version == refract::protocol::kWindowsGpuFrameVersion || header.version == refract::protocol::kQuadGpuFrameVersion ||
+             header.version == refract::protocol::kCompositeGpuFrameVersion)) return false;
 #endif
         record_arrival(-1);
         imageFrame_->store(header, std::move(pixels), projection);
@@ -1621,6 +1667,7 @@ private:
         uploadedMixedExtents_.resize(imageCount);
         uploadedMixedCounts_.assign(imageCount, 0);
         uploadedMixedTimes_.assign(imageCount, 0);
+        uploadedCompositeByImage_.assign(imageCount, 0);
         uploadedExtentByImage_.resize(imageCount, {static_cast<int32_t>(projectionWidth_), static_cast<int32_t>(projectionHeight_)});
         loadingByImage_.assign(imageCount, 0);
         loadingCardByImage_.assign(imageCount, 0);
@@ -1641,6 +1688,97 @@ private:
             projectionHeight_,
             imageCount);
         return true;
+    }
+
+    // An atlas frame's table (after its WindowsGpuFrame; the image server checked it).
+    static refract::protocol::CompositeHeader composite_table(const HostImageFrame::Entry& entry)
+    {
+        refract::protocol::CompositeHeader table{};
+        if (entry.pixels && entry.pixels->size() >= sizeof(refract::protocol::WindowsGpuFrame) + sizeof(table))
+            std::memcpy(&table, entry.pixels->data() + sizeof(refract::protocol::WindowsGpuFrame), sizeof(table));
+        return table;
+    }
+
+    // Atlas frames' panels, one per slice at its top-left (render device). Parking them in extra slices of the
+    // projection swapchain, each a whole eye in size, took AC Nexus to 17 slices (~900 MB with its 3 images):
+    // SteamVR then missed frames and refused to create panel swapchains (XR_ERROR_LIMIT_REACHED). Grows only.
+    bool ensure_panel_cache(uint32_t width, uint32_t height)
+    {
+        const auto step = [](uint32_t value) { return (value + 255) / 256 * 256; };
+        if (panelCache_.get() && width <= panelCacheWidth_ && height <= panelCacheHeight_) return true;
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = (std::max)(panelCacheWidth_, step(width));
+        desc.Height = (std::max)(panelCacheHeight_, step(height));
+        desc.MipLevels = 1;
+        desc.ArraySize = refract::protocol::kMaxCompositeQuads;
+        desc.Format = static_cast<DXGI_FORMAT>(projectionFormat_);
+        desc.SampleDesc.Count = 1;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;  // Render target: FlipBlit draws into it.
+        ComPtr<ID3D11Texture2D> cache;
+        if (FAILED(d3dDevice_.get()->CreateTexture2D(&desc, nullptr, cache.put()))) {
+            std::fprintf(stderr, "Refract OpenXR: panel cache %ux%u failed\n", desc.Width, desc.Height);
+            return false;
+        }
+        panelCache_ = std::move(cache);
+        panelCacheWidth_ = desc.Width;
+        panelCacheHeight_ = desc.Height;
+        std::fprintf(stderr, "Refract OpenXR: panel cache %ux%u x%u\n", desc.Width, desc.Height, desc.ArraySize);
+        return true;
+    }
+
+    // Copies a panel (one slice of the upload texture) into the top-left of panel slot index's own swapchain.
+    // The swapchain only grows, in steps of 256 pixels: creating one stalls SteamVR for tens of ms, and in
+    // its world AC Nexus shows 4-15 panels whose set (and so each slot's size) changes several times a second.
+    // Remaking each slot at its panel's exact size froze the view for hundreds of ms while the game ran on.
+    bool fill_panel(uint32_t index, ID3D11Texture2D* source, uint32_t slice, XrExtent2Di extent)
+    {
+        auto& panel = panelSwapchains_[index];
+        const auto width = static_cast<uint32_t>(extent.width), height = static_cast<uint32_t>(extent.height);
+        D3D11_TEXTURE2D_DESC sourceInfo{};
+        source->GetDesc(&sourceInfo);
+        if (!width || !height || width > sourceInfo.Width || height > sourceInfo.Height || slice >= sourceInfo.ArraySize) return false;
+        if (panel.handle == XR_NULL_HANDLE || panel.width < width || panel.height < height) {
+            const auto grow = [](uint32_t current, uint32_t needed, uint32_t limit) {
+                return (std::max)(current, (std::min)((needed + 255) / 256 * 256, limit));
+            };
+            const uint32_t newWidth = grow(panel.width, width, sourceInfo.Width), newHeight = grow(panel.height, height, sourceInfo.Height);
+            if (panel.handle != XR_NULL_HANDLE) destroySwapchain_(panel.handle);
+            panel = {};
+            XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+            info.format = projectionFormat_;
+            info.sampleCount = 1;
+            info.width = newWidth;
+            info.height = newHeight;
+            info.faceCount = 1;
+            info.arraySize = 1;
+            info.mipCount = 1;
+            const XrResult created = createSwapchain_(session_, &info, &panel.handle);
+            if (created != XR_SUCCESS) {
+                std::fprintf(stderr, "Refract OpenXR: panel swapchain %ux%u failed: %s (%d)\n", newWidth, newHeight, xr_result_name(created), created);
+                panel.handle = XR_NULL_HANDLE;
+                return false;
+            }
+            uint32_t count = 0;
+            if (enumerateSwapchainImages_(panel.handle, 0, &count, nullptr) != XR_SUCCESS || count == 0) return false;
+            panel.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+            if (enumerateSwapchainImages_(panel.handle, count, &count,
+                    reinterpret_cast<XrSwapchainImageBaseHeader*>(panel.images.data())) != XR_SUCCESS) return false;
+            panel.width = newWidth;
+            panel.height = newHeight;
+            std::fprintf(stderr, "Refract OpenXR: panel %u swapchain %ux%u\n", index, newWidth, newHeight);
+        }
+        panel.used = extent;
+        uint32_t image = 0;
+        XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (acquireSwapchainImage_(panel.handle, &acquireInfo, &image) != XR_SUCCESS || image >= panel.images.size()) return false;
+        XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = XR_INFINITE_DURATION;
+        if (waitSwapchainImage_(panel.handle, &waitInfo) != XR_SUCCESS) return false;
+        const D3D11_BOX box{0, 0, 0, width, height, 1};
+        d3dContext_.get()->CopySubresourceRegion(panel.images[image].texture, 0, 0, 0, 0, source, slice, &box);
+        XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        return releaseSwapchainImage_(panel.handle, &releaseInfo) == XR_SUCCESS;
     }
 
     bool update_projection_layer(
@@ -1688,36 +1826,75 @@ private:
 
         fill_projection_texture(projectionImages_[imageIndex].texture, imageIndex);
 
+        // Panels arrive in slices of the projection swapchain (mixed batches) or in panelCache_ (atlas frames), but
+        // SteamVR drew quads that pointed into the projection swapchain with the scene's image (seen in its VR View).
+        // Each panel is shown from a swapchain of its own, copied before this image goes back to the runtime.
+        const bool loading = loadingByImage_[imageIndex] != 0;
+        const auto& composition = uploadedProjectionByImage_[imageIndex];
+        const bool mixedBatch = !loading && uploadedMixedCounts_[imageIndex] != 0;
+        mixedProjection = mixedBatch && composition.view_count == 2;
+        quadCount = loading ? 0 : mixedBatch ? uploadedMixedCounts_[imageIndex] : composition.quad_count();
+        bool panelsReady = true;
+        for (uint32_t i = 0; i < quadCount && panelsReady; ++i) {
+            const bool cached = mixedBatch && uploadedCompositeByImage_[imageIndex];
+            panelsReady = fill_panel(i, cached ? panelCache_.get() : projectionImages_[imageIndex].texture,
+                cached ? i : mixedBatch ? i + (mixedProjection ? 2 : 0) : i,
+                mixedBatch ? uploadedMixedExtents_[imageIndex][i] : uploadedExtentByImage_[imageIndex]);
+        }
+
         XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = releaseSwapchainImage_(projectionSwapchain_, &releaseInfo);
         if (result != XR_SUCCESS) {
             return false;
         }
 
-        if (loadingByImage_[imageIndex]) {
+        if (loading) {
             mixedProjection = false;
             quadCount = place_loading_card(displayTime, quadLayers[0]) ? 1 : 0;
             return quadCount != 0;
         }
+        {
+            // Diagnostics: what the display frames actually showed, every 5 s.
+            static uint32_t frames = 0, loadingFrames = 0, atlas = 0, sceneFrames = 0, panelFails = 0, backwards = 0, repeats = 0, quads = 0;
+            static uint64_t lastShown = 0;
+            static auto reported = std::chrono::steady_clock::now();
+            const uint64_t shown = uploadedAndroidSequenceByImage_[imageIndex];
+            ++frames;
+            loadingFrames += loading;
+            atlas += uploadedCompositeByImage_[imageIndex];
+            sceneFrames += composition.view_count == 2;
+            panelFails += !panelsReady;
+            quads += quadCount;
+            if (!loading && shown != UINT64_MAX) {
+                backwards += shown < lastShown;
+                repeats += shown == lastShown;
+                lastShown = shown;
+            }
+            if (std::chrono::steady_clock::now() - reported > std::chrono::seconds(5)) {
+                reported = std::chrono::steady_clock::now();
+                std::fprintf(stderr, "Refract Frames: %u shown, loading=%u atlas=%u scene=%u panelFails=%u older=%u repeated=%u avgQuads=%.1f\n",
+                    frames, loadingFrames, atlas, sceneFrames, panelFails, backwards, repeats, frames ? double(quads) / frames : 0.0);
+                frames = loadingFrames = atlas = sceneFrames = panelFails = backwards = repeats = quads = 0;
+            }
+        }
+        if (!panelsReady) {  // Show the scene without its panels rather than nothing.
+            quadCount = 0;
+            if (!mixedProjection) return false;
+        }
 
-        const auto& composition = uploadedProjectionByImage_[imageIndex];
-        const bool mixedBatch = uploadedMixedCounts_[imageIndex] != 0;
-        mixedProjection = mixedBatch && composition.view_count == 2;
-        quadCount = mixedBatch ? uploadedMixedCounts_[imageIndex] : composition.quad_count();
         if (quadCount) {
             for (uint32_t i = 0; i < quadCount; ++i) {
                 const auto& source = mixedBatch ? uploadedMixedQuads_[imageIndex][i] : composition.quads[i];
                 auto& quad = quadLayers[i];
                 quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
                 quad.space = localSpace_;
-                quad.layerFlags = source.layer_flags;
+                quad.layerFlags = source.layer_flags & 7;  // Refract's own bits (kQuadLayerFlipped) are already applied.
                 quad.eyeVisibility = static_cast<XrEyeVisibility>(source.eye_visibility);
                 quad.pose.position = {source.pose.x, source.pose.y, source.pose.z};
                 quad.pose.orientation = {source.pose.qx, source.pose.qy, source.pose.qz, source.pose.qw};
                 quad.size = {source.width, source.height};
-                quad.subImage.swapchain = projectionSwapchain_;
-                quad.subImage.imageArrayIndex = mixedBatch ? i + (mixedProjection ? 2 : 0) : i;
-                quad.subImage.imageRect.extent = mixedBatch ? uploadedMixedExtents_[imageIndex][i] : uploadedExtentByImage_[imageIndex];
+                quad.subImage.swapchain = panelSwapchains_[i].handle;
+                quad.subImage.imageRect.extent = panelSwapchains_[i].used;
             }
             if (!mixedProjection) return true;
         }
@@ -1864,6 +2041,7 @@ private:
         uploadedAndroidSequenceByImage_[imageIndex] = UINT64_MAX;
         uploadedGpuSessionByImage_[imageIndex] = 0;
         uploadedMixedCounts_[imageIndex] = 0;
+        uploadedCompositeByImage_[imageIndex] = 0;
         uploadedProjectionByImage_[imageIndex] = {};
         uploadedExtentByImage_[imageIndex] = {static_cast<int32_t>(projectionWidth_), static_cast<int32_t>(projectionHeight_)};
         mirror_.present(d3dContext_.get(), texture, loading_.width(), loading_.height(),
@@ -1927,6 +2105,7 @@ private:
         if (imageIndex >= uploadedAndroidSequenceByImage_.size()) {
             return false;
         }
+        uploadedCompositeByImage_[imageIndex] = 0;
 
         HostImageFrame::Entry shown;
         if (!imageFrame_->snapshot(&shown)) {
@@ -1938,6 +2117,49 @@ private:
         if (header.width == 0 || header.height == 0 || header.layers == 0 || pixels == nullptr || pixels->empty()) {
             return false;
         }
+        if (header.version == refract::protocol::kCompositeGpuFrameVersion) {
+            // The scene goes to slices 0 and 1 like any stereo frame; panels to panelCache_ (see ensure_panel_cache),
+            // which update_projection_layer copies into each panel's own swapchain.
+            const auto table = composite_table(shown);
+            const bool scene = table.scene_width != 0;
+            if (table.quad_count > refract::protocol::kMaxCompositeQuads) return false;
+            if (uploadedAndroidSequenceByImage_[imageIndex] != header.sequence || uploadedMixedTimes_[imageIndex] != header.monotonic_time_ns) {
+                std::array<refract::protocol::CompositeQuad, refract::protocol::kMaxCompositeQuads> panels{};
+                uint32_t panelWidth = 1, panelHeight = 1;
+                for (uint32_t i = 0; i < table.quad_count; ++i) {
+                    std::memcpy(&panels[i], pixels->data() + sizeof(refract::protocol::WindowsGpuFrame) + sizeof(table) + i * sizeof(panels[i]), sizeof(panels[i]));
+                    panelWidth = (std::max)(panelWidth, panels[i].width);
+                    panelHeight = (std::max)(panelHeight, panels[i].height);
+                }
+                if (table.quad_count && !ensure_panel_cache(panelWidth, panelHeight)) return false;
+                std::array<WindowsGpuReceiver::Region, refract::protocol::kMaxCompositeQuads + 2> regions{};
+                size_t count = 0;
+                for (UINT eye = 0; scene && eye < 2; ++eye)
+                    regions[count++] = {texture, eye, {0, 0, 0, table.scene_width, table.scene_height, 1}, eye, false};
+                for (uint32_t i = 0; i < table.quad_count; ++i) {
+                    const auto& panel = panels[i];
+                    regions[count++] = {panelCache_.get(), panel.texture & 1, {panel.x, panel.y, 0, panel.x + panel.width, panel.y + panel.height, 1}, i,
+                                        (panel.texture & refract::protocol::kCompositeQuadFlipped) != 0};
+                    uploadedMixedQuads_[imageIndex][i] = panel.quad;
+                    uploadedMixedExtents_[imageIndex][i] = {static_cast<int32_t>(panel.width), static_cast<int32_t>(panel.height)};
+                }
+                if (!compositeReceiver_.copy_regions(d3dContext_.get(), regions.data(), count, shown.slot, &flipBlit_)) return false;
+                // No scene: no projection layer, only the panels (update_projection_layer checks view_count).
+                uploadedProjectionByImage_[imageIndex] = scene ? projection : refract::protocol::ImageProjection{};
+                uploadedExtentByImage_[imageIndex] = scene ? XrExtent2Di{static_cast<int32_t>(table.scene_width), static_cast<int32_t>(table.scene_height)}
+                                                           : XrExtent2Di{static_cast<int32_t>(projectionWidth_), static_cast<int32_t>(projectionHeight_)};
+                uploadedAndroidSequenceByImage_[imageIndex] = header.sequence;
+                uploadedGpuSessionByImage_[imageIndex] = 0;
+                uploadedMixedCounts_[imageIndex] = table.quad_count;
+                uploadedMixedTimes_[imageIndex] = header.monotonic_time_ns;
+            }
+            uploadedCompositeByImage_[imageIndex] = 1;
+            // The left eye, or else the first panel.
+            const XrExtent2Di& mirrored = scene ? uploadedExtentByImage_[imageIndex] : uploadedMixedExtents_[imageIndex][0];
+            mirror_.present(d3dContext_.get(), scene ? texture : panelCache_.get(), static_cast<uint32_t>(mirrored.width),
+                static_cast<uint32_t>(mirrored.height), static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
+            return true;
+        }
         if (refract::protocol::mixed_gpu_version(header.version)) {
             if (activeMixedCount_ < 2 || activeMixedCount_ > refract::protocol::kMaxCompositionLayers ||
                 activeMixedCount_ + (projection.view_count == 2 ? 1u : 0u) > projectionArraySize_) return false;
@@ -1946,7 +2168,8 @@ private:
                     auto& part = mixedFrames_[activeMixedBank_][i];
                     const bool scene = projection.view_count == 2;
                     const uint32_t slice = scene && i ? i + 1 : i;
-                    if (!part.receiver.copy_to(d3dContext_.get(), texture, slice, scene && i == 0 ? 2 : 1)) return false;
+                    const bool flipped = !(scene && i == 0) && (part.projection.quads[0].layer_flags & refract::protocol::kQuadLayerFlipped);
+                    if (!part.receiver.copy_to(d3dContext_.get(), texture, slice, scene && i == 0 ? 2 : 1, 0, &flipBlit_, flipped ? 1u : 0u)) return false;
                     const uint32_t firstQuad = projection.view_count == 2 ? 1 : 0;
                     if (i >= firstQuad) {
                         uploadedMixedQuads_[imageIndex][i - firstQuad] = part.projection.quads[0];
@@ -1961,7 +2184,17 @@ private:
                 uploadedMixedTimes_[imageIndex] = header.monotonic_time_ns;
             }
             mirror_.present(d3dContext_.get(), texture, header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
-            debug_capture_frame(d3dContext_.get(), texture, header.width, header.height, header.sequence);
+            debug_capture_frame(d3dContext_.get(), texture, header.width, header.height, header.sequence, 0, "scene");
+            for (uint32_t i = 0; i < uploadedMixedCounts_[imageIndex]; ++i) {
+                const auto& quad = uploadedMixedQuads_[imageIndex][i];
+                const auto& extent = uploadedMixedExtents_[imageIndex][i];
+                char label[192];
+                std::snprintf(label, sizeof(label), "panel %u pos=(%.2f %.2f %.2f) q=(%.2f %.2f %.2f %.2f) size=%.2fx%.2f eye=%u flags=%u",
+                    i, quad.pose.x, quad.pose.y, quad.pose.z, quad.pose.qx, quad.pose.qy, quad.pose.qz, quad.pose.qw,
+                    quad.width, quad.height, quad.eye_visibility, quad.layer_flags);
+                debug_capture_frame(d3dContext_.get(), texture, static_cast<UINT>(extent.width), static_cast<UINT>(extent.height),
+                    header.sequence, i + (projection.view_count == 2 ? 2 : 0), label);
+            }
             return true;
         }
         uploadedMixedCounts_[imageIndex] = 0;
@@ -1977,7 +2210,12 @@ private:
                     static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
                 return true;
             }
-            if (!gpuReceiver_.copy_to(d3dContext_.get(), texture, 0, 2, shown.slot < 0 ? 0 : shown.slot)) return false;
+            uint32_t flipSlices = 0;
+            for (uint32_t i = 0; i < projection.quad_count(); ++i)
+                if (projection.quads[i].layer_flags & refract::protocol::kQuadLayerFlipped) flipSlices |= 1u << i;
+            // A one-panel frame carries its image twice; flip both copies alike.
+            if (projection.quad_count() == 1 && flipSlices) flipSlices = 3;
+            if (!gpuReceiver_.copy_to(d3dContext_.get(), texture, 0, 2, shown.slot < 0 ? 0 : shown.slot, &flipBlit_, flipSlices)) return false;
             uploadedGpuSessionByImage_[imageIndex] = gpu.session;
             uploadedAndroidSequenceByImage_[imageIndex] = header.sequence;
             uploadedProjectionByImage_[imageIndex] = projection;
@@ -2412,6 +2650,9 @@ private:
         if (statsShortcut_.toggled(frame.controllers, inputNow)) toggle_stats();
 #endif
         menuShortcut_.apply(frame.controllers, inputNow);
+#if defined(_WIN32)
+        if (mirror_.menu_key_held()) frame.controllers[0].buttons |= refract::protocol::MenuClick;
+#endif
 
         if (locatedAny) {
             if (sequence % 90 == 0) {
@@ -2589,6 +2830,16 @@ private:
     PFN_xrGetD3D11GraphicsRequirementsKHR getD3D11GraphicsRequirements_ = nullptr;
     std::mutex gpuMutex_;
     WindowsGpuReceiver gpuReceiver_;
+    // Atlas frames (v10). Their own caches: scene-only frames between them would otherwise resize gpuReceiver_'s.
+    WindowsGpuReceiver compositeReceiver_;
+    FlipBlit flipBlit_;  // Render device only (upload path, under gpuMutex_).
+    struct PanelSwapchain {
+        XrSwapchain handle = XR_NULL_HANDLE;
+        uint32_t width = 0, height = 0;  // The swapchain's size; the panel is its top-left `used` part.
+        XrExtent2Di used{};
+        std::vector<XrSwapchainImageD3D11KHR> images;
+    };
+    std::array<PanelSwapchain, refract::protocol::kMaxCompositionLayers> panelSwapchains_{};  // See fill_panel().
     struct MixedFramePart { WindowsGpuReceiver receiver; refract::protocol::ImageFrameHeader header{}; refract::protocol::ImageProjection projection{}; };
     std::array<std::array<MixedFramePart, refract::protocol::kMaxCompositionLayers>, 2> mixedFrames_{};
     uint32_t activeMixedBank_ = 0, activeMixedCount_ = 0, pendingMixedBank_ = 1, pendingMixedCount_ = 0, pendingMixedIndex_ = 0;
@@ -2597,6 +2848,9 @@ private:
     std::vector<std::array<XrExtent2Di, refract::protocol::kMaxCompositionLayers>> uploadedMixedExtents_;
     std::vector<uint32_t> uploadedMixedCounts_;
     std::vector<uint64_t> uploadedMixedTimes_;
+    std::vector<uint8_t> uploadedCompositeByImage_;  // The image holds an atlas frame: its panels are in panelCache_.
+    ComPtr<ID3D11Texture2D> panelCache_;  // See ensure_panel_cache().
+    uint32_t panelCacheWidth_ = 0, panelCacheHeight_ = 0;
     ComPtr<ID3D11Device> receiveDevice_;
     ComPtr<ID3D11DeviceContext> receiveContext_;
     bool reportedGpuImage_ = false;
