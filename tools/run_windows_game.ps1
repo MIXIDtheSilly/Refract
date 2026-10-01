@@ -239,13 +239,24 @@ try {
     $gameStarted = $true
     if ($PcViewer) { Write-Host "$GameName | Playing on this PC. Closing the viewer window stops this game session." }
     else { Write-Host "$GameName | Refract is running. Closing its window stops this game session." }
-    $missing = 0
+    $missing = 0; $gamePid = ''
     while (!$sessionProcess.HasExited) {
         if ($closeRequest -and $closeRequest.WaitOne(0)) { break }
         $game = Invoke-Adb @('shell', 'pidof', $Package)
-        if ($game.Code -eq 0 -and $game.Text) { $missing = 0 } else { $missing++ }
+        if ($game.Code -eq 0 -and $game.Text) { $missing = 0; $gamePid = ($game.Text -split '\s+')[0] } else { $missing++ }
         if ($missing -ge 2) { break }
         Start-Sleep -Milliseconds 500
+    }
+    # The game's process went away while the bridge or viewer still ran. If it crashed, say so (and why when the
+    # cause is known) instead of ending quietly and leaving the player looking at a window that never got a frame.
+    if ($missing -ge 2 -and $gamePid -match '^\d+$') {
+        $log = (Invoke-Adb @('logcat', '-d', "--pid=$gamePid") 20000).Text
+        $crash = [regex]::Match($log, '(?m)(Fatal signal \d+.*|FATAL EXCEPTION.*|HandleFatalSignal: sig=\d+.*)$')
+        if ($crash.Success -and $log -match 'VrApiLoader|VrApi Loader') {
+            throw "$GameName is built on Meta's older VrApi SDK, which Refract does not support yet (only OpenXR games run)."
+        }
+        if ($crash.Success) { throw "$GameName crashed: $($crash.Groups[1].Value.Trim())" }
+        Write-Host "$GameName closed."
     }
     # The bridge or viewer quitting by itself with an error (not the player closing it) ends the session as a failure.
     if ($sessionProcess.HasExited -and !($closeRequest -and $closeRequest.WaitOne(0)) -and $sessionProcess.ExitCode -ne 0) {
