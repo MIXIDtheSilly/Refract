@@ -153,6 +153,18 @@ function Use-Digitalis($Process) {
     Wait-Boot $Process
     if ((Get-Prop ro.dalvik.vm.native.bridge) -ne 'libberberis_arm64.so') { throw 'Digitalis did not become the native bridge; see scripts\translator.ps1.' }
 }
+# Android turns on its zram swap at boot from the zram module in /system_dlkm, but on this AVD the module is
+# sometimes not loaded (seen after adb remount gave the system partitions a writable overlay). Without swap a
+# big game thrashes: Yeeps uses ~3 GB of the 4 and dropped to ~0.1 fps. Load it and turn swap on if missing.
+function Ensure-Swap {
+    $size = [int]($MemoryMB * 3 / 4)
+    $script = ('grep -q zram0 /proc/swaps && exit 0; d=/system_dlkm/lib/modules; [ -e /sys/block/zram0 ] || {{ insmod $d/zsmalloc.ko; insmod $d/zram.ko; }}; [ -e /sys/block/zram0 ] || exit 1; echo {0}M > /sys/block/zram0/disksize && mkswap /dev/block/zram0 > /dev/null && swapon /dev/block/zram0' -f $size)
+    $ErrorActionPreference = 'Continue'
+    & $adb -s $serial shell "su 0 sh -c '$script'" 2>$null | Out-Null
+    $ok = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = 'Stop'
+    if ($ok) { Write-Host 'Guest swap: on.' } else { Write-Warning 'Could not turn on the guest zram swap; big games may stall.' }
+}
 function Get-Clocksource {
     $ErrorActionPreference = 'Continue'
     $clock = ((& $adb -s $serial shell su 0 cat /sys/devices/system/clocksource/clocksource0/current_clocksource 2>$null) -join '').Trim()
@@ -295,6 +307,7 @@ switch ($Action) {
         if ($clock -eq 'tsc') { Write-Host 'Guest clock: TSC.' }
         elseif ($clock) { Write-Warning "Guest clock is '$clock', not the TSC; games will run slower." }
         else { Write-Warning 'Could not read the guest clocksource.' }
+        Ensure-Swap
         Run $adb @('-s', $serial, 'reverse', 'tcp:38490', 'tcp:38490')
         Run $adb @('-s', $serial, 'reverse', 'tcp:38491', 'tcp:38491')
         Run $adb @('-s', $serial, 'shell', 'setprop', 'debug.refract.gpu_share', $(if ($GpuSharing) { '1' } else { '0' }))
