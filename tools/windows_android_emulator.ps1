@@ -26,10 +26,10 @@ param(
     # Audio as in scripts\start_emulator.ps1: the default winaudio backend plays silence on this PC, and
     # qemu's 10 ms DirectSound queue crackles under load. Without -allow-host-audio the guest mic gets zeros.
     [ValidateSet('dsound', 'winaudio', 'sdl')][string]$Audio = 'dsound',
-    [ValidateRange(10, 200)][int]$AudioLatencyMs = 50,
+    [ValidateRange(10, 200)][int]$AudioLatencyMs = 20,
     # DirectSound buffer size: qemu fills all of it, so once guest and host audio clocks drift apart the
     # sound runs this far behind. 64 KiB (~340 ms) made Yeeps voice chat lag badly.
-    [ValidateRange(40, 340)][int]$AudioBufferMs = 70,
+    [ValidateRange(30, 340)][int]$AudioBufferMs = 40,
     [switch]$NoHostMic
 )
 $ErrorActionPreference = 'Stop'
