@@ -2,8 +2,8 @@
 
 ## AXRB
 
-Refract is based on [AXRB](https://github.com/TheReal-Flo/AXRB) (Android Extended
-Reality Bridge) by Florian Reintgen. Much of the code in this repository uses
+Refract is based on [AXRB](https://github.com/Android-XR-Bridge/AXRB) (Android Extended
+Reality Bridge) by Feline Reintgen. Much of the code in this repository uses
 AXRB code: the Android OpenXR runtime, the runtime APK, the host bridge, the protocol,
 the tests and the launcher. That code was renamed and then extended in this repository.
 AXRB is MIT-licensed; its copyright notice is kept in [LICENSE](LICENSE).

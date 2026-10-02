@@ -82,7 +82,7 @@ anti-cheat, platform security, store restrictions or application license terms.
 
 ## Credits and license
 
-Refract is based on [AXRB](https://github.com/TheReal-Flo/AXRB) by Florian Reintgen, and
+Refract is based on [AXRB](https://github.com/Android-XR-Bridge/AXRB) by Feline Reintgen, and
 much of its code comes from AXRB. See [CREDITS.md](CREDITS.md).
 
 Refract is released under the [MIT License](LICENSE), which keeps AXRB's MIT copyright
