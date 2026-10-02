@@ -141,17 +141,25 @@ function Wait-Boot($Process, [int]$Minutes = 3) {
 function Get-Prop([string]$Name) { ((& $adb -s $serial shell getprop $Name) -join '').Trim() }
 # Games need the Digitalis ARM64 translator (patched for Refract; Google's is slower and lacks the fixes).
 # scripts\translator.ps1 installs it into the writable /system overlay, which only boots with -writable-system.
+# It lives on /system, not in an APK, so an emulator set up by an earlier Refract keeps its old translator unless
+# the installed host library (the file Refract rebuilds) is compared with this release's (issue #11).
+function Test-Digitalis {
+    if ((Get-Prop ro.dalvik.vm.native.bridge) -ne 'libberberis_arm64.so') { return $false }
+    $bundled = (Get-FileHash -LiteralPath "$PSScriptRoot\..\prebuilts\digitalis\system\lib64\libberberis_arm64.so" -Algorithm SHA256).Hash
+    $installed = (((& $adb -s $serial shell sha256sum /system/lib64/libberberis_arm64.so) -join '') -split '\s')[0]
+    $installed -eq $bundled  # -eq ignores case: sha256sum prints lowercase, Get-FileHash uppercase.
+}
 function Use-Digitalis($Process) {
-    if ((Get-Prop ro.dalvik.vm.native.bridge) -eq 'libberberis_arm64.so') { return }
+    if (Test-Digitalis) { return }
     $level = [int](Get-Prop ro.build.version.sdk)
     if ($level -lt 36) {
         throw "$Avd is Android API $level; Refract's Digitalis translator needs an Android 16 (API 36) AVD such as refract-google-api36."
     }
     Stage 'Installing the ARM translator (Android restarts)'
-    & "$PSScriptRoot\..\scripts\translator.ps1" -Use digitalis -Serial $serial -Adb $adb
+    & "$PSScriptRoot\..\scripts\translator.ps1" -Use digitalis -Refresh -Serial $serial -Adb $adb
     Start-Sleep -Seconds 5
     Wait-Boot $Process
-    if ((Get-Prop ro.dalvik.vm.native.bridge) -ne 'libberberis_arm64.so') { throw 'Digitalis did not become the native bridge; see scripts\translator.ps1.' }
+    if (-not (Test-Digitalis)) { throw "Digitalis did not become this release's native bridge; see scripts\translator.ps1." }
 }
 # Android turns on its zram swap at boot from the zram module in /system_dlkm, but on this AVD the module is
 # sometimes not loaded (seen after adb remount gave the system partitions a writable overlay). Without swap a

@@ -79,6 +79,8 @@ export const guestPackages = [
   { package: 'com.oculus.systemdriver', label: 'Refract XR driver', apk: 'build-android-runtime-windows-arm64-v8a/refract-systemdriver-debug.apk' },
   { package: 'com.oculus.horizon', label: 'Meta Platform stand-in', apk: 'build-platform-sdk/refract-platform-debug.apk' },
 ];
+// The Digitalis host library scripts/translator.ps1 pushes to /system/lib64.
+export const translatorLibrary = 'prebuilts/digitalis/system/lib64/libberberis_arm64.so';
 // Emulator page settings, as tools/windows_android_emulator.ps1 parameters. Switches are only passed when on.
 export const audioBackends = ['dsound', 'winaudio', 'sdl'];
 export function emulatorOptions(settings) {
@@ -168,13 +170,21 @@ export class Runtime {
     }
     await this.prepare(update);
   }
+  // Whether Android runs this release's Digitalis. It lives on /system, not in an APK, so an emulator set up by an
+  // earlier Refract kept its old translator (issue #11). The host library is the file Refract rebuilds.
+  async translatorCurrent() {
+    if ((await this.adb(['shell', 'getprop', 'ro.dalvik.vm.native.bridge'])).trim() !== 'libberberis_arm64.so') return false;
+    const local = await sha256(path.join(this.root, translatorLibrary)).catch(() => { throw new Error(`The ARM translator is missing (${translatorLibrary}).`); });
+    const remote = (await this.adb(['shell', 'sha256sum', '/system/lib64/libberberis_arm64.so']).catch(() => '')).split(/\s/)[0];
+    return remote === local;
+  }
   // Brings the running Android up to date with this Refract checkout. The emulator start script
   // installs the translator itself; an emulator started some other way may still need it.
   async prepare(update = () => {}) {
-    if ((await this.adb(['shell', 'getprop', 'ro.dalvik.vm.native.bridge'])).trim() !== 'libberberis_arm64.so') {
+    if (!await this.translatorCurrent()) {
       update('Installing the ARM translator (Android restarts)');
       await run('powershell.exe', powershellArgs(path.join(this.root, 'scripts/translator.ps1'), {
-        Use: 'digitalis', Serial: `emulator-${this.port}`, Adb: path.join(this.settings.sdk, 'platform-tools/adb.exe') }), { timeout: 300000 });
+        Use: 'digitalis', Refresh: true, Serial: `emulator-${this.port}`, Adb: path.join(this.settings.sdk, 'platform-tools/adb.exe') }), { timeout: 300000 });
       await sleep(5000); await this.waitBoot(this.port);
     }
     // Unmodified Quest games only use the Meta Platform SDK (Refract's stand-in) when Build.MANUFACTURER says

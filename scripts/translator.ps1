@@ -50,7 +50,8 @@ if ((Sh '[ -d /system/lib64/arm64.google ] && echo yes || echo no') -ne 'yes') {
 # Stage the Digitalis set (host libraries go straight into /system/lib64; they do not clash).
 if ($Refresh -or (Sh '[ -d /system/lib64/arm64.digitalis ] && echo yes || echo no') -ne 'yes') {
     if (-not (Test-Path "$bundle\lib64\libberberis_arm64.so")) { throw "Digitalis bundle not found at $bundle" }
-    Sh 'rm -rf /system/lib64/arm64.digitalis /system/bin/arm64.digitalis'
+    # Unlink the old host libraries so the push makes new files instead of rewriting the ones the running zygote maps.
+    Sh 'rm -rf /system/lib64/arm64.digitalis /system/bin/arm64.digitalis /system/lib64/libberberis_*.so'
     & $adb -s $Serial push "$bundle\lib64\arm64" /system/lib64/arm64.digitalis | Select-Object -Last 1
     & $adb -s $Serial push "$bundle\bin\arm64" /system/bin/arm64.digitalis | Select-Object -Last 1
     & $adb -s $Serial push "$bundle\etc\ld.config.arm64.txt" /system/etc/ld.config.arm64.txt.digitalis | Select-Object -Last 1

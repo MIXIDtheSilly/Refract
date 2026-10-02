@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Runtime, headsetProblem, readableError, run, powershellArgs, newUserId, validUserId } from '../core/runtime.mjs';
+import { Runtime, headsetProblem, readableError, run, powershellArgs, newUserId, validUserId, translatorLibrary } from '../core/runtime.mjs';
 
 test('each install gets its own Meta user id', () => {
   const ids = new Set(Array.from({ length: 1000 }, newUserId));
@@ -136,4 +136,29 @@ test('an emulator already running the configured AVD on another port is used ins
   assert.equal(await runtime.locate(), null); assert.equal(runtime.port, 5580);
   runtime = fake({});
   assert.equal(await runtime.online(), false);
+});
+
+test('an emulator keeping an older Digitalis than this release gets it replaced', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-translator-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.dirname(path.join(root, translatorLibrary)), { recursive: true });
+  await fs.writeFile(path.join(root, translatorLibrary), 'digitalis');
+  const bundled = '94bca81b0242f4b0fe15b8dfc52e298c57ed3df979de334fa4714136d2440e80';  // SHA-256 of 'digitalis'.
+  const fake = (bridge, installed) => {
+    const runtime = new Runtime(root, { avd: 'refract-google-api36', port: 5580, sdk: root, memoryMB: 8192 });
+    runtime.adbAt = async (port, args) => {
+      if (args.join(' ') === 'shell getprop ro.dalvik.vm.native.bridge') return `${bridge}\r\n`;
+      if (args.join(' ') === 'shell sha256sum /system/lib64/libberberis_arm64.so') {
+        if (!installed) throw new Error('sha256sum: /system/lib64/libberberis_arm64.so: No such file or directory');
+        return `${installed}  /system/lib64/libberberis_arm64.so\r\n`;
+      }
+      throw new Error(`unexpected adb ${args.join(' ')}`);
+    };
+    return runtime;
+  };
+  assert.equal(await fake('libberberis_arm64.so', bundled).translatorCurrent(), true);
+  // test-1 to test-4's translator, still on an emulator after updating Refract (issue #11).
+  assert.equal(await fake('libberberis_arm64.so', 'bab24a852be13f7871d03aabd8319d4633c4a6526bbb6ce9f2caaf21522804a7').translatorCurrent(), false);
+  assert.equal(await fake('libberberis_arm64.so', null).translatorCurrent(), false);
+  assert.equal(await fake('libndk_translation.so', bundled).translatorCurrent(), false);
 });

@@ -7,5 +7,6 @@ digitalis-sha:     a6edb72
 artifact-count:    74
 
 refract-note:      system/lib64/libberberis_arm64.so was rebuilt by Refract with
-                   tools/translator/digitalis-performance-fix.patch applied
-                   (SHA-256 b4dc5a2998c93b96c749dabb4749cdf55415eb824cebfd5a8adb811ca24d14ff).
+                   tools/translator/digitalis-performance-fix.patch,
+                   digitalis-block-chaining.patch and digitalis-return-prediction.patch applied
+                   (SHA-256 13821f9b70146e843d1c0e3cb28fc085d06cb5a51ecfec7299f97a67ba31301a).
