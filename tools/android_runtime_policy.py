@@ -75,6 +75,9 @@ def main():
     run('shell', 'setprop debug.refract.cached_buffer_memory 1')
     # ETC2/EAC/ASTC textures become BC, which the host GPU samples natively (no decompressed copy in VRAM).
     run('shell', 'setprop debug.refract.transcode_textures 1')
+    # Let the translator's optimizing tier take hot regions of any size (default: 20+ instructions). Batman
+    # spent ~20% of UnityMain entering tiny lite regions; 0 gave ~70 -> ~79 fps. Read once at game start.
+    run('shell', 'setprop berberis.gearup_min_insns 0')
     run('shell', 'sync')
     print(json.dumps({'status': 'ready', 'max_map_count': limit, 'scheduler': scheduler, 'translator': 'digitalis',
                       'vulkan_layer': remote}))

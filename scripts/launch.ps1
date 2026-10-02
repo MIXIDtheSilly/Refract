@@ -102,6 +102,8 @@ if ($phone) {
     & $adb -s $Serial shell settings put global gpu_debug_app $Package
     & $adb -s $Serial shell setprop debug.refract.cached_buffer_memory $(if ($UncachedBuffers) { '0' } else { '1' })
     & $adb -s $Serial shell setprop debug.refract.transcode_textures $(if ($EmulatedTextures) { '0' } else { '1' })
+    # Hot regions of any size gear up to the optimizing tier (default 20+ insns); Batman ~70 -> ~79 fps.
+    & $adb -s $Serial shell setprop berberis.gearup_min_insns 0
 }
 & $adb -s $Serial reverse tcp:38490 tcp:38490 | Out-Null
 & $adb -s $Serial reverse tcp:38491 tcp:38491 | Out-Null
