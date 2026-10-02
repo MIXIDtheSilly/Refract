@@ -71,6 +71,16 @@ test('DLC download availability comes from explicit entitlements', async () => {
   const api = new QuestStore('test', async () => Response.json({ data: { node: { active_dlc_entitlements:[{ item: owned }], firstIapItems:{ edges:[{node:owned},{node:{id:'444444',display_name:'Not owned'}}] } } } }));
   const items = await api.dlc('111111'); assert.equal(items.length,2); assert.equal(items[0].owned,true); assert.equal(items[1].owned,false);
 });
+test('DLC list is read from the current build, with bundle and per-item entitlements', async () => {
+  const api = new QuestStore('test', async () => Response.json({ data: { node: { id:'111111', latest_supported_binary: { firstIapItems: { count:4, edges: [
+    { node: { __typename:'AppItemBundle', id:'900000', display_name:'Bundle', is_viewer_entitled:true, bundle_items:{ edges:[{ node:{ id:'222222' } }] } } },
+    { node: { __typename:'IAPItem', id:'222222', display_name:'From bundle', is_viewer_entitled:false } },
+    { node: { __typename:'IAPItem', id:'333333', display_name:'Bought alone', is_viewer_entitled:true } },
+    { node: { __typename:'IAPItem', id:'444444', display_name:'Not owned', is_viewer_entitled:false } }
+  ] } } } } }));
+  const items = await api.dlc('111111');
+  assert.deepEqual(items.map(i => [i.id, i.owned]), [['222222',true],['333333',true],['444444',false]]);
+});
 async function temp(t) { const dir = await fs.mkdtemp(path.join(os.tmpdir(),'refract-test-')); t.after(() => fs.rm(dir,{recursive:true,force:true})); return dir; }
 test('download verifies complete payload and produces a digest', async t => {
   const dir = await temp(t), destination = path.join(dir,'base.apk');

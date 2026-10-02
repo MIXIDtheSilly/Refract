@@ -175,8 +175,18 @@ export class QuestStore {
     const result = await this.query('3853229151363174', { id: appId(id), first: 200, last: null, after: null, before: null, forward: true });
     const app = result.data?.node;
     if (!app) throw new Error('Meta did not return add-on information.');
-    const owned = new Set(nodes(app.active_dlc_entitlements).map(e => String(e.item?.id)));
-    const items = [...nodes(app.firstIapItems ?? app.iap_items), ...nodes(app.active_dlc_entitlements).map(e => e.item)];
+    // Meta now returns the add-on list on the current build rather than the app node.
+    const binary = app.latest_supported_binary;
+    const listed = nodes(app.firstIapItems ?? app.iap_items ?? binary?.firstIapItems ?? binary?.iap_items).filter(Boolean);
+    const entitled = nodes(app.active_dlc_entitlements).map(e => e.item).filter(Boolean);
+    const owned = new Set(entitled.map(i => String(i.id)));
+    // Ownership comes only from Meta's per-viewer flag; an owned bundle grants each item it contains.
+    for (const i of listed) if (i.is_viewer_entitled === true) {
+      owned.add(String(i.id));
+      for (const part of nodes(i.bundle_items)) if (part?.id) owned.add(String(part.id));
+    }
+    // Bundles only group add-ons; their contents are listed and downloaded individually.
+    const items = [...listed.filter(i => i.__typename !== 'AppItemBundle'), ...entitled];
     return [...new Map(items.filter(Boolean).map(i => [String(i.id), i])).values()].map(i => ({
       id: String(i.id), name: i.display_name || i.sku || 'Add-on', owned: owned.has(String(i.id)),
       files: [i.latest_supported_asset_file, ...nodes(i.asset_files)].filter(f => f?.id || f?.uri).map(f => ({
