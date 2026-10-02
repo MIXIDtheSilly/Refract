@@ -32,18 +32,18 @@ test('OpenXR errors from the host bridge become what the player should do', () =
   assert.equal(headsetProblem('something else'), '');
 });
 
-test('Play on PC runs the session script with -PcViewer, VR without it', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
+test('Play on PC runs the session script with -PcViewer and its eye size, VR with its render scale', { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-launch-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'tools'));
   await fs.writeFile(path.join(root, 'tools/run_windows_game.ps1'), `
-param($Avd, $Port, $Sdk, $MemoryMB, $Package, $Activity, $GameName, [switch]$Owned, [switch]$PcViewer, $UserId)
-Write-Output "PC:$PcViewer USER:$UserId"
+param($Avd, $Port, $Sdk, $MemoryMB, $Package, $Activity, $GameName, [switch]$Owned, [switch]$PcViewer, $UserId, $EyeSize, $RenderScale)
+Write-Output "PC:$PcViewer USER:$UserId EYE:$EyeSize SCALE:$RenderScale."
 exit 3
 `);
-  const runtime = new Runtime(root, { avd:'test',port:5580,sdk:root,memoryMB:8192,userId:'28315021954821081' });
+  const runtime = new Runtime(root, { avd:'test',port:5580,sdk:root,memoryMB:8192,userId:'28315021954821081',pcEyeSize:2048,vrRenderScale:80 });
   const game = { id:'local:com.example.game',package:'com.example.game',activity:'com.example.game/.Main',name:'Test' };
-  for (const [mode, expected] of [['pc', 'PC:True USER:28315021954821081'], ['vr', 'PC:False USER:28315021954821081']]) {
+  for (const [mode, expected] of [['pc', 'PC:True USER:28315021954821081 EYE:2048 SCALE:\\.'], ['vr', 'PC:False USER:28315021954821081 EYE: SCALE:80\\.']]) {
     const output = await new Promise(resolve => { runtime.launch(game, (code, text) => resolve(text), mode); assert.equal(runtime.mode, mode); });
     assert.match(output, new RegExp(expected));
     assert.equal(runtime.mode, null);

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { call } from '../api';
 import { activeStatuses } from './common';
 
-const numeric = ['port', 'memoryMB', 'cores'];
+const numeric = ['port', 'memoryMB', 'cores', 'pcEyeSize', 'vrRenderScale'];
 
 // A draft of the launcher settings with field helpers and a save bar. Pages that use it are keyed
 // by the saved settings, so a save elsewhere starts a fresh draft.

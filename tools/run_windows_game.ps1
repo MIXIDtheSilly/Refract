@@ -19,6 +19,10 @@ param(
     # -PcViewer shows the game in a window on this PC (viewer\build\refract_viewer.exe) with keyboard, mouse and
     # gamepad input (scripts\pose_input_server.py) instead of in a VR headset through the host bridge.
     [switch]$PcViewer,
+    # -EyeSize is the game's square render size per eye in the PC window. -RenderScale (percent) scales the
+    # headset's recommended eye size in VR; the host bridge reads it as REFRACT_RENDER_SCALE.
+    [ValidateRange(512, 4096)][int]$EyeSize = 1600,
+    [ValidateRange(25, 200)][int]$RenderScale = 100,
     # build_host.cmd (Ninja) writes host-bridge\refract-host-bridge.exe; multi-config generators add Release\.
     [string]$HostExe
 )
@@ -194,7 +198,7 @@ try {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     if ($PcViewer) {
         # Head and controller poses from the keyboard, mouse (through the viewer) and any Xbox controller.
-        $inputServer = Start-Process python -ArgumentList "`"$PSScriptRoot\..\scripts\pose_input_server.py`"", '--eye-width', 1600, '--eye-height', 1600, '--refresh-rate', 250 -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\input.log" -RedirectStandardError "$logs\input.err"
+        $inputServer = Start-Process python -ArgumentList "`"$PSScriptRoot\..\scripts\pose_input_server.py`"", '--eye-width', $EyeSize, '--eye-height', $EyeSize, '--refresh-rate', 250 -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\input.log" -RedirectStandardError "$logs\input.err"
         $null = $inputServer.Handle
         # The game reads its eye size from the first pose connection, so the server must be listening first.
         for ($waited = 0; $waited -lt 10000 -and !$inputServer.HasExited; $waited += 250) {
@@ -222,10 +226,11 @@ try {
             $env:REFRACT_CLOSE_EVENT = $closeEventName
             # The headset's performance panel (hold Y + B) polls Android CPU and the game's threads over adb.
             $env:REFRACT_ADB = $adb; $env:REFRACT_SERIAL = $serial; $env:REFRACT_PACKAGE = $Package
+            $env:REFRACT_RENDER_SCALE = $RenderScale
             $sessionProcess = Start-Process -FilePath $HostExe -ArgumentList @('--serve-openxr', '38490', '0', $titleArgument) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\host.log" -RedirectStandardError "$logs\host.err"
         } finally {
             $env:REFRACT_CLOSE_EVENT = $previousCloseEvent
-            Remove-Item Env:REFRACT_ADB, Env:REFRACT_SERIAL, Env:REFRACT_PACKAGE -ErrorAction SilentlyContinue
+            Remove-Item Env:REFRACT_ADB, Env:REFRACT_SERIAL, Env:REFRACT_PACKAGE, Env:REFRACT_RENDER_SCALE -ErrorAction SilentlyContinue
         }
         $null = $sessionProcess.Handle  # Keeps ExitCode readable after the process ends.
         # Start the game only once the bridge has an OpenXR session (it then prints the tracking origin).

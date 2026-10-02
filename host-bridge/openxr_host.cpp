@@ -1585,17 +1585,34 @@ private:
         if (enumerateViewConfigurationViews_(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                 2, &viewCount, configViews.data()) != XR_SUCCESS) return false;
         projectionWidth_ = projectionHeight_ = 0;
+        uint32_t maxWidth = refract::protocol::kMaxEyeDimension, maxHeight = refract::protocol::kMaxEyeDimension;
         // The stereo transport uses equal-size array slices. Accommodate both
         // recommendations if the runtime recommends asymmetric view sizes.
         for (const auto& view : configViews) {
             projectionWidth_ = (std::max)(projectionWidth_, view.recommendedImageRectWidth);
             projectionHeight_ = (std::max)(projectionHeight_, view.recommendedImageRectHeight);
+            if (view.maxImageRectWidth) maxWidth = (std::min)(maxWidth, view.maxImageRectWidth);
+            if (view.maxImageRectHeight) maxHeight = (std::min)(maxHeight, view.maxImageRectHeight);
         }
         if (!refract::protocol::valid_render_extent(projectionWidth_, projectionHeight_)) {
             std::fprintf(stderr, "Refract OpenXR: unsupported recommended eye extent %ux%u\n", projectionWidth_, projectionHeight_);
             return false;
         }
         std::fprintf(stderr, "Refract OpenXR: runtime recommended stereo extent %ux%u\n", projectionWidth_, projectionHeight_);
+        // REFRACT_RENDER_SCALE (percent, launcher Settings > Display) resizes the game's eye buffers and this
+        // swapchain together, so the game renders at the scaled size and the compositor resamples it.
+        if (const char* text = std::getenv("REFRACT_RENDER_SCALE"); text && *text) {
+            const int percent = std::atoi(text);
+            if (percent >= 25 && percent <= 200 && percent != 100) {
+                const auto scaled = [percent](uint32_t value, uint32_t limit) {
+                    const uint32_t size = static_cast<uint32_t>((static_cast<uint64_t>(value) * percent + 100) / 200 * 2);
+                    return (std::max)(64u, (std::min)(size, limit));
+                };
+                projectionWidth_ = scaled(projectionWidth_, maxWidth);
+                projectionHeight_ = scaled(projectionHeight_, maxHeight);
+                std::fprintf(stderr, "Refract OpenXR: render scale %d%% -> stereo extent %ux%u\n", percent, projectionWidth_, projectionHeight_);
+            }
+        }
         uint32_t formatCount = 0;
         XrResult result = enumerateSwapchainFormats_(session_, 0, &formatCount, nullptr);
         if (result != XR_SUCCESS || formatCount == 0) {

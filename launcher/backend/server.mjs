@@ -17,7 +17,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { MetaAuth, QuestStore, appId } from '../core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from '../core/download.mjs';
 import { State } from '../core/state.mjs';
-import { Runtime, run, validPackage, audioBackends, newUserId, validUserId, guestPackages } from '../core/runtime.mjs';
+import { Runtime, run, validPackage, audioBackends, newUserId, validUserId, validEyeSize, validRenderScale, guestPackages } from '../core/runtime.mjs';
 import { Emulator, redact, diskSizes } from '../core/emulator.mjs';
 import { checkSetup, fixSetup, headsetStatus, refreshPath } from '../core/setup.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
@@ -274,7 +274,8 @@ const methods = {
     await fs.mkdir(target, { recursive: true }); return { openPath: target };
   },
   settings: async values => {
-    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'cores', 'showWindow', 'audio', 'hostMic', 'keepEmulator', 'userId'];
+    const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'cores', 'showWindow', 'audio', 'hostMic', 'keepEmulator', 'userId',
+      'pcEyeSize', 'vrRenderScale'];
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
     if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
     const settings = { ...state.data.settings };
@@ -286,6 +287,8 @@ const methods = {
       ['showWindow', 'hostMic', 'keepEmulator'].some(key => typeof settings[key] !== 'boolean')) throw new Error('Check the emulator CPU cores (1 to 6) and audio settings.');
     settings.userId = String(settings.userId ?? '').trim();
     if (!validUserId(settings.userId)) throw new Error('The user ID must be a whole number from 1 to 9223372036854775807.');
+    if (!validEyeSize(settings.pcEyeSize) || !validRenderScale(settings.vrRenderScale))
+      throw new Error('Check the resolution: PC eye size 512 to 4096 (a multiple of 8), VR render scale 25 to 200%.');
     state.data.settings = settings; runtime.settings = settings; await persist();
   },
   // The shell opens these after validating them.
@@ -403,7 +406,7 @@ const loaded = (async () => {
   state = new State(dataDirectory); await state.load();
   // Digitalis (the ARM64 translator Refract needs) is built for Android 16, so the default AVD is API 36.
   state.data.settings = { avd: 'refract-google-api36', port: 5580, memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'),
-    cores: 6, showWindow: false, audio: 'dsound', hostMic: true, keepEmulator: false, ...state.data.settings };
+    cores: 6, showWindow: false, audio: 'dsound', hostMic: true, keepEmulator: false, pcEyeSize: 1600, vrRenderScale: 100, ...state.data.settings };
   // A saved SDK path that has no SDK in it came from an earlier default; look for the real one.
   if (!await isSdk(state.data.settings.sdk)) state.data.settings.sdk = await findSdk();
   // Refract no longer needs games patched; drop the old ovrport setting.

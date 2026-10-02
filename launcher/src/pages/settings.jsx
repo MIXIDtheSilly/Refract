@@ -10,6 +10,11 @@ function newUserId() {
   return String(start + ((BigInt(high) << 32n) | BigInt(low)) % span);
 }
 
+// Render resolution presets (backend: validEyeSize / validRenderScale in core/runtime.mjs).
+const eyeSizes = [1024, 1280, 1440, 1600, 1920, 2048, 2560, 3072];
+const renderScales = [50, 60, 70, 80, 90, 100, 110, 125, 150, 175, 200];
+const withCurrent = (list, value) => Number.isInteger(value) && !list.includes(value) ? [...list, value].sort((a, b) => a - b) : list;
+
 export function SettingsPage({ state, run, pending, notify, connect, setPage }) {
   const { draft, edit, field, save, saveBar } = useSettingsForm({ state, run, pending, notify });
 
@@ -34,6 +39,25 @@ export function SettingsPage({ state, run, pending, notify, connect, setPage }) 
             <input id="userId" name="userId" className="field-input" value={draft.userId ?? ''} onChange={e => edit('userId', e.target.value.trim())}
               inputMode="numeric" pattern="[1-9][0-9]{0,18}" title="A whole number, up to 19 digits, not starting with 0" required spellCheck={false} />
             <button type="button" className="btn btn-outline" onClick={() => edit('userId', newUserId())}><RefreshCw />New ID</button>
+          </div>
+        </div>
+      </section>
+      <section className="panel">
+        <h2>Display</h2>
+        <p>The resolution games render at. Lower is faster; higher is sharper. Applies the next time a game starts.</p>
+        <div className="fields-2">
+          <div className="field">
+            <label htmlFor="pcEyeSize">PC window (per eye)</label>
+            <select id="pcEyeSize" className="field-input" value={draft.pcEyeSize} onChange={e => edit('pcEyeSize', Number(e.target.value))}>
+              {withCurrent(eyeSizes, draft.pcEyeSize).map(n => <option key={n} value={n}>{n} × {n}{n === 1600 ? ' (default)' : ''}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="vrRenderScale">VR headset (render scale)</label>
+            <select id="vrRenderScale" className="field-input" value={draft.vrRenderScale} onChange={e => edit('vrRenderScale', Number(e.target.value))}
+              title="Percent of the eye size SteamVR or Meta Link recommends for your headset">
+              {withCurrent(renderScales, draft.vrRenderScale).map(n => <option key={n} value={n}>{n}%{n === 100 ? ' (headset default)' : ''}</option>)}
+            </select>
           </div>
         </div>
       </section>

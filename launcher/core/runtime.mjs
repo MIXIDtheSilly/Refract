@@ -53,6 +53,10 @@ export function newUserId() {
 }
 // Players may enter their own id: any positive integer that fits a signed 64-bit value.
 export const validUserId = id => typeof id === 'string' && /^[1-9]\d{0,18}$/.test(id) && BigInt(id) < 2n ** 63n;
+// Render resolution (Settings > Display): the square eye size games render at in the PC window, and the percent of
+// the headset's recommended eye size in VR. run_windows_game.ps1 validates the same ranges.
+export const validEyeSize = n => Number.isInteger(n) && n >= 512 && n <= 4096 && n % 8 === 0;
+export const validRenderScale = n => Number.isInteger(n) && n >= 25 && n <= 200;
 // PowerShell also ends a quoted string at curly single quotes (as in "Assassin’s Creed"), so double those too.
 const psLiteral = value => `'${String(value).replace(/['‘’‚‛]/g, '$&$&')}'`;
 export function powershellArgs(script, parameters) {
@@ -288,7 +292,9 @@ export class Runtime {
     const args = powershellArgs(path.join(this.root, 'tools/run_windows_game.ps1'), { Avd: this.settings.avd, Port: this.port,
       Sdk: this.settings.sdk, MemoryMB: this.settings.memoryMB, Package: game.package, Activity: game.activity, GameName: game.name,
       ...(game.owned ? { Owned: true } : {}), ...(mode === 'pc' ? { PcViewer: true } : {}),
-      ...(validUserId(this.settings.userId) ? { UserId: this.settings.userId } : {}) });
+      ...(validUserId(this.settings.userId) ? { UserId: this.settings.userId } : {}),
+      ...(mode === 'pc' && validEyeSize(this.settings.pcEyeSize) ? { EyeSize: this.settings.pcEyeSize } : {}),
+      ...(mode !== 'pc' && validRenderScale(this.settings.vrRenderScale) ? { RenderScale: this.settings.vrRenderScale } : {}) });
     // Windows PowerShell can exit successfully without executing its command
     // when CREATE_NEW_PROCESS_GROUP/detached is combined with no console.
     const child = spawn('powershell.exe', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
