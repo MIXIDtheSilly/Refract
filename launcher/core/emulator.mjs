@@ -4,8 +4,9 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { run, guestPackages, sha256 } from './runtime.mjs';
+import { run, guestPackages, sha256, validPackage } from './runtime.mjs';
 import { hypervisor } from './setup.mjs';
+import { avdHome } from './android_sdk.mjs';
 
 // Meta access tokens can show up in logs (the platform stand-in, launcher errors); keep them out of the page and exports.
 export const redact = text => String(text ?? '').replace(/(?:OC|FRL|EA)[A-Za-z0-9_|-]{30,}/g, '[redacted]').replace(/access_token=[^\s&"]+/g, 'access_token=[redacted]');
@@ -113,6 +114,62 @@ const avdOf = command => command?.match(/(?:^|\s)-avd\s+"?([A-Za-z0-9_-]+)/)?.[1
 const portOf = command => Number(command?.match(/(?:^|\s)-port\s+(\d+)/)?.[1] || 5554);
 const section = (text, name) => text.match(new RegExp(`^@@${name}\\r?\\n([\\s\\S]*?)(?=^@@|(?![\\s\\S]))`, 'm'))?.[1].trimEnd() || '';
 
+// Where Android's space goes, measured as root in one pass (about a second). Sizes are KB from du.
+// Per app: APK folder (with its libraries and compiled code), internal data, Android/data, cache, OBB game files.
+const shared = '/data/media/0', temp = '/data/local/tmp';
+const storageScript = `s() { du -sk "$@" 2>/dev/null | awk '{n+=$1} END {print n+0}'; }
+m=${shared}
+echo @@df; df -k /data | tail -n 1
+echo @@all; pm list packages | cut -d: -f2
+echo @@apps
+pm list packages -3 -f | while IFS= read -r l; do
+  l=\${l#package:}; p=\${l##*=}; a=\${l%=*}
+  echo "$p $(s \${a%/*}) $(s /data/data/$p /data/user_de/0/$p) $(s $m/Android/data/$p) $(s /data/data/$p/cache /data/data/$p/code_cache /data/user_de/0/$p/cache /data/user_de/0/$p/code_cache $m/Android/data/$p/cache) $(s $m/Android/obb/$p)"
+done
+echo @@folders
+for d in $m/Android/obb/* $m/Android/data/*; do [ -d "$d" ] && echo "$(s "$d")	$d"; done
+echo @@temp
+for f in ${temp}/* ${temp}/.[!.]*; do [ -e "$f" ] && echo "$(s "$f")	$f"; done
+echo @@shared
+for f in $m/*; do [ -e "$f" ] && [ "$f" != $m/Android ] && echo "$(s "$f")	$f"; done
+echo @@end
+`;
+const sizeLines = text => text.split('\n').map(line => line.match(/^(\d+)\t(.+)$/)).filter(Boolean).map(m => ({ size: Number(m[1]) * 1024, path: m[2] }));
+// Paths the Storage tab may delete: a leftover game folder of an app that is no longer installed, or anything in /data/local/tmp.
+const leftoverFolder = new RegExp(`^${shared}/Android/(obb|data)/([^/]+)$`);
+const tempFile = /^\/data\/local\/tmp\/(?!\.\.?$)[^/]+$/;
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
+// Virtual disk sizes Reset Android and Make the disk bigger offer (disk.dataPartition.size).
+export const diskSizes = [16, 32, 48, 64, 96, 128, 192, 256];
+// Growing /data keeps everything on it. vold runs /system/bin/e2fsck on the decrypted /data right before mounting it,
+// the only moment it is unmounted, so for one boot this wrapper takes e2fsck's place and runs resize2fs there.
+// (The kernel's online resize stops at the first backup group: "reserved block 512 not at offset 511".)
+// tools/windows_android_emulator.ps1 boots it with SELinux permissive, then puts the real e2fsck back.
+const growWrapper = `#!/system/bin/sh
+# Refract: for one boot only (see launcher/core/emulator.mjs). The real e2fsck is e2fsck.real.
+for last; do :; done
+/system/bin/e2fsck.real "$@"
+result=$?
+if [ "$(readlink -f /dev/block/mapper/userdata)" = "$(readlink -f "$last")" ] && [ $result -le 1 ]; then
+  echo "refract-grow: resizing $last" > /dev/kmsg
+  /system/bin/e2fsck.real -f -y "$last" > /metadata/refract-grow.log 2>&1
+  /system/bin/resize2fs "$last" >> /metadata/refract-grow.log 2>&1
+  echo "refract-grow: resize2fs exit $?" > /dev/kmsg
+fi
+exit $result
+`;
+function parseSize(text) {
+  const m = String(text || '').trim().match(/^(\d+(?:\.\d+)?)\s*([KMGT]?)B?$/i);
+  return m ? Math.round(Number(m[1]) * 1024 ** ' KMGT'.indexOf((m[2] || ' ').toUpperCase())) : 0;
+}
+async function folderSize(target) {
+  const stat = await fs.lstat(target).catch(() => null);
+  if (!stat?.isDirectory()) return stat?.size || 0;
+  let total = 0;
+  for (const entry of await fs.readdir(target).catch(() => [])) total += await folderSize(path.join(target, entry));
+  return total;
+}
+
 export class Emulator {
   constructor(runtime, root, dataDirectory) {
     Object.assign(this, { runtime, root, dataDirectory, cpu: new Map() });
@@ -137,7 +194,7 @@ ConvertTo-Json -InputObject $list -Compress -Depth 2`;
       const before = this.cpu.get(p.pid);
       p.cpuPercent = before && now > before.at ? Math.max(0, Math.min(100, (p.cpu - before.cpu) / ((now - before.at) / 1000) / threads * 100)) : null;
       this.cpu.set(p.pid, { cpu: p.cpu, at: now });
-      if (/^qemu-system/i.test(p.name)) Object.assign(p, { avd: avdOf(p.command), port: portOf(p.command), cores: Number(p.command?.match(/\s-cores\s+(\d+)/)?.[1] || 1),
+      if (/^qemu-system/i.test(p.name)) Object.assign(p, { avd: avdOf(p.command), port: portOf(p.command), cores: Number(p.command?.match(/\s-cores\s+(\d+)/)?.[1] || 1), memoryMB: Number(p.command?.match(/\s-memory\s+(\d+)/)?.[1] || 0),
         multicore: /multicore/i.test(p.path || p.command || ''), window: !/\s-no-window(\s|$)/.test(p.command || '') });
     }
     return list;
@@ -149,11 +206,13 @@ ConvertTo-Json -InputObject $list -Compress -Depth 2`;
     const qemu = processes.find(p => p.avd === this.settings.avd) || null;
     let booted = false, guest = null;
     if (port) {
-      const text = await this.adb(port, ['shell', "getprop sys.boot_completed; cat /proc/loadavg /proc/uptime; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo"], { timeout: 5000 }).catch(() => '');
+      const text = await this.adb(port, ['shell', "getprop sys.boot_completed; cat /proc/loadavg /proc/uptime; grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; df -k /data | tail -n 1"], { timeout: 5000 }).catch(() => '');
       const lines = text.split(/\r?\n/);
       booted = lines[0]?.trim() === '1';
       const kb = name => Number(text.match(new RegExp(`${name}:\\s+(\\d+)`))?.[1] || 0) * 1024;
       guest = { load: lines[1]?.split(' ').slice(0, 3).map(Number) || [], uptime: Number(lines[2]?.split(' ')[0] || 0), memTotal: kb('MemTotal'), memAvailable: kb('MemAvailable') };
+      const df = text.match(/\s(\d+)\s+(\d+)\s+(\d+)\s+\d+%/);
+      if (df) guest.storage = { total: Number(df[1]) * 1024, used: Number(df[2]) * 1024 };
     }
     return {
       state: port ? (booted ? 'running' : 'booting') : qemu ? 'starting' : 'stopped',
@@ -212,7 +271,8 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
       'echo @@resumed', 'timeout 8 dumpsys activity activities 2>/dev/null | grep -m1 topResumedActivity',
       'echo @@guest', `for p in ${packages}; do f=$(pm path $p 2>/dev/null | grep -m1 base.apk | cut -d: -f2); if [ -z $f ]; then echo $p -; else echo $p $(sha256sum $f | cut -d' ' -f1) $(timeout 5 dumpsys package $p 2>/dev/null | grep -m1 versionName | tr -d ' '); fi; done`,
       'echo @@packages', 'timeout 10 pm list packages -3 --show-versioncode',
-      'echo @@top', 'timeout 8 top -b -n 1 -m 15',
+      // Two samples a second apart: from a single one every process shows 0% CPU.
+      'echo @@top', 'timeout 8 top -b -n 2 -d 1 -m 12',
       'echo @@end',
     ].join('; ');
     // Whatever Android answered is kept, even when the shell stopped early (adb exit code, a timeout).
@@ -308,6 +368,138 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
     await this.adb(port, ['shell', 'screencap -p /data/local/tmp/refract-screen.png'], { timeout: 20000 });
     await this.adb(port, ['pull', '/data/local/tmp/refract-screen.png', file], { timeout: 20000 });
     return { path: file, image: `data:image/png;base64,${(await fs.readFile(file)).toString('base64')}` };
+  }
+
+  // A script for Android's root shell. It travels base64-encoded, so no quoting can break on the way through Windows and adb.
+  asRoot(port, script, timeout = 60000) {
+    return this.capture(port, ['shell', `echo ${Buffer.from(script).toString('base64')} | base64 -d | su 0 sh`], timeout);
+  }
+
+  // The Storage tab: what fills Android's /data, and the virtual disk files on this PC.
+  async storage() {
+    const [port, host] = await Promise.all([this.runtime.findPort(), this.diskInfo()]);
+    if (!port) return { collected: new Date().toISOString(), port: null, guest: null, host };
+    const result = await this.asRoot(port, storageScript, 120000);
+    const text = result.stdout.replace(/\r\n/g, '\n');
+    if (!text.includes('@@end')) throw new Error(`Android did not report its storage (${result.timedOut ? 'timed out' : `adb exit code ${result.code}`}): ${redact(result.stderr.trim().split('\n').pop() || 'no output')}`);
+    const [, total, used, free] = section(text, 'df').trim().split(/\s+/).map(Number);
+    const all = new Set(section(text, 'all').split('\n').map(s => s.trim()).filter(Boolean));
+    const components = new Set(guestPackages.map(p => p.package));
+    const apps = section(text, 'apps').split('\n').map(line => line.trim().split(' ')).filter(f => f.length === 6).map(([name, ...kb]) => {
+      const [apk, data, external, cache, obb] = kb.map(n => Number(n) * 1024);
+      return { package: name, apk, data, external, cache, obb, total: apk + data + external + obb, component: components.has(name) };
+    }).sort((a, b) => b.total - a.total);
+    const leftovers = [
+      ...sizeLines(section(text, 'folders')).map(f => ({ ...f, match: f.path.match(leftoverFolder) }))
+        .filter(f => f.match && !all.has(f.match[2])).map(({ match, ...f }) => ({ ...f, kind: match[1], package: match[2], name: `Android/${match[1]}/${match[2]}` })),
+      ...sizeLines(section(text, 'temp')).filter(f => tempFile.test(f.path)).map(f => ({ ...f, kind: 'temp', name: path.posix.basename(f.path) })),
+    ].sort((a, b) => b.size - a.size);
+    const sharedFiles = sizeLines(section(text, 'shared')).map(f => ({ ...f, name: path.posix.basename(f.path) })).sort((a, b) => b.size - a.size);
+    return { collected: new Date().toISOString(), port, host, guest: { total: total * 1024, used: used * 1024, free: free * 1024, apps, leftovers, shared: sharedFiles } };
+  }
+
+  // The AVD's folder on this PC. Its data disk (a qcow2 file) grows as Android stores more and never shrinks by itself.
+  avdDirectory() {
+    return fs.readFile(path.join(avdHome(), `${this.settings.avd}.ini`), 'utf8').then(t => t.match(/^path=(.+)$/m)?.[1].trim(), () => '')
+      .then(dir => dir || path.join(avdHome(), `${this.settings.avd}.avd`));
+  }
+  async diskInfo() {
+    const directory = await this.avdDirectory();
+    const config = await fs.readFile(path.join(directory, 'config.ini'), 'utf8').catch(() => null);
+    if (config === null) return { exists: false, directory };
+    const files = await Promise.all((await fs.readdir(directory)).map(async name => ({ name, size: await folderSize(path.join(directory, name)) })));
+    const drive = await fs.statfs(directory).catch(() => null);
+    const marker = await fs.readFile(path.join(directory, 'refract-first-boot-pending'), 'utf8').catch(() => null);
+    // The disk file's own size is what Android gets; config.ini only matters when the disk is made new.
+    const dataSize = await this.diskSize().catch(() => parseSize(config.match(/^disk\.dataPartition\.size\s*=\s*(.+)$/m)?.[1]));
+    return { exists: true, directory, dataSize,
+      growPending: await exists(path.join(directory, 'refract-grow-pending')),
+      total: files.reduce((n, f) => n + f.size, 0), dataDisk: files.filter(f => f.name.startsWith('userdata-qemu.img')).reduce((n, f) => n + f.size, 0),
+      snapshots: files.find(f => f.name === 'snapshots')?.size || 0,
+      files: files.filter(f => f.size).sort((a, b) => b.size - a.size),
+      driveFree: drive ? Number(drive.bavail) * Number(drive.bsize) : 0, driveTotal: drive ? Number(drive.blocks) * Number(drive.bsize) : 0,
+      resetPending: marker !== null && marker.includes('wipe-data'), sizes: diskSizes };
+  }
+
+  // `pm` answers "Success" or a reason; a failure becomes an error the page shows.
+  async pm(port, args) {
+    const output = (await this.adb(port, ['shell', 'pm', ...args], { timeout: 120000 }).catch(e => e.message)).trim();
+    if (!/^Success/m.test(output)) throw new Error(`Android refused (pm ${args[0]}): ${redact(output.split(/\r?\n/).pop() || 'no answer')}`);
+  }
+  clearCache(port, pkg) { return this.pm(port, ['clear', '--cache-only', validPackage(pkg)]); }
+  clearData(port, pkg) { return this.pm(port, ['clear', validPackage(pkg)]); }
+  async uninstall(port, pkg) {
+    await this.pm(port, ['uninstall', validPackage(pkg)]);
+    // Android keeps an uninstalled app's OBB folder; game files are most of a Quest game's size.
+    await this.asRoot(port, `rm -rf ${shared}/Android/obb/${pkg} ${shared}/Android/data/${pkg}`, 60000);
+  }
+  // Leftover folders of uninstalled apps and files in /data/local/tmp, as the Storage tab listed them.
+  async deleteFiles(port, paths) {
+    if (!Array.isArray(paths) || !paths.length || paths.length > 500) throw new Error('Select files to delete.');
+    const installed = new Set((await this.adb(port, ['shell', 'pm', 'list', 'packages'], { timeout: 30000 })).split(/\r?\n/).map(s => s.replace(/^package:/, '').trim()));
+    for (const item of paths) {
+      const folder = typeof item === 'string' && item.match(leftoverFolder);
+      if (folder ? !/^[A-Za-z0-9_.]+$/.test(folder[2]) || installed.has(folder[2]) : !(typeof item === 'string' && tempFile.test(item))) throw new Error(`Refract does not delete ${item}.`);
+    }
+    // Several calls when the list is long: each command line has to fit Windows' limit.
+    for (let i = 0; i < paths.length; i += 100) {
+      const result = await this.asRoot(port, `rm -rf ${paths.slice(i, i + 100).map(shellQuote).join(' ')}; echo @@done`, 300000);
+      if (!result.stdout.includes('@@done')) throw new Error(`Android did not finish deleting (${result.timedOut ? 'timed out' : redact(result.stderr.trim() || `adb exit code ${result.code}`)}).`);
+    }
+  }
+  // Saved emulator state (a RAM image as large as Android's memory). Refract always cold-boots (-no-snapshot), so it is
+  // never loaded; the caller makes sure no emulator runs this AVD.
+  async deleteSnapshots() {
+    const directory = path.join(await this.avdDirectory(), 'snapshots');
+    for (const entry of await fs.readdir(directory).catch(() => [])) await fs.rm(path.join(directory, entry), { recursive: true, force: true });
+  }
+  // Make the disk bigger, step 1 (Android running): the one-boot e2fsck wrapper on /system.
+  async installGrowWrapper(port) {
+    await this.adb(port, ['root'], { timeout: 30000 });
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    await this.adb(port, ['wait-for-device'], { timeout: 60000 });
+    const remount = await this.adb(port, ['remount'], { timeout: 60000 }).catch(e => e.message);
+    // An existing e2fsck.real is the real one from an earlier attempt; never replace it with the wrapper.
+    const result = await this.asRoot(port, `cd /system/bin || exit 1
+[ -f e2fsck.real ] || cp -p e2fsck e2fsck.real || exit 1
+chcon u:object_r:fsck_exec:s0 e2fsck.real
+echo ${Buffer.from(growWrapper).toString('base64')} | base64 -d > e2fsck.new && chmod 755 e2fsck.new && chown root:shell e2fsck.new && chcon u:object_r:fsck_exec:s0 e2fsck.new && mv e2fsck.new e2fsck || exit 1
+sync; head -c 2 e2fsck; echo; echo @@installed`, 60000);
+    if (!result.stdout.includes('#!') || !result.stdout.includes('@@installed')) {
+      throw new Error(`Android's system files could not be changed (${redact((result.stderr || result.stdout || remount).trim().split('\n').pop() || `adb exit code ${result.code}`)}). Restart Android and try again.`);
+    }
+  }
+  // The data disk's size as Android sees it (the qcow2 file's virtual size; -U reads it while the emulator runs).
+  async diskSize() {
+    const image = path.join(await this.avdDirectory(), 'userdata-qemu.img.qcow2');
+    return JSON.parse(await run(this.qemuImg(), ['info', '-U', '--output=json', image], { timeout: 60000 }))['virtual-size'];
+  }
+  // Step 2 (emulator stopped): the disk file gets the new size.
+  async enlargeDisk(sizeGB) {
+    if (!diskSizes.includes(sizeGB)) throw new Error('Choose a disk size.');
+    const current = await this.diskSize();
+    if (sizeGB * 1024 ** 3 <= current) throw new Error(`Android's disk is already ${Math.round(current / 1024 ** 3)} GB.`);
+    const directory = await this.avdDirectory();
+    await run(this.qemuImg(), ['resize', path.join(directory, 'userdata-qemu.img.qcow2'), `${sizeGB}G`], { timeout: 120000 });
+    await this.setDataSize(directory, sizeGB);
+  }
+  // Step 3: the next start grows /data into the disk (and in any case puts the real e2fsck back).
+  async markGrowPending() { await fs.writeFile(path.join(await this.avdDirectory(), 'refract-grow-pending'), ''); }
+  async setDataSize(directory, sizeGB) {
+    const file = path.join(directory, 'config.ini');
+    const config = await fs.readFile(file, 'utf8').catch(() => { throw new Error(`There is no virtual device named ${this.settings.avd}.`); });
+    const line = `disk.dataPartition.size=${sizeGB}G`;
+    const next = /^disk\.dataPartition\.size\s*=.*$/m.test(config) ? config.replace(/^disk\.dataPartition\.size\s*=.*$/m, line) : `${config.replace(/\s*$/, '')}\r\n${line}\r\n`;
+    if (next !== config) await fs.writeFile(file, next);
+  }
+  qemuImg() { return path.join(this.settings.sdk, 'emulator/qemu-img.exe'); }
+  // Reset Android: the start script boots once with -wipe-data (on the stock emulator, like a new AVD's first boot),
+  // which recreates the data disk at the chosen size. Everything installed and every save on Android is gone afterwards.
+  async scheduleReset(sizeGB) {
+    if (!diskSizes.includes(sizeGB)) throw new Error('Choose a disk size.');
+    const directory = await this.avdDirectory();
+    await this.setDataSize(directory, sizeGB);
+    await fs.writeFile(path.join(directory, 'refract-first-boot-pending'), 'wipe-data');
   }
 
   // A folder and zip with everything needed to look into someone's problem: the snapshot, full logcat,

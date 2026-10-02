@@ -207,18 +207,50 @@ switch ($Action) {
         Set-GlTransport
         # A new AVD's first boot sets up and encrypts /data. On the multi-core qemu that stalls vCPU 0 long enough
         # for the emulator's hang detector to kill it, so the first boot runs once on the stock emulator.
-        # The launcher's Setup marks the AVDs it creates (launcher/core/android_sdk.mjs).
+        # The launcher's Setup marks the AVDs it creates (launcher/core/android_sdk.mjs). Its Reset Android writes
+        # 'wipe-data' into the marker: that boot also resets /data (at config.ini's disk.dataPartition.size).
         $avdPath = Get-AvdPath
         if ($avdPath -and (Test-Path "$avdPath\refract-first-boot-pending")) {
-            Stage 'Setting up Android for the first time (a few minutes, only once)'
-            $first = Start-Process $emulator -ArgumentList @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim',
-                '-memory', "$MemoryMB", '-writable-system', '-no-window', '-crash-report-mode', 'never') `
+            $firstArguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim',
+                '-memory', "$MemoryMB", '-writable-system', '-no-window', '-crash-report-mode', 'never')
+            if ((Get-Content -Raw "$avdPath\refract-first-boot-pending") -match 'wipe-data') {
+                Stage 'Resetting Android (a few minutes)'
+                $firstArguments += '-wipe-data'
+            } else {
+                Stage 'Setting up Android for the first time (a few minutes, only once)'
+            }
+            $first = Start-Process $emulator -ArgumentList $firstArguments `
                 -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\emulator.stdout.log" -RedirectStandardError "$logs\emulator.stderr.log"
             Wait-Boot $first 10
             Remove-Item "$avdPath\refract-first-boot-pending"
             Run $adb @('-s', $serial, 'shell', 'sync')
             Run $adb @('-s', $serial, 'emu', 'kill')
             if (!$first.WaitForExit(60000)) { $first.Kill() }
+            Start-Sleep -Seconds 3
+        }
+        # The launcher's "Make the disk bigger" enlarged the data disk file and put a one-boot wrapper in place of
+        # /system/bin/e2fsck (launcher/core/emulator.mjs). vold runs e2fsck on the decrypted /data just before mounting
+        # it, the only moment it is unmounted; the wrapper grows the filesystem there (the kernel's online resize
+        # fails on this image's layout). SELinux stops fsck from running the wrapper's copy of e2fsck, so this boot
+        # is permissive. Then the real e2fsck goes back and Android starts normally below.
+        if ($avdPath -and (Test-Path "$avdPath\refract-grow-pending")) {
+            Stage 'Making Android''s disk bigger (a few minutes)'
+            $grow = Start-Process $emulator -ArgumentList @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim',
+                '-memory', "$MemoryMB", '-writable-system', '-no-window', '-crash-report-mode', 'never', '-selinux', 'permissive') `
+                -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\emulator.stdout.log" -RedirectStandardError "$logs\emulator.stderr.log"
+            Wait-Boot $grow 10
+            $ErrorActionPreference = 'Continue'
+            & $adb -s $serial root 2>&1 | Out-Null
+            Start-Sleep -Seconds 3
+            & $adb -s $serial wait-for-device 2>&1 | Out-Null
+            & $adb -s $serial remount 2>&1 | Out-Null
+            $restored = & $adb -s $serial shell 'cd /system/bin && if [ -f e2fsck.real ]; then mv e2fsck.real e2fsck; fi; sync; [ -f e2fsck.real ] || echo restored' 2>&1
+            Write-Host "Android's disk: $(& $adb -s $serial shell df -h /data 2>&1 | Select-Object -Last 1)"
+            $ErrorActionPreference = 'Stop'
+            if ("$restored" -notmatch 'restored') { Write-Warning "Could not put the real e2fsck back: $restored" }
+            Remove-Item "$avdPath\refract-grow-pending"
+            Run $adb @('-s', $serial, 'emu', 'kill')
+            if (!$grow.WaitForExit(60000)) { $grow.Kill() }
             Start-Sleep -Seconds 3
         }
         $arguments = @('-avd', $Avd, '-port', "$Port", '-gpu', 'host', '-accel', 'on', '-no-snapshot', '-no-boot-anim', '-memory', "$MemoryMB",

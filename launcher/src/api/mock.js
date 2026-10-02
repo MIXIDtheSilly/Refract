@@ -134,11 +134,11 @@ const methods = {
   emulatorStatus: async () => {
     await wait(200);
     const qemu = emu.on ? { pid: 21344, name: 'qemu-system-x86_64-multicore.exe', path: `${sdkPath}\\emulator\\qemu\\windows-x86_64\\qemu-system-x86_64-multicore.exe`,
-      avd: state.settings.avd, port: 5580, cores: state.settings.cores, multicore: true, window: state.settings.showWindow, cpu: 1200, cpuPercent: 18 + Math.random() * 8,
+      avd: state.settings.avd, port: 5580, cores: state.settings.cores, memoryMB: 4096, multicore: true, window: state.settings.showWindow, cpu: 1200, cpuPercent: 18 + Math.random() * 8,
       memory: 5.1 * 1024 ** 3, threads: 142, started: new Date(emu.booted).toISOString() } : null;
     return { state: emu.on ? 'running' : 'stopped', port: emu.on ? 5580 : null, serial: emu.on ? 'emulator-5580' : '', configuredPort: 5580, avd: state.settings.avd,
       adopted: false, startedHere: true, game: state.running, qemu,
-      guest: emu.on ? { load: [3.1, 2.8, 2.4], uptime: (Date.now() - emu.booted) / 1000, memTotal: 8 * 1024 ** 3, memAvailable: 3.2 * 1024 ** 3 } : null,
+      guest: emu.on ? { load: [3.1, 2.8, 2.4], uptime: (Date.now() - emu.booted) / 1000, memTotal: 8 * 1024 ** 3, memAvailable: (2.8 + Math.random() * 0.8) * 1024 ** 3, storage: { total: 62.8 * 1024 ** 3, used: 41.5 * 1024 ** 3 } } : null,
       processes: qemu ? [{ ...qemu, command: `${qemu.path} -avd ${qemu.avd} -port 5580 -gpu host -accel on -no-snapshot -no-window -cores ${qemu.cores}` },
         { pid: 9012, name: 'adb.exe', cpuPercent: 0.2, memory: 18e6 }] : [],
       logcat: { running: emu.on, lines: emu.lines.length } };
@@ -165,10 +165,31 @@ const methods = {
         { label: 'Refract XR driver', package: 'com.oculus.systemdriver', built: true, modified: now, sha256: 'x' },
         { label: 'Meta Platform stand-in', package: 'com.oculus.horizon', built: true, modified: now, sha256: 'c' }] };
   },
-  emulatorAction: async action => {
-    state.emulatorTask = { action, stage: action === 'start' ? 'Starting Android' : '' }; emit(); await wait(900);
+  emulatorStorage: async () => {
+    await wait(500);
+    const gb = n => Math.round(n * 1024 ** 3), mb = n => Math.round(n * 1024 ** 2);
+    const apps = [
+      ...state.games.filter(g => g.installed && g.package).map((g, i) => ({ package: g.package, name: g.name, apk: gb(0.4 + i * 0.3), data: mb(120 + i * 40), external: mb(30), cache: mb(14), obb: i % 2 ? 0 : gb(2.5 + i * 3) })),
+      ...['com.refract.openxrruntime', 'com.oculus.systemdriver', 'com.oculus.horizon'].map(p => ({ package: p, name: '', apk: mb(5), data: mb(0.1), external: 0, cache: 0, obb: 0, component: true })),
+    ].map(a => ({ ...a, total: a.apk + a.data + a.external + a.obb })).sort((a, b) => b.total - a.total);
+    const leftovers = emu.leftovers ??= [
+      { path: '/data/media/0/Android/obb/com.example.oldgame', name: 'Android/obb/com.example.oldgame', kind: 'obb', package: 'com.example.oldgame', size: gb(3.2) },
+      { path: '/data/local/tmp/perf.data', name: 'perf.data', kind: 'temp', size: mb(280) },
+      { path: '/data/local/tmp/frida-server', name: 'frida-server', kind: 'temp', size: mb(106) }];
+    const directory = `C:\\Users\\you\\.android\\avd\\${state.settings.avd}.avd`;
+    return { collected: new Date().toISOString(), port: emu.on ? 5580 : null, running: state.games.find(g => g.id === state.running)?.package || '',
+      guest: emu.on ? { total: gb(62.8), used: gb(41.5), free: gb(21.3), apps, leftovers, shared: [{ path: '/data/media/0/Download', name: 'Download', size: mb(8) }] } : null,
+      host: { exists: true, directory, dataSize: gb(emu.diskGB ?? 64), growPending: false, total: gb(emu.snapshots === 0 ? 45.2 : 49.5), dataDisk: gb(45), snapshots: emu.snapshots ?? gb(4.3), files: [],
+        driveFree: gb(235), driveTotal: gb(953), resetPending: false, sizes: [16, 32, 48, 64, 96, 128, 192, 256] } };
+  },
+  emulatorAction: async (action, arg) => {
+    state.emulatorTask = { action, stage: action === 'start' ? 'Starting Android' : action === 'resetAndroid' ? 'Resetting Android' : '' }; emit(); await wait(900);
     if (action === 'start') { emu.on = true; emu.booted = Date.now(); }
     if (action === 'stop') emu.on = false;
+    if (action === 'deleteFiles') emu.leftovers = emu.leftovers.filter(f => !arg.includes(f.path));
+    if (action === 'deleteSnapshots') emu.snapshots = 0;
+    if (action === 'growDisk' || action === 'resetAndroid') emu.diskGB = arg;
+    if (action === 'uninstall' || action === 'resetAndroid') for (const g of state.games) if (action === 'resetAndroid' || g.package === arg) g.installed = false;
     state.emulatorTask = null; emit();
     if (action === 'screenshot') return { path: 'C:\\Users\\you\\AppData\\Roaming\\Refract\\screenshots\\android.png',
       image: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' };

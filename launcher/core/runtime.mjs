@@ -249,6 +249,7 @@ export class Runtime {
     if (this.child) throw new Error('Close the running game before installing.');
     if (!game.apk) throw new Error('Import or download an APK first.');
     update('Starting Android'); await this.ensure(update);
+    await this.checkSpace(game);
     update('Installing APK');
     // -g grants the runtime permissions (microphone, notifications) up front: the hidden emulator's permission
     // dialog takes focus, the game stops responding behind it and Android closes it (Yeeps' microphone request).
@@ -263,6 +264,21 @@ export class Runtime {
       await this.adb(['push', file.path, `${directory}/${file.name}`], { timeout: 30 * 60 * 1000 });
     }
     await this.adb(['shell', 'sync']);
+  }
+  // Room on Android for the APK (Android keeps a copy plus its unpacked libraries and compiled code) and the game
+  // files, less the game files a reinstall overwrites. A full /data otherwise fails halfway through a long push.
+  async checkSpace(game) {
+    const extra = (game.files || []).filter(f => f.kind !== 'apk').reduce((n, f) => n + Number(f.size || 0), 0);
+    const kb = async command => Number((await this.adb(['shell', command]).catch(() => '')).trim().split(/\r?\n/).pop()?.split(/\s+/)[0]) * 1024 || 0;
+    const [free, existing] = await Promise.all([
+      this.adb(['shell', 'df', '-k', '/data']).then(t => Number(t.trim().split(/\r?\n/).pop().split(/\s+/)[3]) * 1024 || 0, () => 0),
+      extra ? kb(`du -sk /sdcard/Android/obb/${game.package} 2>/dev/null`) : 0,
+    ]);
+    const needed = (await fs.stat(game.apk)).size * 2 + extra - existing, reserve = 1024 ** 3;
+    if (free && needed + reserve > free) {
+      const gb = n => `${(n / 1024 ** 3).toFixed(1)} GB`;
+      throw new Error(`Android has ${gb(free)} free; this game needs about ${gb(needed)} (and Android keeps 1 GB spare). Free some space in Emulator > Storage, then install again.`);
+    }
   }
   // mode 'vr' shows the game in the headset (host bridge); 'pc' in a window on this PC (refract_viewer).
   launch(game, onExit, mode = 'vr') {

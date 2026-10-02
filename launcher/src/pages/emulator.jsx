@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, ChevronsDown, Copy, CornerDownLeft, Download, FileArchive, FolderOpen, Loader2, PackageCheck, Pause, Play, Plug, Power, RefreshCw, RotateCcw, ScrollText, Square, Trash2, X } from 'lucide-react';
+import { Camera, ChevronsDown, CircleCheck, Copy, CornerDownLeft, Download, Eraser, FileArchive, FolderOpen, HardDrive, Loader2, PackageCheck, PackageX, Pause, Play, Plug, Power, RefreshCw, RotateCcw, ScrollText, Server, Square, Trash2, TriangleAlert, X } from 'lucide-react';
 import { call } from '../api';
 import { ago, bytes } from '../components/common';
 import { Chip, Highlight, LogList, SearchBox, useMatcher } from '../components/log-view';
 import { useSettingsForm } from '../components/settings-form';
 
-const tabs = [['overview', 'Overview'], ['logcat', 'Logcat'], ['logs', 'Log files'], ['shell', 'Shell'], ['settings', 'Settings']];
+const tabs = [['overview', 'Overview'], ['storage', 'Storage'], ['logcat', 'Logcat'], ['logs', 'Log files'], ['shell', 'Shell'], ['settings', 'Settings']];
 const levels = ['V', 'D', 'I', 'W', 'E', 'F'];
 const levelNames = { V: 'Verbose', D: 'Debug', I: 'Info', W: 'Warning', E: 'Error', F: 'Fatal' };
 // Per-viewer conveniences only; the page works the same without storage.
@@ -24,11 +24,17 @@ async function copy(text, notify) {
 }
 
 // Emulator status, polled every few seconds while the page is open (one request at a time).
+// The last few minutes of CPU and memory readings feed the Overview's small graphs.
 function useStatus() {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState('');
   const refresh = useCallback(async () => {
-    try { setStatus(await call('emulatorStatus')); setError(''); } catch (e) { setError(errorText(e)); }
+    try {
+      const next = await call('emulatorStatus');
+      const sample = { cpu: next.qemu?.cpuPercent ?? null, memory: next.guest?.memTotal ? 1 - next.guest.memAvailable / next.guest.memTotal : null };
+      setStatus(old => ({ ...next, history: [...(old?.history || []), sample].slice(-45) }));
+      setError('');
+    } catch (e) { setError(errorText(e)); }
   }, []);
   useEffect(() => {
     let stopped = false, timer;
@@ -148,7 +154,8 @@ export function EmulatorPage({ state, run, pending, notify }) {
     </div>
 
     {tab === 'overview' && <Overview {...{ state, status, info, loadInfo, pending, run, notify, action, busy, game }}
-      onLogcat={pkg => { setApp(pkg); setTab('logcat'); }} />}
+      onLogcat={pkg => { setApp(pkg); setTab('logcat'); }} onStorage={() => setTab('storage')} />}
+    {tab === 'storage' && <Storage {...{ state, status, run, pending, notify, action, busy }} />}
     {tab === 'logcat' && <Logcat {...{ logcat, info, game, app, setApp, run, notify, status }} />}
     {tab === 'logs' && <LogFiles run={run} pending={pending} notify={notify} />}
     {tab === 'shell' && <Shell online={online} />}
@@ -156,51 +163,125 @@ export function EmulatorPage({ state, run, pending, notify }) {
   </div>;
 }
 
-function Tile({ label, value, sub, tone }) {
-  return <div className={`tile ${tone || ''}`}><small>{label}</small><strong>{value ?? '—'}</strong>{sub && <span>{sub}</span>}</div>;
+function Tile({ label, value, sub, tone, chart, meter }) {
+  return <div className={`tile ${tone || ''}`}><small>{label}</small><strong>{value ?? '—'}</strong>{sub && <span>{sub}</span>}
+    {chart && <Sparkline values={chart} />}
+    {meter != null && <div className="meter"><div style={{ width: `${Math.min(100, meter * 100)}%` }} /></div>}</div>;
+}
+// Values from 0 to 1, oldest first; gaps (null) break the line.
+function Sparkline({ values }) {
+  if (values.filter(v => v != null).length < 2) return <div className="spark" />;
+  const step = 100 / 44, start = 100 - (values.length - 1) * step;
+  const points = values.map((v, i) => (v == null ? null : `${(start + i * step).toFixed(2)},${(30 - Math.max(0, Math.min(1, v)) * 28).toFixed(2)}`));
+  const runs = points.reduce((all, p) => { if (p) all[all.length - 1].push(p); else if (all.at(-1).length) all.push([]); return all; }, [[]]).filter(r => r.length > 1);
+  return <svg className="spark" viewBox="0 0 100 31" preserveAspectRatio="none" aria-hidden="true">
+    {runs.map(r => <polyline key={r[0]} points={r.join(' ')} vectorEffect="non-scaling-stroke" />)}</svg>;
+}
+// The last `top` sample (the first of two counts no CPU time yet), busiest first, without Refract's own probe.
+function parseTop(text) {
+  const lines = String(text || '').split('\n'), header = lines.findLastIndex(l => /^\s*PID\s+USER/.test(l));
+  const size = s => { const m = String(s).match(/^([\d.]+)([KMGT]?)$/); return m ? Number(m[1]) * 1024 ** ' KMGT'.indexOf(m[2] || ' ') : 0; };
+  return lines.slice(header + 1).map(l => l.trim().split(/\s+/)).filter(f => f.length >= 11)
+    .map(f => ({ pid: f[0], user: f[1], res: size(f[5]), cpu: Number(f[8]) || 0, memory: Number(f[9]) || 0, name: f.slice(11).join(' ') }))
+    .filter(p => !/^(top -b|timeout \d+ top|sh -c echo @@props)/.test(p.name))
+    .sort((a, b) => b.cpu - a.cpu || b.res - a.res).slice(0, 8);
 }
 function KeyValues({ rows }) {
   return <dl className="kv">{rows.filter(r => r && r[1] !== undefined && r[1] !== null && r[1] !== '').map(([key, value, className]) =>
     <div key={key}><dt>{key}</dt><dd className={className || ''}>{value}</dd></div>)}</dl>;
 }
-const bad = (value, reason) => <span className="bad">{value}{reason && <small> — {reason}</small>}</span>;
+// A problem value; the reason and what to do about it show on hover.
+const bad = (value, reason) => <span className="bad" title={reason}>{value}</span>;
 
-function Overview({ state, status, info, loadInfo, pending, run, notify, action, busy, game, onLogcat }) {
+// What can be wrong with this emulator, from the status and the snapshot: [label, problem or '', fix].
+function healthChecks({ state, status, info }) {
+  const guest = info?.guest, host = info?.host, qemu = status?.qemu, live = status?.guest, props = guest?.props || {};
+  const setup = ['prepare', 'Fix', 'Sets up Android for Refract again (Android may restart)'];
+  const restart = ['restart', 'Restart emulator', 'Stops the emulator and starts it with the current settings'];
+  const checks = [];
+  if (guest) {
+    const outdated = info.components.filter(c => c.package).filter(c => {
+      const g = guest.guestPackages.find(p => p.package === c.package);
+      return !g?.installed || g.sha256 !== c.sha256;
+    });
+    checks.push(
+      ['Quest identity', /oculus/i.test(props['ro.product.manufacturer']) ? '' : `Android presents itself as ${props['ro.product.manufacturer']} ${props['ro.product.model']}; games won’t use the Meta Platform stand-in`, setup],
+      ['ARM translator', props['ro.dalvik.vm.native.bridge'] === 'libberberis_arm64.so' ? '' : 'Digitalis is not Android’s native bridge; ARM64 games won’t start', setup],
+      ['Refract components', outdated.length ? `${outdated.map(c => c.label).join(', ')} ${outdated.length === 1 ? 'is' : 'are'} missing or older than this build` : '', setup],
+      ['GPU', /swiftshader|llvmpipe|software/i.test(guest.gles || '') ? `Software rendering (${guest.gles})` : ''],
+      ['Clock', guest.clocksource === 'tsc' ? '' : `Clock source is ${guest.clocksource || 'unknown'}, not the TSC; games run slower`, ['reboot', 'Restart Android', 'Each boot gets the TSC or not by chance']],
+      ['Focus', guest.immersiveConfirmed && guest.errorDialogsHidden ? '' : 'Android may show a notice or crash dialog over games', setup],
+      ['Dialogs', /Application Error|Not Responding|isn.t responding|keeps stopping/i.test(guest.focus) ? `A dialog has focus: ${guest.focus}` : ''],
+    );
+  }
+  if (qemu) {
+    // Only memory: the start script lowers the vCPU count on PCs with few performance cores.
+    const memory = qemu.memoryMB && qemu.memoryMB !== state.settings.memoryMB;
+    checks.push(
+      ['vCPUs', !qemu.multicore && state.settings.cores > 1 ? 'Stock qemu: Android runs on one vCPU' : '', restart],
+      ['Settings', memory ? `Running with ${number(qemu.memoryMB)} MB of memory; Settings say ${number(state.settings.memoryMB)} MB` : '', restart],
+    );
+  }
+  if (live?.storage) {
+    const used = live.storage.used / live.storage.total;
+    checks.push(['Storage', used > 0.9 ? `${Math.round(used * 100)}% of Android’s storage is used` : '', ['storage', 'Open Storage']]);
+  }
+  if (host) {
+    checks.push(
+      ['PC VR runtime', host.openxr ? '' : 'No OpenXR runtime; VR play needs Meta Horizon Link or SteamVR'],
+      ['Acceleration', !host.acceleration || host.acceleration.ok ? '' : host.acceleration.detail],
+    );
+  }
+  if (guest?.incomplete) checks.push(['Snapshot', `Android stopped answering after “${guest.incomplete.stoppedAfter}”`]);
+  return checks;
+}
+
+function Overview({ state, status, info, loadInfo, pending, run, notify, action, busy, game, onLogcat, onStorage }) {
   const [shot, setShot] = useState(null);
   const online = status?.state === 'running';
   const guest = info?.guest, host = info?.host, qemu = status?.qemu, live = status?.guest;
   const props = guest?.props || {};
   const summary = () => JSON.stringify({ status, info: info && { ...info, guest: guest && { ...guest, props: undefined } } }, null, 2);
-
-  const tiles = <div className="tiles">
-    <Tile label="Android" value={status ? stateLabels[status.state] : 'Checking'} sub={live?.uptime ? `up ${duration(live.uptime)}` : status?.startedHere ? 'Started by Refract' : undefined} tone={online ? 'good' : ''} />
-    <Tile label="Device" value={status?.serial || '—'} sub={status?.adopted ? `adopted · Refract is set to ${status.configuredPort}` : `port ${status?.configuredPort ?? '…'}`} />
-    <Tile label="Emulator CPU" value={qemu?.cpuPercent != null ? `${qemu.cpuPercent.toFixed(1)}%` : qemu ? '…' : '—'} sub={qemu ? `of this PC · ${qemu.cores} vCPU${qemu.cores === 1 ? '' : 's'}${qemu.multicore ? '' : ' · stock qemu'}` : undefined} tone={qemu && qemu.cores === 1 ? 'warn' : ''} />
-    <Tile label="Emulator memory" value={qemu ? bytes(qemu.memory) : '—'} sub={`${number(state.settings.memoryMB)} MB for Android`} />
-    <Tile label="Android memory" value={live?.memTotal ? `${bytes(live.memTotal - live.memAvailable)} / ${bytes(live.memTotal)}` : '—'} sub={live?.memTotal ? `${Math.round((1 - live.memAvailable / live.memTotal) * 100)}% used` : undefined} />
-    <Tile label="Load average" value={live?.load?.length ? live.load.map(n => n.toFixed(2)).join('  ') : '—'} sub={guest?.cores ? `${guest.cores} Android CPUs` : undefined} />
-  </div>;
-
-  const components = info?.components.map(c => {
-    const installed = c.package && guest?.guestPackages.find(g => g.package === c.package);
-    const onAndroid = !c.package ? '' : !guest ? 'Android not running' : !installed?.installed ? bad('Not installed', 'Play or “Reinstall Refract components” installs it')
-      : installed.sha256 === c.sha256 ? `Up to date${installed.version ? ` · ${installed.version}` : ''}` : bad(`Differs from this build${installed.version ? ` · ${installed.version}` : ''}`, 'reinstalled before the next game');
-    return [c.label, <>{c.built ? `Built ${ago(c.modified)}` : bad('Not built')}{onAndroid && <><br /><span className="muted">{onAndroid}</span></>}</>];
-  }) || [];
+  const blocked = busy || Boolean(state.running);
+  const history = status?.history || [];
+  const checks = healthChecks({ state, status, info });
+  const problems = checks.filter(c => c[1]);
+  const fix = async ([kind, , message]) => {
+    if (kind === 'storage') return onStorage();
+    if (kind === 'restart') {
+      await action('stop', null);
+      return action('start', null, () => notify('Emulator restarted'));
+    }
+    return action(kind, null, () => notify(kind === 'prepare' ? 'Android is set up for Refract' : message));
+  };
+  const processes = guest ? parseTop(guest.top) : [];
+  const storage = live?.storage;
 
   return <div className="emu-overview">
-    {tiles}
+    <div className="tiles">
+      <Tile label="Android" value={status ? stateLabels[status.state] : 'Checking'} sub={live?.uptime ? `Up ${duration(live.uptime)}` : status?.startedHere ? 'Started by Refract' : undefined} tone={online ? 'good' : ''} />
+      <Tile label="Emulator CPU" value={qemu?.cpuPercent != null ? `${qemu.cpuPercent.toFixed(0)}%` : qemu ? '…' : '—'} sub={qemu ? `of this PC · ${qemu.cores} vCPU${qemu.cores === 1 ? '' : 's'}` : undefined}
+        chart={qemu ? history.map(h => (h.cpu == null ? null : h.cpu / 100)) : null} />
+      <Tile label="Android memory" value={live?.memTotal ? bytes(live.memTotal - live.memAvailable) : '—'} sub={live?.memTotal ? `of ${bytes(live.memTotal)}` : undefined}
+        chart={live?.memTotal ? history.map(h => h.memory) : null} />
+      <Tile label="Android storage" value={storage ? bytes(storage.used) : '—'} sub={storage ? `of ${bytes(storage.total)}` : undefined}
+        meter={storage ? storage.used / storage.total : null} tone={storage && storage.used / storage.total > 0.9 ? 'warn' : ''} />
+      <Tile label="Emulator on this PC" value={qemu ? bytes(qemu.memory) : '—'} sub={qemu ? 'memory in use' : undefined} />
+    </div>
+
     <div className="tools">
       <button type="button" className="btn btn-outline btn-sm" disabled={!online || pending.has('emu-screenshot')} onClick={() => action('screenshot', null, setShot)}><Camera />Screenshot</button>
-      <button type="button" className="btn btn-outline btn-sm" disabled={!online || busy || Boolean(state.running)} onClick={() => action('prepare', null, () => notify('Refract components are up to date on Android'))}><PackageCheck />Reinstall Refract components</button>
-      <button type="button" className="btn btn-outline btn-sm" disabled={pending.has('emu-reconnect')} onClick={() => action('reconnect', null, () => notify('Reconnected offline devices'))}><Plug />Reconnect adb</button>
-      <button type="button" className="btn btn-outline btn-sm" disabled={busy || Boolean(state.running)} onClick={() => action('restartAdb', null, () => notify('adb server restarted'))}><RotateCcw />Restart adb server</button>
+      <button type="button" className="btn btn-outline btn-sm" disabled={!online || blocked} onClick={() => action('prepare', null, () => notify('Refract components are up to date on Android'))}><PackageCheck />Reinstall Refract components</button>
       <button type="button" className="btn btn-outline btn-sm" disabled={pending.has('diagnostics')} onClick={() => run('diagnostics', async () => { await call('exportDiagnostics'); notify('Diagnostics saved (zip and folder)'); })}>
         {pending.has('diagnostics') ? <Loader2 className="spin" /> : <FileArchive />}Export diagnostics</button>
-      <button type="button" className="btn btn-ghost btn-sm" onClick={() => run('open-logs', () => call('openLogs', 'emulator'))}><FolderOpen />Emulator logs</button>
-      <button type="button" className="btn btn-ghost btn-sm" disabled={!info} onClick={() => copy(summary(), notify)}><Copy />Copy details</button>
-      <button type="button" className="btn btn-ghost btn-sm" disabled={pending.has('emulator-info')} onClick={loadInfo}>{pending.has('emulator-info') ? <Loader2 className="spin" /> : <RefreshCw />}Refresh</button>
+      <div className="grow" />
+      <button type="button" className="icon-btn icon-btn-sm" aria-label="Reconnect adb" title="Reconnect adb" disabled={pending.has('emu-reconnect')} onClick={() => action('reconnect', null, () => notify('Reconnected offline devices'))}><Plug /></button>
+      <button type="button" className="icon-btn icon-btn-sm" aria-label="Restart adb server" title="Restart adb server" disabled={blocked} onClick={() => action('restartAdb', null, () => notify('adb server restarted'))}><Server /></button>
+      <button type="button" className="icon-btn icon-btn-sm" aria-label="Emulator logs" title="Open the emulator logs folder" onClick={() => run('open-logs', () => call('openLogs', 'emulator'))}><FolderOpen /></button>
+      <button type="button" className="icon-btn icon-btn-sm" aria-label="Copy details" title="Copy these details" disabled={!info} onClick={() => copy(summary(), notify)}><Copy /></button>
+      <button type="button" className="icon-btn icon-btn-sm" aria-label="Refresh" title="Refresh" disabled={pending.has('emulator-info')} onClick={loadInfo}>{pending.has('emulator-info') ? <Loader2 className="spin" /> : <RefreshCw />}</button>
     </div>
+
     {shot && <section className="panel shot">
       <div className="panel-row"><h2>Screenshot</h2><div className="tools">
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => run('open-shots', () => call('openLogs', 'screenshots'))}><FolderOpen />Open folder</button>
@@ -208,77 +289,74 @@ function Overview({ state, status, info, loadInfo, pending, run, notify, action,
       <img src={shot.image} alt="What Android shows now" /><small className="mono muted">{shot.path}</small>
     </section>}
 
+    {checks.length > 0 && <section className={`panel checks ${problems.length ? 'has-problems' : ''}`}>
+      <div className="panel-row">
+        <h2>{problems.length ? `${problems.length} problem${problems.length === 1 ? '' : 's'}` : 'Everything looks good'}</h2>
+        <span className="muted">{checks.length - problems.length} of {checks.length} checks passed</span>
+      </div>
+      {problems.length > 0 && <ul className="problem-list">{problems.map(([label, problem, todo]) => <li key={label}>
+        <TriangleAlert /><div><strong>{label}</strong><span>{problem}</span></div>
+        {todo && <button type="button" className="btn btn-outline btn-sm" title={todo[2]} disabled={todo[0] !== 'storage' && (blocked || pending.has(`emu-${todo[0]}`))} onClick={() => fix(todo)}>{todo[1]}</button>}
+      </li>)}</ul>}
+      <div className="check-chips">{checks.filter(c => !c[1]).map(([label]) => <span key={label}><CircleCheck />{label}</span>)}</div>
+    </section>}
+
     <div className="info-grid">
+      <div className="info-col">
       <section className="panel">
         <h2>Android</h2>
         {!guest ? <p>{online ? 'Reading Android…' : 'Start the emulator to see Android’s details.'}</p> : <KeyValues rows={[
-          ['Device', /oculus/i.test(props['ro.product.manufacturer']) ? `${props['ro.product.manufacturer']} ${props['ro.product.model']}` : bad(`${props['ro.product.manufacturer']} ${props['ro.product.model']}`, 'no Quest identity yet; Play sets it')],
+          ['Device', `${props['ro.product.manufacturer']} ${props['ro.product.model']}`],
           ['Android', `${props['ro.build.version.release']} (API ${props['ro.build.version.sdk']})`],
-          ['Build', props['ro.build.fingerprint'], 'mono'],
-          ['ABIs', props['ro.product.cpu.abilist'], 'mono'],
-          ['ARM translator', props['ro.dalvik.vm.native.bridge'] === 'libberberis_arm64.so' ? 'Digitalis (libberberis_arm64.so)' : bad(props['ro.dalvik.vm.native.bridge'] || 'none', 'ARM64 games will not start')],
-          ['OpenGL ES', /swiftshader|llvmpipe|software/i.test(guest.gles) ? bad(guest.gles, 'software rendering') : guest.gles],
-          ['Vulkan driver', props['ro.hardware.vulkan']],
-          ['Clock source', guest.clocksource === 'tsc' ? 'tsc' : bad(guest.clocksource || 'unknown', 'not the TSC; games run slower')],
-          ['CPUs', guest.cores],
+          ['Graphics', (guest.gles || '').replace(/^[^,]+,\s*/, '').replace(/\/PCIe\/SSE2/, '')],
+          ['CPUs', `${guest.cores}${live?.load?.length ? ` · load ${live.load.map(n => n.toFixed(1)).join(' ')}` : ''}`],
           ['Memory', `${bytes(guest.memory.available)} free of ${bytes(guest.memory.total)}${guest.memory.swapTotal ? ` · swap ${bytes(guest.memory.swapTotal - guest.memory.swapFree)} used` : ''}`],
-          ['Display', guest.display],
-          ['SELinux', guest.selinux],
-          guest.incomplete && ['Snapshot', bad(`Incomplete: Android stopped answering after “${guest.incomplete.stoppedAfter}”`, guest.incomplete.timedOut ? 'timed out' : `adb exit code ${guest.incomplete.code}${guest.incomplete.error ? `: ${guest.incomplete.error}` : ''}`)],
-          ['Resumed activity', guest.resumed, 'mono'],
-          ['Focused window', /Application Error|Not Responding|isn.t responding|keeps stopping/i.test(guest.focus) ? bad(guest.focus, 'this dialog keeps games black; Play closes it') : guest.focus, 'mono'],
-          ['Full-screen notice', guest.immersiveConfirmed ? 'Dismissed' : bad('Not dismissed', 'Unity games can stay black; Play dismisses it')],
-          ['Crash dialogs', guest.errorDialogsHidden ? 'Hidden' : bad('Shown', 'one can steal focus from a game; Play hides them')],
-          ['Kernel', guest.kernel, 'mono'],
-          ['Kernel command line', guest.cmdline, 'mono'],
+          ['Display', (guest.display || '').replace(/Physical size: /, '').replace(/Physical density: (\d+)/, '$1 dpi')],
+          ['Foreground', (guest.resumed || '').split('/')[0], 'mono'],
         ]} />}
-      </section>
-
-      <section className="panel">
-        <h2>Emulator process</h2>
-        {!qemu ? <p>{status ? 'No emulator is running this virtual device.' : 'Checking…'}</p> : <KeyValues rows={[
-          ['Process', `${qemu.name} (PID ${qemu.pid})`],
-          ['qemu', qemu.multicore ? 'Multi-core copy' : bad('Stock', 'Android may get one vCPU')],
-          ['vCPUs', qemu.cores === 1 ? bad('1', 'Settings > CPU cores, or the multi-core qemu is missing') : qemu.cores],
-          ['Window', qemu.window ? 'Shown' : 'Hidden'],
-          ['Started', qemu.started && `${new Date(qemu.started).toLocaleString()} (${ago(qemu.started)})`],
-          ['Threads', qemu.threads],
-          ['Executable', qemu.path, 'mono'],
-          ['Command line', status.processes.find(p => p.pid === qemu.pid)?.command, 'mono small'],
-        ]} />}
-        {status?.processes.length > 0 && <table className="table">
-          <thead><tr><th>Process</th><th>PID</th><th>CPU</th><th>Memory</th></tr></thead>
-          <tbody>{status.processes.map(p => <tr key={p.pid}><td>{p.name}</td><td className="mono">{p.pid}</td>
-            <td>{p.cpuPercent != null ? `${p.cpuPercent.toFixed(1)}%` : '…'}</td><td>{bytes(p.memory)}</td></tr>)}</tbody>
-        </table>}
       </section>
 
       <section className="panel">
         <h2>Refract components</h2>
-        {!info ? <p>Checking…</p> : <KeyValues rows={components} />}
-        {Object.keys(props).some(k => /refract/.test(k)) && <>
-          <h3>Refract properties</h3>
-          <KeyValues rows={Object.entries(props).filter(([k]) => /refract/.test(k)).map(([k, v]) => [k, v || '(empty)', 'mono'])} />
-        </>}
+        {!info ? <p>Checking…</p> : <KeyValues rows={info.components.map(c => {
+          const installed = c.package && guest?.guestPackages.find(g => g.package === c.package);
+          const onAndroid = !c.package || !guest ? '' : !installed?.installed ? bad('Not installed') : installed.sha256 === c.sha256 ? 'Up to date' : bad('Older build');
+          return [c.label, <span className="kv-split">{c.built ? <span className="muted">Built {ago(c.modified)}</span> : bad('Not built')}{onAndroid}</span>];
+        })} />}
+      </section>
+
+      {processes.length > 0 && <section className="panel">
+        <h2>Android processes</h2>
+        <table className="table proc-table">
+          <thead><tr><th>Process</th><th className="num" title="100% is one Android CPU">CPU</th><th className="num">Memory</th></tr></thead>
+          <tbody>{processes.map(p => <tr key={p.pid}><td title={`${p.name} · PID ${p.pid} · ${p.user}`}><span className="proc-name">{p.name}</span></td>
+            <td className="num">{p.cpu.toFixed(0)}%</td><td className="num">{p.res ? bytes(p.res) : '—'}</td></tr>)}</tbody>
+        </table>
+      </section>}
+      </div>
+
+      <div className="info-col">
+      <section className="panel">
+        <h2>Emulator</h2>
+        {!qemu ? <p>{status ? 'No emulator is running this virtual device.' : 'Checking…'}</p> : <KeyValues rows={[
+          ['qemu', `${qemu.multicore ? 'Multi-core' : 'Stock'} · ${qemu.cores} vCPU${qemu.cores === 1 ? '' : 's'} · ${number(qemu.memoryMB || state.settings.memoryMB)} MB`],
+          ['Window', qemu.window ? 'Shown' : 'Hidden'],
+          ['Started', qemu.started && ago(qemu.started)],
+        ]} />}
+        {status?.processes.length > 0 && <table className="table proc-table">
+          <thead><tr><th>Process</th><th className="num">CPU</th><th className="num">Memory</th></tr></thead>
+          <tbody>{status.processes.map(p => <tr key={p.pid}><td title={`PID ${p.pid}`}><span className="proc-name">{p.name}</span></td>
+            <td className="num">{p.cpuPercent != null ? `${p.cpuPercent.toFixed(1)}%` : '…'}</td><td className="num">{bytes(p.memory)}</td></tr>)}</tbody>
+        </table>}
       </section>
 
       <section className="panel">
         <h2>This PC</h2>
         {!host ? <p>Checking…</p> : <KeyValues rows={[
-          ['Windows', host.os],
-          ['CPU', host.cpu && `${host.cpu} (${host.cores} cores, ${host.threads} threads)`],
+          ['CPU', host.cpu && `${host.cpu} (${host.threads} threads)`],
           ['Memory', host.memory && `${bytes(host.free)} free of ${bytes(host.memory)}`],
-          ['Graphics', host.gpus?.length ? <>{host.gpus.map(g => <div key={g}>{g}</div>)}</> : ''],
-          ['OpenXR runtime', host.openxr || bad('None', 'VR play needs Meta Horizon Link or SteamVR'), 'mono'],
-          ['Acceleration', host.acceleration && (host.acceleration.ok ? host.acceleration.detail : bad(host.acceleration.detail))],
-          ['Android SDK', host.sdk, 'mono'],
-          ['Emulator', `${host.emulatorVersion || 'not installed'}${host.multicoreQemu ? ' · multi-core qemu' : ' · no multi-core qemu'}`],
-          ['adb', host.adbVersion],
-          ['Node.js', host.node],
-          ['Launcher', host.launcherVersion],
-          ['Refract commit', host.commit, 'mono'],
-          ['Refract folder', host.root, 'mono'],
-          ['Launcher data', host.data, 'mono'],
+          ['Graphics', host.gpus?.length ? <>{host.gpus.map(g => <div key={g}>{g.replace(/ \(driver .*\)$/, '')}</div>)}</> : ''],
+          ['VR runtime', host.openxr ? host.openxr.split('\\').at(-1).replace(/\.json$/, '') : bad('None')],
         ]} />}
       </section>
 
@@ -286,21 +364,186 @@ function Overview({ state, status, info, loadInfo, pending, run, notify, action,
         <div className="panel-row"><h2>Installed apps</h2><span className="muted">{guest.packages.length}</span></div>
         <ul className="app-list">
           {guest.packages.map(p => <li key={p.package}>
-            <div><span className="mono">{p.package}</span>{p.versionCode && <small> · code {p.versionCode}</small>}{game?.package === p.package && <span className="tag">Running</span>}</div>
+            <div><span className="mono">{p.package}</span>{game?.package === p.package && <span className="tag">Running</span>}</div>
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => onLogcat(p.package)}><ScrollText />Logcat</button>
             <button type="button" className="btn btn-ghost btn-sm" disabled={pending.has('emu-forceStop')} onClick={() => action('forceStop', p.package, () => notify(`Stopped ${p.package}`))}><Square />Force stop</button>
           </li>)}
         </ul>
       </section>}
+      </div>
+    </div>
 
-      {guest && <section className="panel">
-        <h2>Busiest Android processes</h2>
-        <pre className="pre">{guest.top}</pre>
-        <h3>Storage</h3>
-        <pre className="pre">{guest.storage}</pre>
+    {info && <details className="panel props">
+      <summary><h2>Technical details</h2></summary>
+      <div className="details-grid">
+        {guest && <KeyValues rows={[
+          ['Build', props['ro.build.fingerprint'], 'mono'],
+          ['ABIs', props['ro.product.cpu.abilist'], 'mono'],
+          ['ARM translator', props['ro.dalvik.vm.native.bridge'], 'mono'],
+          ['OpenGL ES', guest.gles],
+          ['Vulkan driver', props['ro.hardware.vulkan']],
+          ['Clock source', guest.clocksource],
+          ['SELinux', guest.selinux],
+          ['Focused window', guest.focus, 'mono'],
+          ['Kernel', guest.kernel, 'mono'],
+          ['Kernel command line', guest.cmdline, 'mono'],
+          ...Object.entries(props).filter(([k]) => /refract/.test(k)).map(([k, v]) => [k, v || '(empty)', 'mono']),
+        ]} />}
+        <KeyValues rows={[
+          qemu && ['qemu', `${qemu.path} (PID ${qemu.pid})`, 'mono'],
+          qemu && ['Command line', status.processes.find(p => p.pid === qemu.pid)?.command, 'mono small'],
+          host && ['Windows', host.os],
+          host && ['OpenXR runtime', host.openxr, 'mono'],
+          host && ['Acceleration', host.acceleration?.detail],
+          host && ['Android SDK', host.sdk, 'mono'],
+          host && ['Emulator', `${host.emulatorVersion || 'not installed'}${host.multicoreQemu ? ' · multi-core qemu' : ''}`],
+          host && ['adb', host.adbVersion],
+          host && ['Node.js', host.node],
+          host && ['Launcher', host.launcherVersion],
+          host && ['Refract commit', host.commit, 'mono'],
+          host && ['Refract folder', host.root, 'mono'],
+          host && ['Launcher data', host.data, 'mono'],
+        ]} />
+      </div>
+    </details>}
+    {guest && <Properties props={props} />}
+  </div>;
+}
+
+// A button that asks once more ("click again") before doing something that cannot be undone.
+function ConfirmButton({ confirm, onConfirm, className = '', children, ...props }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return undefined;
+    const timer = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(timer);
+  }, [armed]);
+  return <button type="button" className={`${className} ${armed ? 'armed' : ''}`} {...props} onClick={() => { if (armed) { setArmed(false); onConfirm(); } else setArmed(true); }}>
+    {armed ? confirm : children}</button>;
+}
+
+const sum = (list, key) => list.reduce((n, item) => n + (item[key] || 0), 0);
+
+function Storage({ state, status, run, pending, notify, action, busy }) {
+  const [data, setData] = useState(null);
+  const [selected, setSelected] = useState(() => new Set());
+  const [size, setSize] = useState(0);
+  const online = status?.state === 'running', up = status && status.state !== 'stopped';
+  const load = useCallback(() => run('emu-storage', async () => setData(await call('emulatorStorage'))), [run]);
+  useEffect(() => { if (status) load(); }, [load, Boolean(status), online]); // eslint-disable-line react-hooks/exhaustive-deps
+  const act = async (name, arg, message) => { await action(name, arg, () => notify(message)); load(); };
+
+  const guest = data?.guest, host = data?.host;
+  const leftovers = guest?.leftovers || [];
+  // Selections only of files that are still there.
+  const chosen = leftovers.filter(f => selected.has(f.path));
+  const toggle = file => setSelected(old => { const next = new Set(old); if (next.has(file)) next.delete(file); else next.add(file); return next; });
+  const gameRunning = Boolean(state.running);
+  const blocked = busy || gameRunning;
+  // One size for both disk actions: Grow uses it when it is larger, Reset makes the new disk this size.
+  const currentSize = host?.dataSize ? Math.round(host.dataSize / 1024 ** 3) : 0;
+  const target = size || currentSize || 64;
+  const sizes = [...new Set([...(host?.sizes || []), currentSize].filter(Boolean))].sort((a, b) => a - b);
+  const short = host && target * 1024 ** 3 - host.dataDisk > host.driveFree;
+
+  const parts = guest && (() => {
+    const apps = guest.apps.reduce((n, a) => n + a.apk + a.data + a.external, 0), obb = sum(guest.apps, 'obb'), extra = sum(leftovers, 'size');
+    return [['Game files', obb, 'seg-obb'], ['Apps and data', apps, 'seg-apps'], ['Leftovers', extra, 'seg-left'],
+      ['System and other', Math.max(0, guest.used - apps - obb - extra), 'seg-other']];
+  })();
+
+  return <div className="emu-storage">
+    <section className="panel">
+      <div className="panel-row">
+        <h2>{guest ? <>{bytes(guest.used)} <span className="muted">of {bytes(guest.total)} used</span></> : 'Android storage'}</h2>
+        <div className="panel-actions">
+          {guest && <span className={guest.used / guest.total > 0.85 ? 'bad' : 'muted'}>{bytes(guest.free)} free</span>}
+          <button type="button" className="icon-btn icon-btn-sm" aria-label="Refresh" title="Refresh" disabled={pending.has('emu-storage')} onClick={load}>
+            {pending.has('emu-storage') ? <Loader2 className="spin" /> : <RefreshCw />}</button>
+        </div>
+      </div>
+      {!guest ? <p className="hint">{online ? 'Reading Android…' : up ? 'Android is starting.' : 'Start the emulator to see what is on Android.'}</p> : <>
+        <div className="usage-bar" role="img" aria-label={parts.map(([label, n]) => `${label} ${bytes(n)}`).join(', ')}>
+          {parts.map(([label, n, cls]) => n > 0 && <div key={label} className={cls} style={{ width: `${(n / guest.total) * 100}%` }} title={`${label}: ${bytes(n)}`} />)}
+        </div>
+        <ul className="usage-legend">{parts.map(([label, n, cls]) => <li key={label}><span className={`swatch ${cls}`} />{label}<strong>{bytes(n)}</strong></li>)}</ul>
+      </>}
+    </section>
+
+    {guest && <section className="panel">
+      <h2>Games and apps</h2>
+      <table className="table storage-table">
+        <thead><tr><th>App</th><th className="num">App</th><th className="num">Data</th><th className="num">Game files</th><th className="num">Total</th><th /></tr></thead>
+        <tbody>{guest.apps.map(a => {
+          const running = data.running === a.package, name = a.name || a.package;
+          return <tr key={a.package}>
+            <td><div>{name}{a.component && <span className="tag">Refract</span>}{running && <span className="tag ok">Running</span>}</div>{a.name && <small className="mono muted">{a.package}</small>}</td>
+            <td className="num">{bytes(a.apk)}</td>
+            <td className="num" title={`Cache ${bytes(a.cache)}`}>{bytes(a.data + a.external)}</td>
+            <td className="num">{a.obb > 64 * 1024 ? bytes(a.obb) : <span className="muted">—</span>}</td>
+            <td className="num"><strong>{bytes(a.total)}</strong></td>
+            <td className="row-actions">
+              <button type="button" className="btn btn-ghost btn-sm" disabled={running || busy || pending.has('emu-clearCache')} title={`Cache: ${bytes(a.cache)}`}
+                onClick={() => act('clearCache', a.package, `Cleared the cache of ${name}`)}><Eraser />Clear cache</button>
+              {!a.component && <>
+                <ConfirmButton className="btn btn-ghost btn-sm" confirm="Delete saves?" disabled={running || busy || pending.has('emu-clearData')} title="Deletes saves, settings and sign-ins"
+                  onConfirm={() => act('clearData', a.package, `Cleared the data of ${name}`)}><Trash2 />Clear data</ConfirmButton>
+                <ConfirmButton className="btn btn-ghost btn-sm" confirm="Uninstall?" disabled={running || blocked || pending.has('emu-uninstall')}
+                  onConfirm={() => act('uninstall', a.package, `Uninstalled ${name}`)}><PackageX />Uninstall</ConfirmButton>
+              </>}
+            </td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </section>}
+
+    <div className="storage-cols">
+      {leftovers.length > 0 && <section className="panel">
+        <div className="panel-row">
+          <h2>Leftover files <span className="muted">{bytes(sum(leftovers, 'size'))}</span></h2>
+          <ConfirmButton className="btn btn-outline btn-sm" confirm={`Delete ${chosen.length}?`} disabled={!chosen.length || busy || pending.has('emu-deleteFiles')}
+            onConfirm={async () => { await act('deleteFiles', chosen.map(f => f.path), `Deleted ${bytes(sum(chosen, 'size'))}`); setSelected(new Set()); }}>
+            <Trash2 />Delete{chosen.length ? ` ${bytes(sum(chosen, 'size'))}` : ''}</ConfirmButton>
+        </div>
+        <ul className="app-list file-list">
+          <li><label className="check"><input type="checkbox" checked={chosen.length === leftovers.length} onChange={e => setSelected(e.target.checked ? new Set(leftovers.map(f => f.path)) : new Set())} />
+            <span className="muted">Select all</span></label></li>
+          {leftovers.map(f => <li key={f.path}>
+            <label className="check" title={f.path}><input type="checkbox" checked={selected.has(f.path)} onChange={() => toggle(f.path)} />
+              <span className="mono">{f.name}</span></label>
+            <span className="size">{bytes(f.size)}</span>
+          </li>)}
+        </ul>
+      </section>}
+
+      {host && <section className="panel">
+        <h2>Disk</h2>
+        {!host.exists ? <p className="hint">No virtual device named {state.settings.avd}. Settings &gt; Setup creates it.</p> : <>
+          <KeyValues rows={[
+            ['Android’s disk', bytes(host.dataSize)],
+            ['File on this PC', bytes(host.total)],
+            ['Drive', `${bytes(host.driveFree)} free`, host.driveFree < 20 * 1024 ** 3 ? 'bad' : ''],
+            host.snapshots > 0 && ['Saved snapshot', <span className="kv-action">{bytes(host.snapshots)}
+              <ConfirmButton className="btn btn-ghost btn-sm" confirm="Delete?" disabled={up || busy || pending.has('emu-deleteSnapshots')} title={up ? 'Stop the emulator first' : 'Never used: Refract always starts Android fresh'}
+                onConfirm={() => act('deleteSnapshots', null, `Deleted the saved snapshot (${bytes(host.snapshots)})`)}><Trash2 />Delete</ConfirmButton></span>],
+            host.growPending && ['Bigger disk', bad('Pending', 'Finishes the next time Android starts')],
+            host.resetPending && ['Reset', bad('Pending', 'Happens the next time Android starts')],
+          ]} />
+          <div className="disk-controls">
+            <select className="field-input compact" aria-label="Disk size" value={target} onChange={e => setSize(Number(e.target.value))}>
+              {sizes.map(n => <option key={n} value={n}>{n} GB{n === currentSize ? ' (now)' : ''}</option>)}
+            </select>
+            <ConfirmButton className="btn btn-outline btn-sm" confirm={`Grow to ${target} GB?`} disabled={target <= currentSize || blocked}
+              title={target <= currentSize ? 'Choose a larger size' : 'Keeps every game and save; Android restarts twice'}
+              onConfirm={() => act('growDisk', target, `Android’s disk is now ${target} GB`)}><HardDrive />Grow</ConfirmButton>
+            <ConfirmButton className="btn btn-outline btn-sm btn-danger-outline" confirm="Erase everything?" disabled={blocked}
+              title={`Deletes every game, save and setting on Android; the new disk is ${target} GB`}
+              onConfirm={() => act('resetAndroid', target, 'Android was reset')}><RotateCcw />Reset Android</ConfirmButton>
+          </div>
+          {short && <p className="hint bad">The disk file can need {bytes(target * 1024 ** 3 - host.dataDisk)} more, but the drive has {bytes(host.driveFree)} free.</p>}
+        </>}
       </section>}
     </div>
-    {guest && <Properties props={props} />}
   </div>;
 }
 
@@ -498,44 +741,38 @@ function Shell({ online }) {
 function EmulatorSettings({ state, run, pending, notify, up }) {
   const { draft, edit, field, toggle, save, saveBar } = useSettingsForm({ state, run, pending, notify });
   return <form className="settings" onSubmit={save}>
-    {up && <p className="note">Changes to the emulator apply the next time it starts. Stop it at the top of this page, then start it again.</p>}
+    {up && <p className="note">Changes apply the next time the emulator starts.</p>}
     <section className="panel">
       <h2>Virtual device</h2>
-      <p>The Android 16 (API 36) virtual device Refract runs games in.</p>
       {field('sdk', 'Android SDK', { required: true }, true)}
       {field('avd', 'Virtual device', { required: true, pattern: '[a-zA-Z0-9_\\-]+' })}
       <div className="fields-2">
         {field('port', 'Port', { type: 'number', min: 5554, max: 5682, step: 2, required: true })}
         {field('memoryMB', 'Memory (MB)', { type: 'number', min: 2048, max: 16384, step: 1024, required: true })}
       </div>
-    </section>
-    <section className="panel">
-      <h2>Performance</h2>
-      <p>Each Android CPU keeps one PC thread busy. Refract uses at most half of this PC’s performance-core threads, so SteamVR and the host bridge keep the rest.</p>
-      <div className="field">
-        <label htmlFor="cores">CPU cores</label>
-        <select id="cores" className="field-input" value={draft.cores} onChange={e => edit('cores', Number(e.target.value))}>
-          {[1, 2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n}{n === 6 ? ' (default)' : n === 1 ? ' (stock emulator)' : ''}</option>)}
-        </select>
+      <div className="fields-2">
+        <div className="field">
+          <label htmlFor="cores">CPU cores</label>
+          <select id="cores" className="field-input" value={draft.cores} onChange={e => edit('cores', Number(e.target.value))}
+            title="Refract uses at most half of this PC’s performance-core threads">
+            {[1, 2, 3, 4, 5, 6].map(n => <option key={n} value={n}>{n}{n === 6 ? ' (default)' : n === 1 ? ' (stock emulator)' : ''}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="audio">Audio output</label>
+          <select id="audio" className="field-input" value={draft.audio} onChange={e => edit('audio', e.target.value)}>
+            <option value="dsound">DirectSound (default)</option>
+            <option value="winaudio">Windows audio</option>
+            <option value="sdl">SDL</option>
+          </select>
+        </div>
       </div>
     </section>
     <section className="panel">
-      <h2>Audio</h2>
-      <p>How the emulator plays game sound on this PC.</p>
-      <div className="field">
-        <label htmlFor="audio">Audio output</label>
-        <select id="audio" className="field-input" value={draft.audio} onChange={e => edit('audio', e.target.value)}>
-          <option value="dsound">DirectSound (default, low latency)</option>
-          <option value="winaudio">Windows audio (winaudio)</option>
-          <option value="sdl">SDL</option>
-        </select>
-      </div>
-      {toggle('hostMic', 'Microphone', 'Lets games hear this PC’s microphone (voice chat).')}
-    </section>
-    <section className="panel">
-      <h2>Behavior</h2>
-      {toggle('showWindow', 'Show the emulator window', 'Opens Android’s own window next to the game, for debugging. Games still show in the headset or the PC viewer.')}
-      {toggle('keepEmulator', 'Keep Android running when Refract closes', 'Otherwise an emulator Refract started stops with it. Keeping it makes the next launch faster.')}
+      <h2>Options</h2>
+      {toggle('hostMic', 'Microphone', 'For voice chat in games.')}
+      {toggle('showWindow', 'Show the emulator window', 'Android’s own window, for debugging.')}
+      {toggle('keepEmulator', 'Keep Android running when Refract closes', 'Makes the next launch faster.')}
     </section>
     {saveBar}
   </form>;

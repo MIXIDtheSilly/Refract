@@ -17,8 +17,8 @@ import { randomUUID, createHash } from 'node:crypto';
 import { MetaAuth, QuestStore, appId } from '../core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from '../core/download.mjs';
 import { State } from '../core/state.mjs';
-import { Runtime, run, validPackage, audioBackends, newUserId, validUserId } from '../core/runtime.mjs';
-import { Emulator, redact } from '../core/emulator.mjs';
+import { Runtime, run, validPackage, audioBackends, newUserId, validUserId, guestPackages } from '../core/runtime.mjs';
+import { Emulator, redact, diskSizes } from '../core/emulator.mjs';
 import { checkSetup, fixSetup, headsetStatus, refreshPath } from '../core/setup.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
 
@@ -232,6 +232,12 @@ const methods = {
   // Emulator page. Status is polled while the page is open; logcat is read incrementally by sequence number.
   emulatorStatus: () => emulator.status(),
   emulatorInfo: () => emulator.info(),
+  emulatorStorage: async () => {
+    const result = await emulator.storage();
+    // Library names for the packages the page lists.
+    for (const app of result.guest?.apps || []) app.name = state.data.games.find(g => g.package === app.package)?.name || '';
+    return { ...result, running: runtime.game?.package || '' };
+  },
   emulatorAction: async (action, arg) => {
     if (!Object.hasOwn(emulatorActions, action)) throw new Error('Unknown emulator action.');
     if (emulatorTask) throw new Error('Wait for the current emulator task to finish.');
@@ -321,7 +327,58 @@ const emulatorActions = {
   },
   forceStop: async pkg => { await runtime.adbAt(await androidPort(), ['shell', 'am', 'force-stop', validPackage(pkg)], { timeout: 15000 }); },
   screenshot: () => emulator.screenshot(),
+  // Storage tab.
+  clearCache: async pkg => emulator.clearCache(await androidPort(), notRunning(pkg)),
+  clearData: async pkg => emulator.clearData(await androidPort(), notComponent(notRunning(pkg))),
+  uninstall: pkg => exclusive(async () => {
+    await emulator.uninstall(await androidPort(), notComponent(notRunning(pkg)));
+    for (const game of state.data.games) if (game.package === pkg) game.installed = false;
+    await persist();
+  }),
+  deleteFiles: async paths => emulator.deleteFiles(await androidPort(), paths),
+  deleteSnapshots: async () => {
+    if (await runtime.findPort() || await runtime.avdProcessPort()) throw new Error('Stop the emulator first.');
+    await emulator.deleteSnapshots();
+  },
+  // Grows Android's data disk to sizeGB, keeping everything on it (see Emulator.installGrowWrapper).
+  growDisk: (sizeGB, update) => exclusive(async () => {
+    noGame();
+    if (!diskSizes.includes(sizeGB)) throw new Error('Choose a disk size.');
+    if (sizeGB * 1024 ** 3 <= await emulator.diskSize()) throw new Error('Choose a size larger than the disk is now.');
+    await runtime.ensure(update);
+    update('Preparing Android');
+    await emulator.installGrowWrapper(await androidPort());
+    // From here on the next start must run the grow boot: it also puts the real e2fsck back.
+    let error = null;
+    try {
+      await emulatorActions.stop(null, update);
+      if (await runtime.avdProcessPort()) throw new Error('The emulator did not stop. Close it, then start Android again; the disk keeps its old size.');
+      update('Making the disk file bigger');
+      await emulator.enlargeDisk(sizeGB);
+    } catch (e) { error = e; }
+    await emulator.markGrowPending();
+    if (error) throw error;
+    await runtime.ensure(update);
+    const total = Number((await runtime.adb(['shell', 'df', '-k', '/data'])).trim().split(/\r?\n/).pop().split(/\s+/)[1]) * 1024;
+    if (!(total > sizeGB * 1024 ** 3 * 0.9)) throw new Error(`The disk file is ${sizeGB} GB now, but Android's storage is still ${(total / 1024 ** 3).toFixed(1)} GB. See the emulator logs.`);
+  }),
+  // Deletes everything on Android and starts it again from a new data disk of sizeGB.
+  resetAndroid: (sizeGB, update) => exclusive(async () => {
+    noGame();
+    if (!diskSizes.includes(sizeGB)) throw new Error('Choose a disk size.');
+    await emulatorActions.stop(null, update);
+    if (await runtime.avdProcessPort()) throw new Error('The emulator did not stop. Close it and try again.');
+    update('Resetting Android');
+    await emulator.scheduleReset(sizeGB);
+    await runtime.ensure(update);
+    await syncInstalled();
+  }),
 };
+function notRunning(pkg) { if (runtime.game?.package === validPackage(pkg)) throw new Error('Close the game first.'); return pkg; }
+function notComponent(pkg) {
+  if (guestPackages.some(p => p.package === pkg)) throw new Error('This is part of Refract; Refract would only install it again.');
+  return pkg;
+}
 
 async function handle({ id, method, args }) {
   try {
