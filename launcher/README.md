@@ -128,10 +128,20 @@ quit), not PowerShell's error record.
 Electron launcher are not read; sign in again once). `launcher-backend.log` holds
 backend errors. Downloads default to
 `~/Downloads/Refract/<app-id>/<build-id>/`. Games' actual saves stay in the AVD.
+The AVD (Android's data disk, which grows as games are installed and never
+shrinks by itself) starts in `%USERPROFILE%\.android\avd`; Emulator > Storage >
+Disk > Move moves it to another folder or drive and points `<avd>.ini` at it.
 Five GB of free disk headroom is reserved before downloads to keep Android
 bootable. Meta APIs used by community launchers are undocumented and may change;
 API errors are shown rather than treating missing content as successful installs.
+Meta server errors (HTTP 5xx) are retried twice, and when the version list fails
+the store listing's current release is offered instead.
 Library pagination is reported if Meta returns a partial entitlement response.
+
+Opening a Meta game that is not downloaded yet checks which VR SDK its current
+build uses by reading only the APK's zip directory (two ranged requests): games
+on Meta's older VrApi SDK (`libvrapi.so` without an OpenXR loader) are marked
+"VrApi, not supported". Downloaded and imported APKs are checked the same way.
 
 ## Verification
 

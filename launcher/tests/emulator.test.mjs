@@ -141,3 +141,62 @@ test('Make the disk bigger resizes the disk file, records the size and marks the
   assert.equal(disk.dataSize, 32 * 1024 ** 3);
   assert.equal(disk.growPending, true);
 });
+
+test('Move Android puts the AVD folder in the chosen folder and points its .ini there', async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-avd-'));
+  const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-drive-'));
+  const old = process.env.ANDROID_AVD_HOME;
+  process.env.ANDROID_AVD_HOME = home;
+  t.after(async () => {
+    if (old === undefined) delete process.env.ANDROID_AVD_HOME; else process.env.ANDROID_AVD_HOME = old;
+    await fs.rm(home, { recursive: true, force: true }); await fs.rm(elsewhere, { recursive: true, force: true });
+  });
+  const directory = path.join(home, 'test-avd.avd');
+  await fs.mkdir(path.join(directory, 'snapshots'), { recursive: true });
+  await fs.writeFile(path.join(home, 'test-avd.ini'), `avd.ini.encoding=UTF-8\r\npath=${directory}\r\npath.rel=avd\\test-avd.avd\r\ntarget=android-36\r\n`);
+  await fs.writeFile(path.join(directory, 'config.ini'), 'disk.dataPartition.size=64G\r\n');
+  await fs.writeFile(path.join(directory, 'userdata-qemu.img.qcow2'), Buffer.alloc(4096, 7));
+  const emulator = fakeEmulator('');
+  await assert.rejects(emulator.moveAvd('relative/folder'), /Choose a folder/);
+  await assert.rejects(emulator.moveAvd(path.join(directory, 'inner')), /outside/);
+  await assert.rejects(emulator.moveAvd(home), /already in this folder/);
+  await assert.rejects(emulator.moveAvd(path.join(elsewhere, 'Spiele-ü')), /non-English/);
+  const target = path.join(elsewhere, 'Android');
+  const result = await emulator.moveAvd(target);
+  assert.deepEqual(result, { directory: path.join(target, 'test-avd.avd'), leftover: '' });
+  assert.equal(await fs.readFile(path.join(home, 'test-avd.ini'), 'utf8'), `avd.ini.encoding=UTF-8\r\ntarget=android-36\r\npath=${result.directory}\r\n`);
+  assert.equal((await fs.readFile(path.join(result.directory, 'userdata-qemu.img.qcow2'))).length, 4096);
+  await assert.rejects(fs.access(directory));
+  assert.equal(await emulator.avdDirectory(), result.directory);
+  // A folder of that name already there is never overwritten.
+  await fs.mkdir(path.join(home, 'test-avd.avd'));
+  await assert.rejects(emulator.moveAvd(home), /already exists/);
+});
+
+test('Move Android across drives copies the folder, then deletes the old one', async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-avd-'));
+  const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-drive-'));
+  const old = process.env.ANDROID_AVD_HOME, rename = fs.rename;
+  process.env.ANDROID_AVD_HOME = home;
+  t.after(async () => {
+    fs.rename = rename;
+    if (old === undefined) delete process.env.ANDROID_AVD_HOME; else process.env.ANDROID_AVD_HOME = old;
+    await fs.rm(home, { recursive: true, force: true }); await fs.rm(elsewhere, { recursive: true, force: true });
+  });
+  const directory = path.join(home, 'test-avd.avd');
+  await fs.mkdir(path.join(directory, 'snapshots/default_boot'), { recursive: true });
+  await fs.writeFile(path.join(home, 'test-avd.ini'), `path=${directory}\r\n`);
+  await fs.writeFile(path.join(directory, 'config.ini'), 'disk.dataPartition.size=64G\r\n');
+  await fs.writeFile(path.join(directory, 'snapshots/default_boot/ram.bin'), Buffer.alloc(300000, 1));
+  // A rename of the AVD folder itself fails the way Windows fails one between drives.
+  fs.rename = async (from, to) => { if (from === directory) throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' }); return rename(from, to); };
+  const stages = [];
+  const result = await fakeEmulator('').moveAvd(elsewhere, stage => stages.push(stage));
+  assert.equal(result.directory, path.join(elsewhere, 'test-avd.avd'));
+  assert.equal((await fs.readFile(path.join(result.directory, 'snapshots/default_boot/ram.bin'))).length, 300000);
+  assert.equal(await fs.readFile(path.join(result.directory, 'config.ini'), 'utf8'), 'disk.dataPartition.size=64G\r\n');
+  await assert.rejects(fs.access(`${result.directory}.moving`));
+  await assert.rejects(fs.access(directory));
+  assert.match(await fs.readFile(path.join(home, 'test-avd.ini'), 'utf8'), new RegExp(`^path=${result.directory.replace(/\\/g, '\\\\')}\r$`, 'm'));
+  assert.ok(stages.length >= 1);
+});

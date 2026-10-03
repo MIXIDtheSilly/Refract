@@ -44,6 +44,7 @@ export function IconButton({ label, children, className = '', ...props }) {
 
 export function GameStatus({ game, running }) {
   if (running) return <><span className="dot live" />Playing</>;
+  if (game.vrSdk === 'vrapi' && !game.installed) return <><span className="dot warn" />VrApi, not supported</>;
   if (game.installed) return <><span className="dot" />Installed</>;
   if (game.downloaded || game.apk) return <><span className="dot hollow" />Ready to install</>;
   if (game.source === 'meta' && game.owned === false) return 'Not owned';

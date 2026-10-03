@@ -49,3 +49,24 @@ test('failed Quest exchange can retry and does not expose server credentials',as
  await assert.rejects(api.downloadUrl({id:'123456'}),error=>/expired/.test(error.message)&&!error.message.includes('private'));
  assert.equal(new URL(await api.downloadUrl({id:'123456'})).searchParams.get('access_token'),'quest');
 });
+
+test('Meta server errors are retried, and a failing version list falls back to the listing release',async()=>{
+ let versionCalls=0;
+ const api=new QuestStore('test',async(_url,{body})=>{
+  if(body.get('doc_id')==='2885322071572384'){versionCalls++;return Response.json({error:{code:1,message:'An unknown error occurred'}},{status:500});}
+  return Response.json({data:{item:{id:'123456',supported_hmd_platforms:['EUREKA'],latest_supported_binary:{id:'222222',__typename:'AndroidBinary',version:'1.5'}}}});
+ },async()=>{});
+ const builds=await api.builds('123456');
+ assert.equal(versionCalls,3);
+ assert.deepEqual(builds.map(b=>[b.id,b.version]),[['222222','1.5']]);
+});
+
+test('Meta server errors are not blamed on the sign-in; an expired session is',async()=>{
+ const failing=new QuestStore('test',async()=>Response.json({error:{code:2}},{status:503}),async()=>{});
+ await assert.rejects(failing.library(),error=>/HTTP 503, code 2/.test(error.message)&&!/Try signing in/.test(error.message));
+ const expired=new QuestStore('test',async()=>Response.json({error:{code:190,message:'private'}},{status:400}));
+ await assert.rejects(expired.library(),error=>/expired/.test(error.message)&&!error.message.includes('private'));
+ let calls=0;
+ const flaky=new QuestStore('test',async()=>++calls<3?new Response('oops',{status:500}):Response.json({data:{viewer:{user:{active_entitlements:{nodes:[]}}}}}),async()=>{});
+ assert.deepEqual(await flaky.library(),{games:[],partial:false});
+});

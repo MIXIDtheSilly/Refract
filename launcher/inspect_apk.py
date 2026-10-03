@@ -88,6 +88,8 @@ def inspect(apk, sdk):
         'name': label[1] if label else package, 'version': version[1] if version else '', 'image': ''}
     with zipfile.ZipFile(apk) as archive:
         result['nativeAbis'] = sorted({n.split('/')[1] for n in names if n.startswith('lib/') and n.endswith('.so')})
+        # The launcher tells OpenXR games from VrApi ones by these (launcher/core/apk_sdk.mjs).
+        result['libraries'] = sorted(n for n in names if n.startswith('lib/') and n.endswith('.so') and n.count('/') == 2)
         icons = re.findall(r"^application-icon-\d+:'([^']+)'", output, re.M)
         for icon in reversed(icons):
             if icon in names and icon.endswith('.png') and archive.getinfo(icon).file_size < 2 * 1024 * 1024:

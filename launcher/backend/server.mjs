@@ -21,6 +21,7 @@ import { Runtime, run, validPackage, audioBackends, newUserId, validUserId, vali
 import { Emulator, redact, diskSizes } from '../core/emulator.mjs';
 import { checkSetup, fixSetup, headsetStatus, refreshPath } from '../core/setup.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
+import { remoteZipNames, vrSdk } from '../core/apk_sdk.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(directory, '../..');
@@ -125,7 +126,7 @@ async function downloadGame(id, binaryId, dlcId) {
         const apk = files.find(f => f.kind === 'apk');
         const metadata = await runtime.inspect(apk.path);
         if (metadata.package !== plan.package) throw new Error('Downloaded APK package does not match the selected build.');
-        Object.assign(game, { package: metadata.package, activity: metadata.activity, apk: apk.path,
+        Object.assign(game, { package: metadata.package, activity: metadata.activity, apk: apk.path, vrSdk: metadata.vrSdk, vrSdkBuild: plan.binaryId,
           version: plan.version, binaryId: plan.binaryId, files, downloaded: true });
       } else {
         game.files = [...(game.files || []).filter(f => !files.some(n => n.name === f.name)), ...files];
@@ -157,6 +158,19 @@ const methods = {
   sync: async () => { const online = await syncInstalled(); const result = token ? await syncMeta() : null; return { online, meta: result }; },
   builds: id => store().builds(appId(id)).then(items => items.map(b => ({ id: String(b.id), version: b.version, code: b.version_code ?? b.versionCode }))),
   download: (id, binaryId) => downloadGame(appId(id), binaryId),
+  // Before a download: is the current Quest build an OpenXR game (runs) or a VrApi one (does not yet)? Reads only
+  // the APK's zip directory from Meta's CDN. The answer is kept with the game.
+  checkSdk: async id => {
+    const game = getGame(appId(id)), api = store();
+    const plan = await api.plan(game.id);
+    if (game.vrSdk && game.vrSdkBuild === plan.binaryId) return game.vrSdk;
+    const apk = plan.files.find(f => f.kind === 'apk');
+    const names = await remoteZipNames(await api.downloadUrl(apk));
+    if (!names) throw new Error('Meta’s file server did not allow reading part of the APK.');
+    Object.assign(game, { vrSdk: vrSdk(names), vrSdkBuild: plan.binaryId });
+    await persist();
+    return game.vrSdk;
+  },
   dlc: id => store().dlc(appId(id)).then(items => items.map(({ files, ...item }) => ({ ...item, fileCount: files.length, bytes: files.reduce((n, f) => n + f.size, 0) }))),
   downloadDlc: (id, dlcId) => downloadGame(appId(id), null, appId(dlcId)),
   cancel: id => { controllers.get(id)?.abort(); },
@@ -364,6 +378,13 @@ const emulatorActions = {
     await runtime.ensure(update);
     const total = Number((await runtime.adb(['shell', 'df', '-k', '/data'])).trim().split(/\r?\n/).pop().split(/\s+/)[1]) * 1024;
     if (!(total > sizeGB * 1024 ** 3 * 0.9)) throw new Error(`The disk file is ${sizeGB} GB now, but Android's storage is still ${(total / 1024 ** 3).toFixed(1)} GB. See the emulator logs.`);
+  }),
+  // Moves the virtual device (Android's data disk) into another folder, usually on another drive. Stops Android first.
+  moveAndroid: (folder, update) => exclusive(async () => {
+    noGame(); absolute(folder);
+    await emulatorActions.stop(null, update);
+    if (await runtime.avdProcessPort()) throw new Error('The emulator did not stop. Close it and try again.');
+    return emulator.moveAvd(folder, update);
   }),
   // Deletes everything on Android and starts it again from a new data disk of sizeGB.
   resetAndroid: (sizeGB, update) => exclusive(async () => {

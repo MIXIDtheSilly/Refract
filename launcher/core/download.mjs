@@ -14,7 +14,7 @@ export function allowedDownload(value) {
     !trusted.some(d => url.hostname === d || url.hostname.endsWith(`.${d}`))) throw new Error('Download URL is not on a Meta delivery domain.');
   return url;
 }
-async function fetchFile(url, options, request, validate) {
+export async function fetchFile(url, options, request, validate) {
   for (let redirects = 0; redirects < 8; redirects++) {
     validate(url);
     const response = await request(url, { ...options, redirect: 'manual' });
