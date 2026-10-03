@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, ChevronsDown, CircleCheck, Copy, CornerDownLeft, Download, Eraser, FileArchive, FolderOpen, HardDrive, Loader2, PackageCheck, PackageX, Pause, Play, Plug, Power, RefreshCw, RotateCcw, ScrollText, Server, Square, Trash2, TriangleAlert, X } from 'lucide-react';
+import { Camera, ChevronsDown, CircleCheck, Copy, CornerDownLeft, Download, Eraser, FileArchive, FolderInput, FolderOpen, HardDrive, Loader2, PackageCheck, PackageX, Pause, Play, Plug, Power, RefreshCw, RotateCcw, ScrollText, Server, Square, Trash2, TriangleAlert, X } from 'lucide-react';
 import { call } from '../api';
 import { ago, bytes } from '../components/common';
 import { Chip, Highlight, LogList, SearchBox, useMatcher } from '../components/log-view';
@@ -423,6 +423,8 @@ function ConfirmButton({ confirm, onConfirm, className = '', children, ...props 
 }
 
 const sum = (list, key) => list.reduce((n, item) => n + (item[key] || 0), 0);
+const moved = result => result?.leftover ? `Android now runs from ${result.directory}. Delete the old folder ${result.leftover} yourself to free its space.`
+  : `Android now runs from ${result?.directory}`;
 
 function Storage({ state, status, run, pending, notify, action, busy }) {
   const [data, setData] = useState(null);
@@ -431,7 +433,7 @@ function Storage({ state, status, run, pending, notify, action, busy }) {
   const online = status?.state === 'running', up = status && status.state !== 'stopped';
   const load = useCallback(() => run('emu-storage', async () => setData(await call('emulatorStorage'))), [run]);
   useEffect(() => { if (status) load(); }, [load, Boolean(status), online]); // eslint-disable-line react-hooks/exhaustive-deps
-  const act = async (name, arg, message) => { await action(name, arg, () => notify(message)); load(); };
+  const act = async (name, arg, message) => { await action(name, arg, result => notify(message || moved(result))); load(); };
 
   const guest = data?.guest, host = data?.host;
   const leftovers = guest?.leftovers || [];
@@ -445,6 +447,10 @@ function Storage({ state, status, run, pending, notify, action, busy }) {
   const target = size || currentSize || 64;
   const sizes = [...new Set([...(host?.sizes || []), currentSize].filter(Boolean))].sort((a, b) => a - b);
   const short = host && target * 1024 ** 3 - host.dataDisk > host.driveFree;
+  const move = () => run('choose-avd', async () => {
+    const folder = await call('chooseFolder');
+    if (folder) await act('moveAndroid', folder, '');
+  });
 
   const parts = guest && (() => {
     const apps = guest.apps.reduce((n, a) => n + a.apk + a.data + a.external, 0), obb = sum(guest.apps, 'obb'), extra = sum(leftovers, 'size');
@@ -522,6 +528,9 @@ function Storage({ state, status, run, pending, notify, action, busy }) {
           <KeyValues rows={[
             ['Android’s disk', bytes(host.dataSize)],
             ['File on this PC', bytes(host.total)],
+            ['Folder', <span className="kv-action"><span className="mono kv-path" title={host.directory}>{host.directory}</span>
+              <button type="button" className="btn btn-ghost btn-sm" disabled={blocked || pending.has('emu-moveAndroid') || pending.has('choose-avd')}
+                title="Moves Android’s disk to another folder or drive, keeping every game and save. Stops Android first." onClick={move}><FolderInput />Move</button></span>],
             ['Drive', `${bytes(host.driveFree)} free`, host.driveFree < 20 * 1024 ** 3 ? 'bad' : ''],
             host.snapshots > 0 && ['Saved snapshot', <span className="kv-action">{bytes(host.snapshots)}
               <ConfirmButton className="btn btn-ghost btn-sm" confirm="Delete?" disabled={up || busy || pending.has('emu-deleteSnapshots')} title={up ? 'Stop the emulator first' : 'Never used: Refract always starts Android fresh'}

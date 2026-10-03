@@ -28,12 +28,27 @@ export function card(item, owned = false) {
     genres: item.genre_names || [], publisher: item.publisher_name || item.developer_name || '',
     platform: item.platform || '', price: item.current_offer?.price?.formatted || '', owned, source: 'meta' };
 }
-export async function post(url, fields, request = fetch) {
-  return read(await request(url, { method: 'POST', body: new URLSearchParams(fields),
-    signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json' } }));
+// retries: how many more times a request is sent after Meta's server fails it (HTTP 5xx), which it often does
+// for one request and not the next. Only for queries; sign-in steps are sent once.
+export async function post(url, fields, request = fetch, retries = 0, wait = attempt => new Promise(resolve => setTimeout(resolve, 1500 * attempt))) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read(await request(url, { method: 'POST', body: new URLSearchParams(fields),
+        signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json' } }));
+    } catch (error) {
+      if (!error.serverError || attempt > retries) throw error;
+      await wait(attempt);
+    }
+  }
 }
 async function read(response) {
-  if (!response.ok) throw new Error(`Meta request failed (${response.status}). Try signing in again.`);
+  if (!response.ok) {
+    // Meta's error body names the reason (an expired session is code 190); read it, never show it.
+    const code = await response.json().then(data => data?.error?.code ?? data?.errors?.[0]?.code, () => undefined);
+    if (code === 190 || response.status === 401) throw new Error('Your Meta session expired. Sign in again.');
+    if (response.status >= 500) throw Object.assign(new Error(`Meta's server could not answer this request (HTTP ${response.status}${code ? `, code ${code}` : ''}). Try again later; signing in again does not help with this one.`), { serverError: true });
+    throw new Error(`Meta request failed (${response.status}). Try signing in again.`);
+  }
   const raw = await response.text();
   if (raw.length > 16 * 1024 * 1024) throw new Error('Meta returned an oversized response.');
   let data; try { data = JSON.parse(raw); } catch { throw new Error('Meta returned an unexpected response. Try again later.'); }
@@ -73,7 +88,7 @@ export class MetaAuth {
 }
 
 export class QuestStore {
-  constructor(token, request = fetch) { this.token = token; this.request = request; }
+  constructor(token, request = fetch, wait) { this.token = token; this.request = request; this.wait = wait; }
   async search(text) {
     if (typeof text !== 'string' || text.trim().length < 2 || text.length > 160) throw new Error('Enter at least two characters to search the Quest store.');
     const result = await post('https://www.meta.com/ocapi/graphql', { doc_id: '24633449332970329',
@@ -85,7 +100,7 @@ export class QuestStore {
   }
   async query(doc, variables = {}) {
     if (!this.token) throw new Error('Sign in to Meta first.');
-    return post(GRAPH, { access_token: this.token, ...(/^\d+$/.test(doc) ? { doc_id: doc } : { doc }), variables: JSON.stringify(variables) }, this.request);
+    return post(GRAPH, { access_token: this.token, ...(/^\d+$/.test(doc) ? { doc_id: doc } : { doc }), variables: JSON.stringify(variables) }, this.request, 2, this.wait);
   }
   async artwork(id) {
     id = appId(id);
@@ -127,12 +142,15 @@ export class QuestStore {
   }
   async builds(id) {
     id = appId(id);
-    const result = await this.query('2885322071572384', { applicationID: id });
-    const item = result.data?.node;
+    // The version list fails on Meta's side for some apps (HTTP 500, every time). The store listing still names
+    // the current release, so the game downloads; only older versions are missing then.
+    let failed = null;
+    const item = await this.query('2885322071572384', { applicationID: id }).then(result => result.data?.node, error => { failed = error; return null; });
     let application = item, released;
     if (!questApp(application)) {
-      const listing = await this.query('6549406941839522', { itemId: id, hmdType: 'EUREKA' });
+      const listing = await this.query('6549406941839522', { itemId: id, hmdType: 'EUREKA' }).catch(error => { throw failed || error; });
       application = listing.data?.item;
+      if (failed && String(application?.id) !== id) throw failed;
       if (String(application?.id) !== id || !questApp(application)) throw new Error('Meta did not return Quest platform information for this app.');
       released = application.latest_supported_binary;
     }
@@ -145,7 +163,7 @@ export class QuestStore {
       const current = index >= 0 ? builds.splice(index, 1)[0] : released;
       builds.unshift({ ...current, ...released });
     }
-    if (!builds.length) throw new Error('Meta returned no downloadable Android versions for this app.');
+    if (!builds.length) throw failed || new Error('Meta returned no downloadable Android versions for this app.');
     return builds;
   }
   async plan(id, binaryId) {
@@ -153,7 +171,8 @@ export class QuestStore {
     const builds = await this.builds(id);
     const selected = binaryId ? builds.find(b => String(b.id) === String(binaryId)) : builds[0];
     if (!selected) throw new Error('Choose an available Quest build.');
-    const result = await this.query('4734929166632773', { binaryID: String(selected.id) });
+    const result = await this.query('4734929166632773', { binaryID: String(selected.id) })
+      .catch(error => { throw error.serverError ? Object.assign(new Error(`Meta could not list this build's files. ${error.message}`), { serverError: true }) : error; });
     const binary = { ...selected, ...result.data?.node };
     if (binary.platform === 'PC' || !binary.package_name || (binary.binary_application?.id && String(binary.binary_application.id) !== id)) throw new Error('The selected build is not an Android APK for this app.');
     const assets = nodes(binary.asset_files);

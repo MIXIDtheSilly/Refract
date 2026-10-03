@@ -1,7 +1,10 @@
 // What the Emulator page shows and does: live status, a diagnostics snapshot of the PC and Android,
 // a logcat buffer the page polls, the log files Refract's scripts write, an adb shell and a diagnostics export.
 import { spawn } from 'node:child_process';
+import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { run, guestPackages, sha256, validPackage } from './runtime.mjs';
@@ -168,6 +171,36 @@ async function folderSize(target) {
   let total = 0;
   for (const entry of await fs.readdir(target).catch(() => [])) total += await folderSize(path.join(target, entry));
   return total;
+}
+
+// Copies a folder to `target` (replacing an unfinished earlier copy there), reporting progress by bytes.
+// Checks the drive has room first: the data disk alone can be most of it.
+async function copyFolder(source, target, progress) {
+  const total = await folderSize(source);
+  await fs.rm(target, { recursive: true, force: true });
+  await fs.mkdir(target, { recursive: true });
+  const drive = await fs.statfs(target).catch(() => null);
+  const free = drive ? Number(drive.bavail) * Number(drive.bsize) : Infinity;
+  const gb = n => `${(n / 1024 ** 3).toFixed(1)} GB`;
+  if (free < total + 1024 ** 3) { await fs.rm(target, { recursive: true, force: true }); throw new Error(`Android’s folder is ${gb(total)}, but that drive has ${gb(free)} free. Free some space or choose another drive.`); }
+  let done = 0, last = 0;
+  const copy = async (from, to) => {
+    for (const entry of await fs.readdir(from, { withFileTypes: true })) {
+      const a = path.join(from, entry.name), b = path.join(to, entry.name);
+      if (entry.isDirectory()) { await fs.mkdir(b); await copy(a, b); continue; }
+      if (!entry.isFile()) continue;
+      await pipeline(createReadStream(a), new Transform({ transform(chunk, _, next) {
+        done += chunk.length;
+        if (Date.now() - last > 500) { last = Date.now(); progress(`Copying Android’s disk (${gb(done)} of ${gb(total)})`); }
+        next(null, chunk);
+      } }), createWriteStream(b));
+    }
+  };
+  try { await copy(source, target); }
+  catch (error) {
+    await fs.rm(target, { recursive: true, force: true }).catch(() => {});
+    throw new Error(`Copying Android’s folder failed, so it stays where it was: ${error.message}`);
+  }
 }
 
 export class Emulator {
@@ -402,6 +435,42 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
   avdDirectory() {
     return fs.readFile(path.join(avdHome(), `${this.settings.avd}.ini`), 'utf8').then(t => t.match(/^path=(.+)$/m)?.[1].trim(), () => '')
       .then(dir => dir || path.join(avdHome(), `${this.settings.avd}.avd`));
+  }
+  // Moves the AVD's folder into `parent` (another drive, usually: the data disk grows to tens of GB) and points
+  // <avd>.ini at it, which the emulator and Refract's scripts read. The emulator must be stopped. Across drives the
+  // folder is copied to <name>.avd.moving first, and the old folder is deleted only once the new one is in use.
+  async moveAvd(parent, progress = () => {}) {
+    if (typeof parent !== 'string' || !path.isAbsolute(parent)) throw new Error('Choose a folder.');
+    // The emulator cannot open an AVD whose path has characters outside ASCII.
+    if (!/^[\x20-\x7e]+$/.test(parent)) throw new Error('The Android emulator cannot use a folder whose path has non-English characters. Choose another folder.');
+    const source = path.resolve(await this.avdDirectory()), target = path.resolve(parent, `${this.settings.avd}.avd`);
+    if (!await exists(path.join(source, 'config.ini'))) throw new Error(`There is no virtual device named ${this.settings.avd}.`);
+    // path.relative ignores case on Windows. '' or a path without '..' means the folder is the AVD's or inside it.
+    if (path.relative(source, target) === '') throw new Error('Android is already in this folder.');
+    const within = path.relative(source, path.resolve(parent));
+    if (!within.startsWith('..') && !path.isAbsolute(within)) throw new Error('Choose a folder outside Android’s current folder.');
+    if (await exists(target)) throw new Error(`${target} already exists. Choose another folder, or move that one away first.`);
+    await fs.mkdir(parent, { recursive: true });
+    try {
+      progress('Moving Android’s disk');
+      await fs.rename(source, target);
+    } catch (error) {
+      if (error.code !== 'EXDEV') throw new Error(`Android’s folder could not be moved: ${error.message}`);
+      await copyFolder(source, `${target}.moving`, progress);
+      await fs.rename(`${target}.moving`, target);
+    }
+    await this.setAvdPath(target);
+    // Same-drive moves are a rename; across drives the copy is complete and in use, so the old folder can go.
+    const leftover = await exists(source) ? await fs.rm(source, { recursive: true, force: true }).then(() => '', () => source) : '';
+    return { directory: target, leftover };
+  }
+  async setAvdPath(directory) {
+    const file = path.join(avdHome(), `${this.settings.avd}.ini`);
+    const lines = (await fs.readFile(file, 'utf8').catch(() => 'avd.ini.encoding=UTF-8\r\n')).split(/\r?\n/).filter(Boolean)
+      // path.rel is relative to the default AVD folder; with it gone the emulator only reads path.
+      .filter(line => !/^path(\.rel)?=/.test(line));
+    await fs.writeFile(`${file}.tmp`, [...lines, `path=${directory}`].map(line => `${line}\r\n`).join(''));
+    await fs.rename(`${file}.tmp`, file);
   }
   async diskInfo() {
     const directory = await this.avdDirectory();

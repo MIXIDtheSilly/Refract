@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dialog } from 'radix-ui';
-import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, RefreshCcw, X } from 'lucide-react';
+import { ArrowDownToLine, ExternalLink, FilePlus2, FolderOpen, History, Loader2, PackagePlus, RefreshCcw, TriangleAlert, X } from 'lucide-react';
 import { call } from '../api';
 import { activeStatuses, ago, bytes, Cover, GameStatus, IconButton } from './common';
 import { PcControls, PlayButtons } from './play';
@@ -15,6 +15,16 @@ export function GameSheet({ game, state, onClose, run, pending, setPage, notify,
   const running = state.running === game.id;
   const operate = task => run(key, task);
   const toDownloads = () => { onClose(); setPage('downloads'); };
+  // Before a download, look at the Quest build's APK (its file list only) for the SDK it uses; the answer is saved.
+  const [sdkCheck, setSdkCheck] = useState('');
+  const checkable = game.source === 'meta' && state.signedIn && !game.apk && !game.vrSdk;
+  useEffect(() => {
+    if (!checkable) return;
+    let current = true;
+    setSdkCheck('checking');
+    call('checkSdk', game.id).then(() => current && setSdkCheck(''), () => current && setSdkCheck('failed'));
+    return () => { current = false; };
+  }, [game.id, checkable]);
   const download = () => operate(async () => { await call('download', game.id, build || undefined); toDownloads(); });
   const install = () => operate(async () => { await call('install', game.id); notify(`${game.name} is installed`); });
   const loadExtra = kind => operate(async () => {
@@ -61,6 +71,9 @@ export function GameSheet({ game, state, onClose, run, pending, setPage, notify,
               {meta.map(m => <span key={m}>{m}</span>)}
             </div>
             <div className="sheet-actions">{primary}</div>
+            {game.vrSdk === 'vrapi' && <div className="notice warn" role="note"><TriangleAlert />
+              <span>Built on Meta’s older VrApi SDK. Refract runs OpenXR games only, so this one stops when it starts.</span></div>}
+            {checkable && sdkCheck === 'checking' && <div className="working" role="status"><Loader2 className="spin" />Checking whether this game runs on Refract…</div>}
             {working && <div className="working" role="status"><Loader2 className="spin" />Working…</div>}
 
             {extra?.kind === 'builds' && <div className="extra">

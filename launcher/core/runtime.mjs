@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { vrSdk } from './apk_sdk.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -227,9 +228,9 @@ export class Runtime {
     }
   }
   async inspect(apk) {
-    const data = JSON.parse(await run('python', [path.join(this.root, 'launcher/inspect_apk.py'), '--apk', apk, '--sdk', this.settings.sdk]));
+    const { libraries, ...data } = JSON.parse(await run('python', [path.join(this.root, 'launcher/inspect_apk.py'), '--apk', apk, '--sdk', this.settings.sdk]));
     validPackage(data.package);
-    return { ...data, apk: path.resolve(apk), source: 'local', id: `local:${data.package}` };
+    return { ...data, vrSdk: vrSdk(libraries), apk: path.resolve(apk), source: 'local', id: `local:${data.package}` };
   }
   async installed() {
     if (!await this.online()) return null;

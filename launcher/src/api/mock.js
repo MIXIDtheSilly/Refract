@@ -95,6 +95,8 @@ const methods = {
     const job = { id: `job-${Date.now()}`, gameId: id, name: game.name, status: 'queued', stage: 'Checking Quest build', completed: 0, total: 0 };
     state.jobs.unshift(job); emit(); simulateDownload(job, game); return job.id;
   },
+  // Night Signal stands in for a game on Meta's older VrApi SDK.
+  checkSdk: async id => { await wait(700); const game = find(id); game.vrSdk = game.name === 'Night Signal' ? 'vrapi' : 'openxr'; emit(); return game.vrSdk; },
   dlc: async () => { await wait(400); return [{ id: '11', name: 'Soundtrack pack', owned: true, fileCount: 1, bytes: 180 * 1024 ** 2 }, { id: '12', name: 'Season pass', owned: false, fileCount: 2, bytes: 1.2 * 1024 ** 3 }, { id: '13', name: 'Cosmetic bundle', owned: true, fileCount: 0, bytes: 0 }]; },
   downloadDlc: async id => methods.download(id),
   cancel: async id => { const job = state.jobs.find(j => j.id === id); if (job) { job.status = 'cancelled'; job.error = 'Cancelled.'; } emit(); },
@@ -176,7 +178,7 @@ const methods = {
       { path: '/data/media/0/Android/obb/com.example.oldgame', name: 'Android/obb/com.example.oldgame', kind: 'obb', package: 'com.example.oldgame', size: gb(3.2) },
       { path: '/data/local/tmp/perf.data', name: 'perf.data', kind: 'temp', size: mb(280) },
       { path: '/data/local/tmp/frida-server', name: 'frida-server', kind: 'temp', size: mb(106) }];
-    const directory = `C:\\Users\\you\\.android\\avd\\${state.settings.avd}.avd`;
+    const directory = emu.directory || `C:\\Users\\you\\.android\\avd\\${state.settings.avd}.avd`;
     return { collected: new Date().toISOString(), port: emu.on ? 5580 : null, running: state.games.find(g => g.id === state.running)?.package || '',
       guest: emu.on ? { total: gb(62.8), used: gb(41.5), free: gb(21.3), apps, leftovers, shared: [{ path: '/data/media/0/Download', name: 'Download', size: mb(8) }] } : null,
       host: { exists: true, directory, dataSize: gb(emu.diskGB ?? 64), growPending: false, total: gb(emu.snapshots === 0 ? 45.2 : 49.5), dataDisk: gb(45), snapshots: emu.snapshots ?? gb(4.3), files: [],
@@ -186,6 +188,7 @@ const methods = {
     state.emulatorTask = { action, stage: action === 'start' ? 'Starting Android' : action === 'resetAndroid' ? 'Resetting Android' : '' }; emit(); await wait(900);
     if (action === 'start') { emu.on = true; emu.booted = Date.now(); }
     if (action === 'stop') emu.on = false;
+    if (action === 'moveAndroid') { emu.on = false; emu.directory = `${arg}\\${state.settings.avd}.avd`; state.emulatorTask = null; emit(); return { directory: emu.directory, leftover: '' }; }
     if (action === 'deleteFiles') emu.leftovers = emu.leftovers.filter(f => !arg.includes(f.path));
     if (action === 'deleteSnapshots') emu.snapshots = 0;
     if (action === 'growDisk' || action === 'resetAndroid') emu.diskGB = arg;
