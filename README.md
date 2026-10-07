@@ -92,6 +92,8 @@ you must credit Refract and link to <https://github.com/MIXIDtheSilly/Refract> s
 can see it (a README, an About or credits page, or release notes). See [LICENSE](LICENSE) for
 the exact wording.
 
-Refract is released under the [MIT License](LICENSE) plus that credit condition, and keeps
-AXRB's MIT copyright notice. The launcher ([launcher/](launcher/)) is GPL-3.0-or-later because it
-includes code adapted from RiftLift.
+Refract is free for **non-commercial use only**. You may not sell it or use it in a paid product,
+a paid service or for-profit business operations. For commercial use, ask first (see
+[LICENSE](LICENSE)). This applies to code written for Refract. Code that still comes from AXRB
+stays MIT, and its copyright notice is kept in [LICENSE](LICENSE). The launcher
+([launcher/](launcher/)) is GPL-3.0-or-later because it includes code adapted from RiftLift.

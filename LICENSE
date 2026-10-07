@@ -1,17 +1,50 @@
-MIT License
+Refract License
 
 Copyright (c) 2026 Refract contributors
-Copyright (c) 2026 Feline Reintgen (AXRB)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This license covers the code written for Refract. Code Refract took from other
+projects stays under that project's license; see "Other code" below.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Permission
+
+Permission is granted, free of charge, to use, copy, modify and share Refract
+(the "Software") for non-commercial purposes, subject to the conditions below.
+
+2. Non-commercial only
+
+You may not use the Software, or anything made from it, for commercial
+purposes. Commercial purposes means anything primarily intended for or directed
+toward commercial advantage or monetary compensation. This includes:
+
+  - selling, licensing or renting the Software or a modified version of it;
+  - offering it, or a service built on it, for a fee, subscription or
+    advertising revenue, or bundling it with a paid product or service;
+  - using it as part of a for-profit business's products, services or
+    operations.
+
+Personal use, hobby projects, education, research and use by non-profit
+organizations are not commercial purposes. Receiving donations is not
+commercial use, as long as access to the Software is not tied to them.
+
+To use the Software commercially, ask the copyright holders for a separate
+license first. Open an issue or contact MIXIDtheSilly on GitHub:
+https://github.com/MIXIDtheSilly
+
+3. Visible credit
+
+Anyone who uses, copies, modifies or redistributes Refract code, in source or
+binary form, including in a project built on it, must give visible credit to
+Refract. The credit must name "Refract" and link to
+https://github.com/MIXIDtheSilly/Refract, and must appear where users will see
+it, such as a README, an About or credits page, or release notes. Keeping the
+notices in the source files alone does not meet this condition.
+
+4. Notices
+
+Copies of the Software, or substantial portions of it, must include this
+license and the copyright notices above and below.
+
+5. No warranty
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -23,21 +56,37 @@ SOFTWARE.
 
 ---
 
-Additional condition: visible credit
+Other code
 
-In addition to the MIT terms above, anyone who uses, copies, modifies or
-redistributes Refract code, in source or binary form, including in a product
-or service built on it, must give visible credit to Refract. The credit must
-name "Refract" and link to https://github.com/MIXIDtheSilly/Refract, and must
-appear where users will see it, such as the README, an About or credits page,
-or the project's documentation or release notes. Keeping the copyright notice
-in the source files alone does not meet this condition.
+Refract started as a fork of AXRB. The code that still comes from AXRB remains
+under AXRB's original MIT license, and Sections 2 and 3 above do not restrict
+that code. Its copyright notice and license text are:
 
-This condition applies to code written for Refract. Code that Refract took from
-AXRB remains under AXRB's original MIT license; its copyright notice above must
-be kept as the MIT license requires.
+  MIT License
 
----
+  Copyright (c) 2026 Feline Reintgen (AXRB)
 
-launcher/ is licensed separately under GPL-3.0-or-later because it
-includes code adapted from RiftLift. See launcher/LICENSE.
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+launcher/ is licensed separately under GPL-3.0-or-later because it includes
+code adapted from RiftLift. See launcher/LICENSE. Sections 2 and 3 above do not
+apply to it.
+
+prebuilts/digitalis/ and other third-party components keep their own licenses;
+see CREDITS.md and the notices in those folders.
