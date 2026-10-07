@@ -67,6 +67,69 @@ int find_library(dl_phdr_info* info, size_t, void* data)
     return 1;
 }
 
+// A loaded library's exported function, from its own dynamic symbol table (no dlopen/dlsym, so no linker namespace).
+void* find_export(const dl_phdr_info* info, const char* symbol)
+{
+    const ElfW(Dyn)* dynamic = nullptr;
+    for (int i = 0; i < info->dlpi_phnum; ++i) {
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC)
+            dynamic = reinterpret_cast<const ElfW(Dyn)*>(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+    }
+    if (!dynamic) return nullptr;
+    const ElfW(Sym)* symbols = nullptr;
+    const char* strings = nullptr;
+    const uint32_t* gnuHash = nullptr;
+    const uint32_t* sysvHash = nullptr;
+    // Bionic leaves the dynamic section as linked: its addresses are relative to the load bias.
+    const auto at = [&](ElfW(Addr) address) { return address < info->dlpi_addr ? info->dlpi_addr + address : address; };
+    for (auto* entry = dynamic; entry->d_tag != DT_NULL; ++entry) {
+        switch (entry->d_tag) {
+        case DT_SYMTAB: symbols = reinterpret_cast<const ElfW(Sym)*>(at(entry->d_un.d_ptr)); break;
+        case DT_STRTAB: strings = reinterpret_cast<const char*>(at(entry->d_un.d_ptr)); break;
+        case DT_GNU_HASH: gnuHash = reinterpret_cast<const uint32_t*>(at(entry->d_un.d_ptr)); break;
+        case DT_HASH: sysvHash = reinterpret_cast<const uint32_t*>(at(entry->d_un.d_ptr)); break;
+        }
+    }
+    if (!symbols || !strings) return nullptr;
+    const auto match = [&](uint32_t index) -> void* {
+        const ElfW(Sym)& sym = symbols[index];
+        // Plain functions only: an IFUNC's value is its resolver, not the function.
+        if (sym.st_shndx == SHN_UNDEF || sym.st_value == 0 || ELF64_ST_TYPE(sym.st_info) != STT_FUNC ||
+            std::strcmp(strings + sym.st_name, symbol) != 0)
+            return nullptr;
+        return reinterpret_cast<void*>(info->dlpi_addr + sym.st_value);
+    };
+    if (gnuHash) {
+        const uint32_t buckets = gnuHash[0], first = gnuHash[1], bloomWords = gnuHash[2];
+        const uint32_t* bucket = reinterpret_cast<const uint32_t*>(reinterpret_cast<const ElfW(Addr)*>(gnuHash + 4) + bloomWords);
+        const uint32_t* chain = bucket + buckets;
+        uint32_t hash = 5381;
+        for (const char* c = symbol; *c; ++c) hash = hash * 33 + static_cast<unsigned char>(*c);
+        if (buckets == 0) return nullptr;
+        for (uint32_t index = bucket[hash % buckets]; index >= first; ++index) {
+            const uint32_t entryHash = chain[index - first];
+            if ((entryHash | 1) == (hash | 1))
+                if (void* found = match(index)) return found;
+            if (entryHash & 1) break;
+        }
+        return nullptr;
+    }
+    if (sysvHash) {
+        const uint32_t buckets = sysvHash[0];
+        const uint32_t* bucket = sysvHash + 2;
+        const uint32_t* chain = bucket + buckets;
+        uint32_t hash = 0;
+        for (const char* c = symbol; *c; ++c) {
+            hash = (hash << 4) + static_cast<unsigned char>(*c);
+            hash = (hash ^ ((hash & 0xf0000000) >> 24)) & 0x0fffffff;
+        }
+        if (buckets == 0) return nullptr;
+        for (uint32_t index = bucket[hash % buckets]; index != 0; index = chain[index])
+            if (void* found = match(index)) return found;
+    }
+    return nullptr;
+}
+
 void apply(CodePatch& patch)
 {
     Search search{patch.library, patch.vaddr - sizeof(uint32_t), 0, false, false};
@@ -144,17 +207,23 @@ void apply_unity_quality()
     if (!get || !set) {
         if (attempts >= 30) return;  // Not an IL2CPP Unity game with this API.
         ++attempts;
-        // The runtime may live in another linker namespace, so open the game's copy by its full path.
-        std::string path;
+        struct Il2cpp { std::string path; void* resolve = nullptr; } found;
         dl_iterate_phdr([](dl_phdr_info* info, size_t, void* data) {
             const char* name = info->dlpi_name ? std::strrchr(info->dlpi_name, '/') : nullptr;
             if (!name || std::strcmp(name + 1, "libil2cpp.so") != 0) return 0;
-            *static_cast<std::string*>(data) = info->dlpi_name;
+            auto* found = static_cast<Il2cpp*>(data);
+            found->path = info->dlpi_name;
+            found->resolve = find_export(info, "il2cpp_resolve_icall");
             return 1;
-        }, &path);
+        }, &found);
+        const std::string& path = found.path;
         if (path.empty()) return;  // Not loaded yet, or not IL2CPP.
+        // The runtime may live in another linker namespace, so open the game's copy by its full path.
+        // ndk_translation's linker (Waydroid) still refuses that across namespaces ("wasn't loaded and
+        // RTLD_NOLOAD prevented it"); the library's own symbol table has the function then.
         void* il2cpp = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
         auto resolve = il2cpp ? reinterpret_cast<ResolveIcall>(dlsym(il2cpp, "il2cpp_resolve_icall")) : nullptr;
+        if (!resolve) resolve = reinterpret_cast<ResolveIcall>(found.resolve);
         if (!resolve) {
             if (attempts == 30)
                 __android_log_print(ANDROID_LOG_WARN, "Refract.Patch", "texture mip limit: cannot open %s: %s", path.c_str(), dlerror());
