@@ -1,11 +1,17 @@
 #pragma once
-// Polls the emulator over adb about once a second: overall Android CPU use and
+// Polls the emulator (or Waydroid) over adb about once a second: overall Android CPU use and
 // the game's busiest threads (from /proc/stat and /proc/<pid>/task/*/stat).
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -49,6 +55,7 @@ public:
     std::atomic<bool> enabled{true};
 
 private:
+#ifdef _WIN32
     // Runs a command without a console window and returns its standard output.
     static bool run(std::string command, std::string& output)
     {
@@ -92,12 +99,53 @@ private:
         CloseHandle(read);
         return started;
     }
+#else
+    // Runs a shell command and returns its standard output. The child keeps only its standard streams: an adb server
+    // it starts would otherwise keep the viewer's descriptors, including the port 38491 listener (as on Windows).
+    static bool run(const std::string& command, std::string& output)
+    {
+        int pipe[2];
+        if (::pipe(pipe) != 0) return false;
+        const pid_t child = fork();
+        if (child == 0) {
+            dup2(pipe[1], STDOUT_FILENO);
+            close_range(3, ~0u, 0);
+            execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        close(pipe[1]);
+        if (child < 0) {
+            close(pipe[0]);
+            return false;
+        }
+        char buffer[4096];
+        ssize_t n = 0;
+        while ((n = read(pipe[0], buffer, sizeof(buffer))) > 0) output.append(buffer, size_t(n));
+        close(pipe[0]);
+        int status = 0;
+        waitpid(child, &status, 0);
+        return true;
+    }
+    // Single-quoted for /bin/sh.
+    static std::string quote(const std::string& text)
+    {
+        std::string quoted = "'";
+        for (char c : text) quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+        return quoted + "'";
+    }
+#endif
 
     void poll()
     {
         std::string output;
+#ifdef _WIN32
         const std::string command = "\"" + adb_ + "\" -s " + serial_ + " shell \"grep '^cpu' /proc/stat; p=$(pidof " +
             package_ + "); [ -n \\\"$p\\\" ] && cat /proc/$p/task/*/stat\"";
+#else
+        const std::string command = quote(adb_) + " -s " + quote(serial_) + " shell " +
+            quote("grep '^cpu' /proc/stat; p=$(pidof " + package_ + "); [ -n \"$p\" ] && cat /proc/$p/task/*/stat") +
+            " 2>/dev/null";
+#endif
         const auto now = std::chrono::steady_clock::now();
         if (!run(command, output)) return;
 

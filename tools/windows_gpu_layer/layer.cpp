@@ -1,9 +1,21 @@
+// The emulator's host Vulkan loads this layer (VK_INSTANCE_LAYERS): it shares the eye images Refract's runtime
+// marks with the PC viewer or host bridge, as D3D11 textures on Windows and opaque-FD memory on Linux.
+#if defined(_WIN32)
 #include "shared_texture.h"
+#define REFRACT_LAYER_EXPORT __declspec(dllexport)
+#define REFRACT_LAYER_ENTRY  // layer.def exports it.
+#else
+#include "shared_texture_linux.h"
+#define REFRACT_LAYER_EXPORT __attribute__((visibility("default")))
+#define REFRACT_LAYER_ENTRY REFRACT_LAYER_EXPORT
+#endif
 #include "windows_gpu_frame.h"
 #include "gfxstream_template_fix.h"
 #include <vulkan/vk_layer.h>
 #include <array>
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -31,8 +43,8 @@ template<class T> T fn(Device* d, const char* name) { return reinterpret_cast<T>
 }
 
 extern "C" {
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance, const char*);
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice, const char*);
+REFRACT_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance, const char*);
+REFRACT_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice, const char*);
 
 VKAPI_ATTR VkResult VKAPI_CALL createInstance(const VkInstanceCreateInfo* info, const VkAllocationCallbacks* alloc, VkInstance* out) {
     auto* chain = reinterpret_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(info->pNext));
@@ -67,8 +79,13 @@ VKAPI_ATTR VkResult VKAPI_CALL createDevice(VkPhysicalDevice physical, const VkD
     chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
     std::vector<const char*> extensions;
     for (uint32_t i = 0; i < info->enabledExtensionCount; ++i) extensions.push_back(info->ppEnabledExtensionNames[i]);
-    bool found = false; for (auto e : extensions) if (!std::strcmp(e, VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME)) found = true;
-    if (!found) extensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+#if defined(_WIN32)
+    const char* const shareExtension = VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME;
+#else
+    const char* const shareExtension = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+#endif
+    bool found = false; for (auto e : extensions) if (!std::strcmp(e, shareExtension)) found = true;
+    if (!found) extensions.push_back(shareExtension);
     VkDeviceCreateInfo modified = *info; modified.enabledExtensionCount = static_cast<uint32_t>(extensions.size()); modified.ppEnabledExtensionNames = extensions.data();
     VkResult result = create(physical, &modified, alloc, out);
     if (result != VK_SUCCESS) return result;
@@ -137,8 +154,14 @@ VKAPI_ATTR void VKAPI_CALL blitImage(VkCommandBuffer cmd, VkImage source, VkImag
         exported = std::make_unique<Export>(); exported->width = c.marker.width; exported->height = c.marker.height;
         for (uint32_t eye = 0; eye < 2; ++eye) {
             exported->formats[eye] = c.marker.formats[eye];
+            const VkFormat format = static_cast<VkFormat>(c.marker.formats[eye]);
+#if defined(_WIN32)
             wchar_t name[96]; swprintf_s(name, L"Local\\REFRACT_GPU_%016llx_%u", c.marker.session, eye);
-            if (!d->shared.create(exported->eyes[eye], c.marker.width, c.marker.height, static_cast<VkFormat>(c.marker.formats[eye]), name)) {
+            const bool created = d->shared.create(exported->eyes[eye], c.marker.width, c.marker.height, format, name);
+#else
+            const bool created = d->shared.create(exported->eyes[eye], c.marker.width, c.marker.height, format, c.marker.session, eye);
+#endif
+            if (!created) {
                 for (auto& image : exported->eyes) d->shared.destroy(image);
                 exported.reset(); c.eye = 2; original(); return;
             }
@@ -215,15 +238,15 @@ PFN_vkVoidFunction intercept(const char* name) {
     ENTRY("vkCreateDescriptorUpdateTemplate", createTemplateCore); ENTRY("vkCreateDescriptorUpdateTemplateKHR", createTemplateKhr);
     return nullptr;
 }
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* name) {
+REFRACT_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* name) {
     if (auto result = intercept(name)) return result;
     std::lock_guard lock(mutex); auto it = instances.find(key(instance)); return it == instances.end() ? nullptr : it->second.gipa(instance, name);
 }
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* name) {
+REFRACT_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* name) {
     if (auto result = intercept(name)) return result;
     std::lock_guard lock(mutex); auto* d = state(device); return d ? d->gdpa(device, name) : nullptr;
 }
-VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* info) {
+REFRACT_LAYER_ENTRY VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* info) {
     if (info->loaderLayerInterfaceVersion > 2) info->loaderLayerInterfaceVersion = 2;
     info->pfnGetInstanceProcAddr = vkGetInstanceProcAddr; info->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;
     info->pfnGetPhysicalDeviceProcAddr = nullptr;

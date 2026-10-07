@@ -236,7 +236,9 @@ int TcpImageServer::serve_with_callback(uint16_t port, uint32_t maxFrames, const
                 header.format != (video ? kImageFrameFormatH264 : kImageFrameFormatRgba8) ||
                 header.bytes_per_pixel != (video ? 0 : 4) || !header.width || !header.height ||
                 !valid_render_extent(header.width, header.height) || !header.layers || header.layers > 4 ||
-                (projected && header.layers != 2)) {
+                // Stereo frames carry both eyes, except a pixel frame streamed with debug.refract.stream_eyes=1
+                // (the left eye only, for a viewer showing one eye).
+                (projected && header.layers != 2 && !(header.version == kProjectionImageFrameVersion && header.layers == 1))) {
                 std::fprintf(stderr, "Refract Image TCP: invalid image header\n");
                 break;
             }

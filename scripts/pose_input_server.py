@@ -5,7 +5,8 @@ Streams v4 Refract pose records (fixed head, two active Touch controllers) on TC
   * an Xbox/XInput gamepad (always):
       A/B -> right A/B, X/Y -> left X/Y, RT/LT -> triggers, RB/LB -> grips,
       sticks -> thumbsticks, stick clicks -> thumbstick clicks, Start -> left menu
-  * the keyboard, only while the foreground window title matches --focus:
+  * the keyboard, only while the foreground window title matches --focus (on Linux, the keys
+    the viewer reports as held while it has focus, `keys <names>` on the UDP port below):
       Space/Enter -> right A, Backspace -> right B, Z -> left X, X -> left Y,
       E/Q -> right/left trigger, R/F -> right/left grip, Tab/M -> left menu (settings),
       arrow keys -> right stick
@@ -20,6 +21,7 @@ Streams v4 Refract pose records (fixed head, two active Touch controllers) on TC
       hold left trigger 1.5
       stick right 0 1 2     (right stick up for 2 s)
       view <yaw> <pitch> <trigger> <grip> [<reach>]   (viewer mouse state; degrees, 0/1, meters)
+      keys w shift space    (keys held in the Linux viewer; resent twice a second)
       tpose 3               (hold the T-pose for 3 s)
       center 3              (right controller at the view centre for 3 s)
 """
@@ -29,6 +31,7 @@ import math
 import re
 import socket
 import struct
+import sys
 import threading
 import time
 
@@ -39,7 +42,11 @@ PRIMARY_TOUCH, SECONDARY_TOUCH, TRIGGER_TOUCH, STICK_TOUCH = 16, 32, 64, 128
 DEFAULT_REACH, MIN_REACH, MAX_REACH = 0.4, 0.1, 1.0  # Hand distance in front of the camera, meters.
 TPOSE_HALF_SPAN, TPOSE_DROP = 0.8, -0.22  # T-pose controllers: meters beside and below the eyes.
 
-user32 = ctypes.windll.user32
+WINDOWS = sys.platform == 'win32'
+user32 = ctypes.windll.user32 if WINDOWS else None
+# Keys by the names the Linux viewer reports; Windows reads the same keys as virtual-key codes.
+VK = {'space': 0x20, 'enter': 0x0D, 'backspace': 0x08, 'tab': 0x09, 'shift': 0x10, 'home': 0x24,
+      'left': 0x25, 'up': 0x26, 'right': 0x27, 'down': 0x28, **{c: ord(c.upper()) for c in 'wasdzxmeqrftc'}}
 
 
 class XINPUT_GAMEPAD(ctypes.Structure):
@@ -53,7 +60,7 @@ class XINPUT_STATE(ctypes.Structure):
 
 
 try:
-    xinput = ctypes.windll.xinput1_4
+    xinput = ctypes.windll.xinput1_4 if WINDOWS else None
 except OSError:
     xinput = None
 
@@ -102,14 +109,19 @@ def gamepad():
     return left, right
 
 
-def walk_keys(focus):
-    """(strafe, forward, fast, reset, tpose, center) from WASD/Shift/Home/T/C while the viewer has focus."""
-    if not focus.search(foreground_title()):
-        return 0.0, 0.0, False, False, False, False
-    down = lambda vk: bool(user32.GetAsyncKeyState(vk) & 0x8000)
-    strafe = float(down(ord('D'))) - float(down(ord('A')))
-    forward = float(down(ord('W'))) - float(down(ord('S')))
-    return strafe, forward, down(0x10), down(0x24), down(ord('T')), down(ord('C'))
+def key_reader(focus, scripted):
+    """down(name) for this pose: the keys the Linux viewer reports, and on Windows the keyboard while the viewer has focus."""
+    held = scripted.keys()
+    if WINDOWS and focus.search(foreground_title()):
+        return lambda name: name in held or bool(user32.GetAsyncKeyState(VK[name]) & 0x8000)
+    return lambda name: name in held
+
+
+def walk_keys(down):
+    """(strafe, forward, fast, reset, tpose, center) from WASD/Shift/Home/T/C."""
+    strafe = float(down('d')) - float(down('a'))
+    forward = float(down('w')) - float(down('s'))
+    return strafe, forward, down('shift'), down('home'), down('t'), down('c')
 
 
 def foreground_title():
@@ -119,22 +131,19 @@ def foreground_title():
     return buffer.value
 
 
-def keyboard(focus):
+def keyboard(down):
     left, right = Hand(), Hand()
-    if not focus.search(foreground_title()):
-        return left, right
-    down = lambda vk: user32.GetAsyncKeyState(vk) & 0x8000
-    if down(0x20) or down(0x0D): right.buttons |= PRIMARY
-    if down(0x08): right.buttons |= SECONDARY
-    if down(ord('Z')): left.buttons |= PRIMARY
-    if down(ord('X')): left.buttons |= SECONDARY
-    if down(0x09) or down(ord('M')): left.buttons |= MENU
-    if down(ord('E')): right.trigger = 1.0
-    if down(ord('Q')): left.trigger = 1.0
-    if down(ord('R')): right.squeeze = 1.0
-    if down(ord('F')): left.squeeze = 1.0
-    right.x = (1.0 if down(0x27) else 0.0) - (1.0 if down(0x25) else 0.0)
-    right.y = (1.0 if down(0x26) else 0.0) - (1.0 if down(0x28) else 0.0)
+    if down('space') or down('enter'): right.buttons |= PRIMARY
+    if down('backspace'): right.buttons |= SECONDARY
+    if down('z'): left.buttons |= PRIMARY
+    if down('x'): left.buttons |= SECONDARY
+    if down('tab') or down('m'): left.buttons |= MENU
+    if down('e'): right.trigger = 1.0
+    if down('q'): left.trigger = 1.0
+    if down('r'): right.squeeze = 1.0
+    if down('f'): left.squeeze = 1.0
+    right.x = (1.0 if down('right') else 0.0) - (1.0 if down('left') else 0.0)
+    right.y = (1.0 if down('up') else 0.0) - (1.0 if down('down') else 0.0)
     return left, right
 
 
@@ -150,6 +159,7 @@ class Scripted:
         self.reach = DEFAULT_REACH
         self.mouse_trigger = self.mouse_grip = 0.0
         self.tpose_until = self.center_until = 0.0
+        self.held, self.held_at = frozenset(), 0.0  # Keys held in the Linux viewer, and when it last said so.
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('127.0.0.1', port))
         threading.Thread(target=self.listen, args=(sock,), daemon=True).start()
@@ -168,6 +178,10 @@ class Scripted:
                     self.mouse_trigger, self.mouse_grip = trigger, grip
                     if reach:
                         self.reach = max(MIN_REACH, min(MAX_REACH, reach[0]))
+                continue
+            if words[:1] == ['keys']:
+                with self.lock:
+                    self.held, self.held_at = frozenset(w for w in words[1:] if w in VK), time.monotonic()
                 continue
             if words[:1] in (['tpose'], ['center']) and len(words) == 2:
                 try:
@@ -208,6 +222,11 @@ class Scripted:
             hands[1].trigger = max(hands[1].trigger, self.mouse_trigger)
             hands[1].squeeze = max(hands[1].squeeze, self.mouse_grip)
         return hands
+
+    def keys(self):
+        # The viewer resends its keys twice a second; a viewer that went away holds nothing.
+        with self.lock:
+            return self.held if time.monotonic() - self.held_at < 1.5 else frozenset()
 
     def view(self):
         with self.lock:
@@ -307,7 +326,8 @@ def main():
             try:
                 while True:
                     hands = (Hand(), Hand())
-                    for source in (gamepad(), keyboard(focus), scripted.hands()):
+                    down = key_reader(focus, scripted)
+                    for source in (gamepad(), keyboard(down), scripted.hands()):
                         hands[0].merge(source[0])
                         hands[1].merge(source[1])
                     summary = tuple((h.buttons, round(h.trigger, 2), round(h.squeeze, 2), round(h.x, 2), round(h.y, 2)) for h in hands)
@@ -317,7 +337,7 @@ def main():
                     now = time.monotonic()
                     dt, last = min(now - last, 0.1), now
                     yaw, pitch, reach = scripted.view()
-                    strafe, forward, fast, reset, tpose_key, center_key = walk_keys(focus)
+                    strafe, forward, fast, reset, tpose_key, center_key = walk_keys(down)
                     tpose = tpose_key or scripted.tpose()
                     center = center_key or scripted.center()
                     if reset:
