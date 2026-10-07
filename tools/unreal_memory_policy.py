@@ -1,4 +1,4 @@
-"""Apply a capacity-based Unreal texture pool on the Windows Nvidia emulator.
+"""Apply a capacity-based Unreal texture pool on the Windows Nvidia emulator or Waydroid with Venus.
 
 No package-specific rules. Existing Vulkan allocation requirements are unchanged.
 Only existing Unreal saved-config directories and extracted engine libraries are
@@ -8,6 +8,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -59,11 +60,19 @@ def run(argv, timeout=30):
 def apply(args):
     if not re.fullmatch(r'[a-zA-Z0-9_.]+', args.package):
         raise ValueError('Invalid package')
-    adb = [args.sdk / 'platform-tools/adb.exe', '-s', args.serial]
+    adb = [args.adb or args.sdk / ('platform-tools/adb.exe' if os.name == 'nt' else 'platform-tools/adb'), '-s', args.serial]
     def shell(command):
         return run(adb + ['shell', command])
+    # Waydroid (scripts/waydroid.sh) has no su and its adbd never runs as root: root is Waydroid's own shell on
+    # the PC, through sudo. Its exit status is lost, so every write is read back. Nothing else needs root, so a
+    # game that is not Unreal never asks for the password.
+    waydroid = shell('getprop ro.product.vendor.device').startswith('waydroid')
     def root(command):
+        if waydroid:
+            return run(['sudo', '-p', "Refract's Unreal texture-pool policy needs root. [sudo] password for %u: ",
+                        'waydroid', 'shell', '--', 'sh', '-c', command], timeout=300)
         return shell('su 0 sh -c ' + shlex.quote(command))
+    probe = shell if waydroid else root
     def read(path):
         # Base64 preserves exact newlines for backup/conflict detection.
         return base64.b64decode(root('base64 ' + shlex.quote(path))).decode('utf-8')
@@ -82,24 +91,39 @@ def apply(args):
         match = re.search(r'(?:legacyNativeLibraryDir|nativeLibraryDir)=(\S+)', package)
         if not match:
             return {'status': 'skipped', 'reason': 'No extracted native library directory'}
-        if root('if test -d ' + shlex.quote(match[1]) + '; then echo yes; fi') != 'yes':
+        if probe('if test -d ' + shlex.quote(match[1]) + '; then echo yes; fi') != 'yes':
             return {'status': 'skipped', 'reason': 'Native libraries are not extracted'}
-        libraries = root('find ' + shlex.quote(match[1]) + ' -maxdepth 2 -type f')
+        libraries = probe('find ' + shlex.quote(match[1]) + ' -maxdepth 2 -type f')
         if not any(Path(p).name in ('libUnreal.so', 'libUE4.so') for p in libraries.splitlines()):
             return {'status': 'skipped', 'reason': 'Not a recognized Unreal app'}
         # Disable the guest VRAM clamp only on the measured hardware path.
         gpu = json.loads(shell('cmd gpu vkjson'))['devices']
-        if len(gpu) != 1 or gpu[0]['properties']['vendorID'] != 0x10de or gpu[0]['properties']['deviceType'] != 2:
-            return {'status': 'skipped', 'reason': 'Requires one Nvidia hardware Vulkan device'}
-        host = run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits']).splitlines()
-        if len(host) != 1:
-            return {'status': 'skipped', 'reason': 'Ambiguous host GPU selection'}
-        capacity = int(host[0].strip())
+        def size(heap):
+            return int(heap['size'], 16) if isinstance(heap['size'], str) else int(heap['size'])
+        if waydroid:
+            # Venus shows Android every GPU of the PC; games (and Unreal) take the first. It reports their real
+            # memory, so the VRAM is the heap of its device-local, not host-visible memory (Venus marks system
+            # memory device-local too), and Unreal's percentage is of all device-local heaps, which it adds up.
+            if not gpu or gpu[0]['properties']['vendorID'] != 0x10de or gpu[0]['properties']['deviceType'] != 2:
+                return {'status': 'skipped', 'reason': 'Requires an Nvidia hardware Vulkan device'}
+            memory = gpu[0]['memory']
+            vram = {int(t['heapIndex']) for t in memory['memoryTypes']
+                    if int(t['propertyFlags']) & 1 and not int(t['propertyFlags']) & 2}
+            if len(vram) != 1:
+                return {'status': 'skipped', 'reason': 'Ambiguous guest VRAM heap'}
+            capacity = size(memory['memoryHeaps'][vram.pop()]) // (1024 * 1024)
+            heaps = [sum(size(h) for h in memory['memoryHeaps'] if int(h['flags']) & 1)]
+        else:
+            if len(gpu) != 1 or gpu[0]['properties']['vendorID'] != 0x10de or gpu[0]['properties']['deviceType'] != 2:
+                return {'status': 'skipped', 'reason': 'Requires one Nvidia hardware Vulkan device'}
+            host = run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits']).splitlines()
+            if len(host) != 1:
+                return {'status': 'skipped', 'reason': 'Ambiguous host GPU selection'}
+            capacity = int(host[0].strip())
+            heaps = [size(h) for h in gpu[0]['memory']['memoryHeaps'] if int(h['flags']) & 1]
         pool = pool_mib(capacity)
         if pool < 1024:
             return {'status': 'skipped', 'reason': 'Insufficient dedicated VRAM for this policy'}
-        heaps = [int(h['size'], 16) if isinstance(h['size'], str) else int(h['size'])
-                 for h in gpu[0]['memory']['memoryHeaps'] if int(h['flags']) & 1]
         if len(heaps) != 1 or heaps[0] < 1024 * 1024:
             return {'status': 'skipped', 'reason': 'Ambiguous guest device-local memory heap'}
         guest_heap_mib = heaps[0] // (1024 * 1024)
@@ -143,7 +167,7 @@ def apply(args):
     root('umask 077; printf %s ' + shlex.quote(encoded) + ' | base64 -d > ' + shlex.quote(temporary) +
          ' && chown ' + uid + ':' + uid + ' ' + shlex.quote(temporary) +
          ' && mv ' + shlex.quote(temporary) + ' ' + shlex.quote(path) +
-         ' && restorecon ' + shlex.quote(path))
+         ('' if waydroid else ' && restorecon ' + shlex.quote(path)))  # Waydroid's Android has no SELinux.
     if read(path) != desired:
         raise RuntimeError('Written memory policy did not verify')
     if args.restore:
@@ -156,9 +180,13 @@ def apply(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--sdk', type=Path, required=True)
+    parser.add_argument('--sdk', type=Path, help='Android SDK (its platform-tools/adb)')
+    parser.add_argument('--adb', type=Path, help='adb itself, instead of --sdk')
     parser.add_argument('--serial', required=True)
     parser.add_argument('--package', required=True)
     parser.add_argument('--state-dir', type=Path, default=Path(__file__).resolve().parents[1] / 'build-windows-game/memory-policy')
     parser.add_argument('--restore', action='store_true')
-    print(json.dumps(apply(parser.parse_args())))
+    arguments = parser.parse_args()
+    if not arguments.sdk and not arguments.adb:
+        parser.error('--sdk or --adb is required')
+    print(json.dumps(apply(arguments)))

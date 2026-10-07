@@ -1,45 +1,67 @@
-"""Apply emulator configuration without opening or rewriting application files."""
+"""Apply the emulator's or Waydroid's Android configuration without opening or rewriting application files."""
 import argparse
 import json
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--sdk', type=Path, required=True)
+    parser.add_argument('--sdk', type=Path, help='Android SDK (its platform-tools/adb)')
+    parser.add_argument('--adb', type=Path, help='adb itself, instead of --sdk')
     parser.add_argument('--serial', required=True)
     parser.add_argument('--package', required=True)
     args = parser.parse_args()
     import re
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+', args.package):
         parser.error('Invalid Android package')
-    adb = [str(args.sdk / 'platform-tools/adb.exe'), '-s', args.serial]
+    exe = '.exe' if os.name == 'nt' else ''
+    sdk = args.sdk or Path(os.environ.get('ANDROID_HOME', Path.home() / 'Android/Sdk'))
+    adb_path = args.adb or sdk / f'platform-tools/adb{exe}'
+    adb = [str(adb_path), '-s', args.serial]
     def run(*parts):
         return subprocess.run([*adb, *parts], check=True, capture_output=True,
                               text=True, timeout=120).stdout.strip()
-    if run('shell', 'getprop ro.hardware') != 'ranchu':
+    # Waydroid (scripts/waydroid.sh) runs Android in a container on the PC's own kernel instead of the emulator.
+    waydroid = run('shell', 'getprop ro.product.vendor.device').startswith('waydroid')
+    if run('shell', 'getprop ro.hardware') != 'ranchu' and not waydroid:
         print(json.dumps({'status': 'skipped', 'reason': 'Not the Refract emulator'})); return
-    # Games run on the Digitalis ARM64 translator (Refract's patched build in prebuilts/digitalis).
-    if run('shell', 'getprop ro.dalvik.vm.native.bridge') != 'libberberis_arm64.so':
-        raise RuntimeError('The emulator is not using the Digitalis translator. Boot it with -writable-system '
+    # Games run on the Digitalis ARM64 translator (Refract's patched build in prebuilts/digitalis). Waydroid's
+    # Android 16 image is a later release than Digitalis is built for, so it uses the image's own ndk_translation.
+    bridge = run('shell', 'getprop ro.dalvik.vm.native.bridge')
+    translator = {'libberberis_arm64.so': 'digitalis', 'libndk_translation.so': 'ndk_translation'}.get(bridge)
+    if translator is None or (translator == 'ndk_translation' and not waydroid):
+        raise RuntimeError('Waydroid has no ARM64 translator. Run sudo scripts/waydroid.sh setup, then restart '
+                           'Waydroid.' if waydroid else
+                           'The emulator is not using the Digitalis translator. Boot it with -writable-system '
                            'and run scripts/translator.ps1 -Use digitalis (Android 16 / API 36 AVDs only).')
-    # Digitalis' files live only in the /system overlay's upper layer; after a boot the first app to
-    # open them gets EACCES until something else has looked them up, so read them once as shell first.
-    run('shell', 'cat /system/bin/arm64/app_process64 /system/bin/arm64/linker64 > /dev/null; ls /system/lib64/arm64 > /dev/null')
-    run('root'); run('wait-for-device')
-    limit = int(run('shell', 'cat /proc/sys/vm/max_map_count'))
-    if limit < 1048576:
-        run('shell', 'echo 1048576 > /proc/sys/vm/max_map_count')
+    if translator == 'digitalis':
+        # Digitalis' files live only in the /system overlay's upper layer; after a boot the first app to
+        # open them gets EACCES until something else has looked them up, so read them once as shell first.
+        run('shell', 'cat /system/bin/arm64/app_process64 /system/bin/arm64/linker64 > /dev/null; ls /system/lib64/arm64 > /dev/null')
+    # Waydroid's adbd never runs as root. Nothing below needs root there: SELinux is off in its Android, and
+    # scripts/waydroid.sh setup makes the layer directory the shell user's.
+    if not waydroid and run('shell', 'id -u') != '0':
+        run('root')
+        run('wait-for-device')
+    if waydroid:
+        # The container shares the PC's kernel: its map limit (Fedora: 1048576) and scheduler are the host's own.
         limit = int(run('shell', 'cat /proc/sys/vm/max_map_count'))
-        if limit < 1048576: raise RuntimeError('Memory mapping policy did not apply')
-    # The emulator exposes every vCPU as its own package, so with TTWU_QUEUE each cross-CPU wake-up
-    # is an IPI, a slow exit under WHPX (~3000/s -> ~200/s, Batman ~+5% fps). Resets at every boot.
-    # A performance setting only: a kernel without it must not stop the game.
-    features = run('shell', 'mount | grep -q " /sys/kernel/debug " || mount -t debugfs debugfs /sys/kernel/debug; '
-                   'echo NO_TTWU_QUEUE > /sys/kernel/debug/sched/features; cat /sys/kernel/debug/sched/features; true')
-    scheduler = 'NO_TTWU_QUEUE' if 'NO_TTWU_QUEUE' in features.split() else 'unchanged'
+        scheduler = 'host'
+    else:
+        limit = int(run('shell', 'cat /proc/sys/vm/max_map_count'))
+        if limit < 1048576:
+            run('shell', 'echo 1048576 > /proc/sys/vm/max_map_count')
+            limit = int(run('shell', 'cat /proc/sys/vm/max_map_count'))
+            if limit < 1048576: raise RuntimeError('Memory mapping policy did not apply')
+        # The emulator exposes every vCPU as its own package, so with TTWU_QUEUE each cross-CPU wake-up
+        # is an IPI, a slow exit under WHPX (~3000/s -> ~200/s, Batman ~+5% fps). Resets at every boot.
+        # A performance setting only: a kernel without it must not stop the game.
+        features = run('shell', 'mount | grep -q " /sys/kernel/debug " || mount -t debugfs debugfs /sys/kernel/debug; '
+                       'echo NO_TTWU_QUEUE > /sys/kernel/debug/sched/features; cat /sys/kernel/debug/sched/features; true')
+        scheduler = 'NO_TTWU_QUEUE' if 'NO_TTWU_QUEUE' in features.split() else 'unchanged'
     root = Path(__file__).resolve().parents[1]
     source = root / 'tools/android_vulkan_layer.cpp'
     header = root / 'tools/vulkan_descriptor_template.h'
@@ -47,7 +69,8 @@ def main():
     output.parent.mkdir(exist_ok=True)
     # A packaged Refract ships only the built layer; a source checkout rebuilds it when the source changes.
     if not output.exists() or (source.exists() and output.stat().st_mtime < max(source.stat().st_mtime, header.stat().st_mtime)):
-        compilers = sorted((args.sdk / 'ndk').glob('*/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android29-clang++.cmd'),
+        host, wrapper = ('windows-x86_64', '.cmd') if os.name == 'nt' else ('linux-x86_64', '')
+        compilers = sorted((sdk / 'ndk').glob(f'*/toolchains/llvm/prebuilt/{host}/bin/x86_64-linux-android29-clang++{wrapper}'),
                            key=lambda p: tuple(int(n) for n in p.parents[5].name.split('.')))
         if not compilers: raise RuntimeError('Android NDK required for the runtime Vulkan layer')
         subprocess.run([str(compilers[-1]), '-std=c++17', '-shared', '-fPIC', '-O2', '-static-libstdc++',
@@ -55,6 +78,8 @@ def main():
     directory = '/data/local/debug/vulkan'
     remote = directory + '/libVkLayer_REFRACT_runtime.so'
     expected = hashlib.sha256(output.read_bytes()).hexdigest()
+    if waydroid and run('shell', 'test -w ' + directory + ' && echo yes || true') != 'yes':
+        raise RuntimeError(directory + ' is missing or not writable: run sudo scripts/waydroid.sh setup')
     run('shell', 'mkdir -p ' + directory)
     current = run('shell', 'if [ -f ' + remote + ' ]; then sha256sum ' + remote + '; fi').split()
     if not current or current[0] != expected:
@@ -65,7 +90,9 @@ def main():
     # System debug layers need a readable/executable native-library label on
     # this userdebug image. Only our directory and library are relabeled.
     paths = '/data/local/debug ' + directory + ' ' + remote
-    run('shell', 'chmod 755 ' + paths + ' && chcon u:object_r:apk_data_file:s0 ' + paths)
+    run('shell', 'chmod 755 ' + paths)
+    if run('shell', 'getenforce 2>/dev/null || echo Disabled') != 'Disabled':
+        run('shell', 'chcon u:object_r:apk_data_file:s0 ' + paths)
     run('shell', 'settings put global enable_gpu_debug_layers 1')
     run('shell', 'settings put global gpu_debug_app ' + args.package)
     run('shell', 'settings put global gpu_debug_layers VK_LAYER_REFRACT_runtime')
@@ -77,10 +104,11 @@ def main():
     run('shell', 'setprop debug.refract.transcode_textures 1')
     # Let the translator's optimizing tier take hot regions of any size (default: 20+ instructions). Batman
     # spent ~20% of UnityMain entering tiny lite regions; 0 gave ~70 -> ~79 fps. Read once at game start.
-    run('shell', 'setprop berberis.gearup_min_insns 0')
+    if translator == 'digitalis':
+        run('shell', 'setprop berberis.gearup_min_insns 0')
     run('shell', 'sync')
-    print(json.dumps({'status': 'ready', 'max_map_count': limit, 'scheduler': scheduler, 'translator': 'digitalis',
-                      'vulkan_layer': remote}))
+    print(json.dumps({'status': 'ready', 'android': 'waydroid' if waydroid else 'emulator', 'max_map_count': limit,
+                      'scheduler': scheduler, 'translator': translator, 'vulkan_layer': remote}))
 
 
 if __name__ == '__main__': main()

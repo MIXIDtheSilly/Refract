@@ -6,10 +6,14 @@ PowerShell can preserve Unicode labels independently of its console encoding.
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+
+EXE = '.exe' if os.name == 'nt' else ''
+NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 def application_label(badging, package):
@@ -24,18 +28,18 @@ def application_label(badging, package):
 def installed_label(sdk, serial, package):
     if not re.fullmatch(r"[a-zA-Z0-9_.]+", package):
         raise ValueError("Invalid package name")
-    adb = sdk / "platform-tools/adb.exe"
+    adb = sdk / f"platform-tools/adb{EXE}"
     versions = []
     for directory in (sdk / "build-tools").iterdir():
-        if re.fullmatch(r"\d+\.\d+\.\d+", directory.name) and (directory / "aapt2.exe").is_file():
-            versions.append((tuple(map(int, directory.name.split('.'))), directory / "aapt2.exe"))
+        if re.fullmatch(r"\d+\.\d+\.\d+", directory.name) and (directory / f"aapt2{EXE}").is_file():
+            versions.append((tuple(map(int, directory.name.split('.'))), directory / f"aapt2{EXE}"))
     if not versions:
         raise RuntimeError("Android SDK build-tools with aapt2 are required")
     aapt = max(versions)[1]
     def run(args, timeout=30):
         return subprocess.run(list(map(str, args)), check=True, capture_output=True,
                               encoding="utf-8", errors="replace", timeout=timeout,
-                              creationflags=subprocess.CREATE_NO_WINDOW).stdout
+                              creationflags=NO_WINDOW).stdout
     paths = run([adb, '-s', serial, 'shell', 'pm', 'path', package]).splitlines()
     apks = [line.removeprefix('package:').strip() for line in paths if line.startswith('package:')]
     base = next((path for path in apks if path.endswith('/base.apk')), None)
@@ -53,10 +57,10 @@ def installed_metadata(sdk, serial, package, icon_output):
     if not re.fullmatch(r"[a-zA-Z0-9_.]+", package):
         raise ValueError("Invalid package name")
     try:
-        result = subprocess.run([str(sdk / 'platform-tools/adb.exe'), '-s', serial,
+        result = subprocess.run([str(sdk / f'platform-tools/adb{EXE}'), '-s', serial,
             'shell', 'content', 'call', '--uri', 'content://org.khronos.openxr.system_runtime_broker',
             '--method', 'refract_app_metadata', '--arg', package], check=True, capture_output=True,
-            encoding='utf-8', timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+            encoding='utf-8', timeout=30, creationflags=NO_WINDOW)
         fields = dict(re.findall(r'(label64|icon64)=([A-Za-z0-9+/=]+)', result.stdout))
         label = base64.b64decode(fields['label64'], validate=True).decode('utf-8')
         icon = base64.b64decode(fields['icon64'], validate=True)
