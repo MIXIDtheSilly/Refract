@@ -2,11 +2,12 @@
 
 ## AXRB
 
-Refract is based on [AXRB](https://github.com/Android-XR-Bridge/AXRB) (Android Extended
-Reality Bridge) by Feline Reintgen. Much of the code in this repository uses
-AXRB code: the Android OpenXR runtime, the runtime APK, the host bridge, the protocol,
-the tests and the launcher. That code was renamed and then extended in this repository.
-AXRB is MIT-licensed; its copyright notice is kept in [LICENSE](LICENSE).
+Refract started as a fork of [AXRB](https://github.com/Android-XR-Bridge/AXRB) (Android Extended
+Reality Bridge) by Feline Reintgen. Some of the original AXRB code, such as parts of the Android
+OpenXR runtime, the host bridge and the protocol, is still in this repository, but it has been
+renamed and heavily reworked, and Refract has added a great deal of its own: the launcher, the
+GPU and GLES layers, the translator performance patches, the Platform SDK stand-in and the
+viewer. AXRB is MIT-licensed; its copyright notice is kept in [LICENSE](LICENSE).
 
 ## RiftLift
 
