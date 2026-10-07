@@ -36,6 +36,9 @@
 
 #if !defined(_WIN32)
 #define XR_USE_TIMESPEC
+#include <csignal>
+#include <time.h>
+#include "vulkan_renderer.h"  // Also selects XR_USE_GRAPHICS_API_VULKAN for openxr_platform.h.
 #else
 #define XR_USE_GRAPHICS_API_D3D11
 #define XR_USE_PLATFORM_WIN32
@@ -437,6 +440,11 @@ public:
             destroySwapchain_(projectionSwapchain_);
             projectionSwapchain_ = XR_NULL_HANDLE;
         }
+#else
+        if (renderer_) renderer_->wait_idle();
+        for (auto& panel : panelSwapchains_)
+            if (panel.handle != XR_NULL_HANDLE && destroySwapchain_) destroySwapchain_(panel.handle);
+        if (projectionSwapchain_ != XR_NULL_HANDLE && destroySwapchain_) destroySwapchain_(projectionSwapchain_);
 #endif
         for (XrSpace& handSpace : handSpaces_) {
             if (handSpace != XR_NULL_HANDLE && destroySpace_ != nullptr) {
@@ -511,11 +519,15 @@ public:
         std::vector<const char*> extensions = {
 #if defined(_WIN32)
             XR_KHR_D3D11_ENABLE_EXTENSION_NAME,
-#else
-            XR_MND_HEADLESS_EXTENSION_NAME,
-            XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,
 #endif
         };
+#if !defined(_WIN32)
+        // Linux: Vulkan when the runtime offers it (SteamVR, Monado), so frames reach the headset; else a
+        // headless session that only tracks. REFRACT_HEADLESS=1 forces tracking only.
+        bool vulkanAvailable = false, headlessAvailable = false, listed = false;
+        const char* headless = std::getenv("REFRACT_HEADLESS");
+        const bool forceHeadless = headless && std::strcmp(headless, "1") == 0;
+#endif
         PFN_xrVoidFunction enumerateRaw = nullptr;
         loader_.getInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &enumerateRaw);
         if (enumerateRaw) {
@@ -529,12 +541,31 @@ public:
 #if defined(_WIN32)
                     if (std::strcmp(ext.extensionName, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0)
                         win32TimeEnabled_ = true;
+#else
+                    listed = true;
+                    if (std::strcmp(ext.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME) == 0) vulkanAvailable = true;
+                    if (std::strcmp(ext.extensionName, XR_MND_HEADLESS_EXTENSION_NAME) == 0) headlessAvailable = true;
+                    if (std::strcmp(ext.extensionName, XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME) == 0) timespecEnabled_ = true;
 #endif
                 }
             }
         }
 #if defined(_WIN32)
         if (win32TimeEnabled_) extensions.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+#else
+        vulkanEnabled_ = vulkanAvailable && !forceHeadless;
+        if (vulkanEnabled_) extensions.push_back(XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
+        else if (headlessAvailable) extensions.push_back(XR_MND_HEADLESS_EXTENSION_NAME);
+        else if (!listed) {  // The loader found no runtime to ask.
+            std::fprintf(stderr, "Refract OpenXR: no PC OpenXR runtime is available (XR_ERROR_RUNTIME_UNAVAILABLE); "
+                "start SteamVR, Monado or WiVRn, or set XR_RUNTIME_JSON\n");
+            return false;
+        } else {
+            std::fprintf(stderr, "Refract OpenXR: the runtime offers neither %s nor %s\n",
+                XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, XR_MND_HEADLESS_EXTENSION_NAME);
+            return false;
+        }
+        if (timespecEnabled_) extensions.push_back(XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME);
 #endif
         if (handTrackingEnabled_) {
             extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
@@ -576,7 +607,7 @@ public:
 #if defined(_WIN32)
                 XR_KHR_D3D11_ENABLE_EXTENSION_NAME
 #else
-                XR_MND_HEADLESS_EXTENSION_NAME
+                vulkanEnabled_ ? XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME : XR_MND_HEADLESS_EXTENSION_NAME
 #endif
             );
             return false;
@@ -600,12 +631,19 @@ public:
         }
         XrGraphicsBindingD3D11KHR graphicsBinding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
         graphicsBinding.device = d3dDevice_.get();
+#else
+        if (vulkanEnabled_) {
+            renderer_ = std::make_unique<VulkanRenderer>();
+            if (!renderer_->create(instance_, systemId_, loader_.getInstanceProcAddr)) return false;
+        }
 #endif
 
         XrSessionCreateInfo sessionInfo{XR_TYPE_SESSION_CREATE_INFO};
         sessionInfo.systemId = systemId_;
 #if defined(_WIN32)
         sessionInfo.next = &graphicsBinding;
+#else
+        if (renderer_) sessionInfo.next = &renderer_->binding();
 #endif
         result = createSession_(instance_, &sessionInfo, &session_);
         if (result != XR_SUCCESS) {
@@ -626,6 +664,8 @@ public:
 
 #if defined(_WIN32)
         if (!create_projection_swapchain()) return false;
+#else
+        if (renderer_ && !create_projection_swapchain()) return false;
 #endif
         initialize_controller_actions();
         initialize_hand_tracking();
@@ -636,7 +676,7 @@ public:
 #if defined(_WIN32)
             XR_KHR_D3D11_ENABLE_EXTENSION_NAME
 #else
-            XR_MND_HEADLESS_EXTENSION_NAME
+            renderer_ ? XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME : XR_MND_HEADLESS_EXTENSION_NAME
 #endif
         );
         return true;
@@ -646,6 +686,14 @@ public:
 #if defined(_WIN32)
         return mirror_.open(d3dDevice_.get(), gameName);
 #else
+        // No mirror window on Linux. SIGINT/SIGTERM (scripts/waydroid.sh stopping the session) end the frame
+        // loop instead, between frames, as closing the window does on Windows.
+        (void)gameName;
+        struct sigaction action{};
+        action.sa_handler = [](int) { stopRequested_ = 1; };
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGINT, &action, nullptr);
+        sigaction(SIGTERM, &action, nullptr);
         return true;
 #endif
     }
@@ -653,7 +701,7 @@ public:
 #if defined(_WIN32)
         return mirror_.pump();
 #else
-        return true;
+        return !stopRequested_;
 #endif
     }
 
@@ -676,6 +724,11 @@ public:
 #if defined(_WIN32)
         frame.render_width = projectionWidth_;
         frame.render_height = projectionHeight_;
+#else
+        if (renderer_) {
+            frame.render_width = projectionWidth_;
+            frame.render_height = projectionHeight_;
+        }
 #endif
 
         if (!sessionRunning_) {
@@ -850,6 +903,22 @@ public:
             if (mirror_.take_stats_toggle()) toggle_stats();
             XrCompositionLayerQuad statsQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
             if (place_stats_panel(statsQuad)) layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&statsQuad);
+#else
+            // Until the game's first frame there is nothing to submit: the runtime shows its own void.
+            if (renderer_ && projectionSwapchain_ != XR_NULL_HANDLE) {
+                pick_image(static_cast<int64_t>(sequence));
+                if (update_projection_layer(frameDisplayTime, projectionViews, projectionLayer, quadLayers, layerCount)) {
+                    if (layerCount) {
+                        for (uint32_t i = 0; i < layerCount; ++i)
+                            layers[i] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayers[i]);
+                    } else {
+                        layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+                        layerCount = 1;
+                    }
+                } else {
+                    layerCount = 0;
+                }
+            }
 #endif
 
             XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
@@ -1431,19 +1500,24 @@ private:
             load_func("xrGetActionStateFloat", &getActionStateFloat_) &&
             load_func("xrGetActionStateVector2f", &getActionStateVector2f_)
 #if defined(_WIN32)
-            && load_func("xrEnumerateSwapchainFormats", &enumerateSwapchainFormats_)
-            && load_func("xrCreateSwapchain", &createSwapchain_)
-            && load_func("xrDestroySwapchain", &destroySwapchain_)
-            && load_func("xrEnumerateSwapchainImages", &enumerateSwapchainImages_)
-            && load_func("xrAcquireSwapchainImage", &acquireSwapchainImage_)
-            && load_func("xrWaitSwapchainImage", &waitSwapchainImage_)
-            && load_func("xrReleaseSwapchainImage", &releaseSwapchainImage_)
+            && load_swapchain_functions()
             && load_func("xrGetD3D11GraphicsRequirementsKHR", &getD3D11GraphicsRequirements_)
-#endif
-#if !defined(_WIN32)
-            && load_func("xrConvertTimespecTimeToTimeKHR", &convertTimespecTimeToTime_)
+#else
+            && (!vulkanEnabled_ || load_swapchain_functions())
+            && (!timespecEnabled_ || load_func("xrConvertTimespecTimeToTimeKHR", &convertTimespecTimeToTime_))
 #endif
             ;
+    }
+
+    bool load_swapchain_functions()
+    {
+        return load_func("xrEnumerateSwapchainFormats", &enumerateSwapchainFormats_) &&
+            load_func("xrCreateSwapchain", &createSwapchain_) &&
+            load_func("xrDestroySwapchain", &destroySwapchain_) &&
+            load_func("xrEnumerateSwapchainImages", &enumerateSwapchainImages_) &&
+            load_func("xrAcquireSwapchainImage", &acquireSwapchainImage_) &&
+            load_func("xrWaitSwapchainImage", &waitSwapchainImage_) &&
+            load_func("xrReleaseSwapchainImage", &releaseSwapchainImage_);
     }
 
     XrTime current_xr_time()
@@ -2336,6 +2410,271 @@ private:
         }
         return true;
     }
+#else
+    // Linux: the same projection swapchain as on Windows, made of Vulkan images. Android frames arrive as
+    // pixels (Waydroid's GPU cannot share textures with the PC runtime's yet) and are uploaded each frame.
+    bool create_projection_swapchain()
+    {
+        uint32_t viewCount = 0;
+        std::array<XrViewConfigurationView, 2> configViews{{{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}}};
+        if (enumerateViewConfigurationViews_(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                0, &viewCount, nullptr) != XR_SUCCESS || viewCount != 2 ||
+            enumerateViewConfigurationViews_(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                2, &viewCount, configViews.data()) != XR_SUCCESS) return false;
+        projectionWidth_ = projectionHeight_ = 0;
+        uint32_t maxWidth = refract::protocol::kMaxEyeDimension, maxHeight = refract::protocol::kMaxEyeDimension;
+        for (const auto& view : configViews) {
+            projectionWidth_ = (std::max)(projectionWidth_, view.recommendedImageRectWidth);
+            projectionHeight_ = (std::max)(projectionHeight_, view.recommendedImageRectHeight);
+            if (view.maxImageRectWidth) maxWidth = (std::min)(maxWidth, view.maxImageRectWidth);
+            if (view.maxImageRectHeight) maxHeight = (std::min)(maxHeight, view.maxImageRectHeight);
+        }
+        if (!refract::protocol::valid_render_extent(projectionWidth_, projectionHeight_)) {
+            std::fprintf(stderr, "Refract OpenXR: unsupported recommended eye extent %ux%u\n", projectionWidth_, projectionHeight_);
+            return false;
+        }
+        std::fprintf(stderr, "Refract OpenXR: runtime recommended stereo extent %ux%u\n", projectionWidth_, projectionHeight_);
+        if (const char* text = std::getenv("REFRACT_RENDER_SCALE"); text && *text) {  // As on Windows.
+            const int percent = std::atoi(text);
+            if (percent >= 25 && percent <= 200 && percent != 100) {
+                const auto scaled = [percent](uint32_t value, uint32_t limit) {
+                    const uint32_t size = static_cast<uint32_t>((static_cast<uint64_t>(value) * percent + 100) / 200 * 2);
+                    return (std::max)(64u, (std::min)(size, limit));
+                };
+                projectionWidth_ = scaled(projectionWidth_, maxWidth);
+                projectionHeight_ = scaled(projectionHeight_, maxHeight);
+                std::fprintf(stderr, "Refract OpenXR: render scale %d%% -> stereo extent %ux%u\n", percent, projectionWidth_, projectionHeight_);
+            }
+        }
+
+        uint32_t formatCount = 0;
+        if (enumerateSwapchainFormats_(session_, 0, &formatCount, nullptr) != XR_SUCCESS || formatCount == 0) return false;
+        std::vector<int64_t> formats(formatCount);
+        if (enumerateSwapchainFormats_(session_, formatCount, &formatCount, formats.data()) != XR_SUCCESS) return false;
+        projectionFormat_ = 0;
+        for (int64_t preferred : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB}) {
+            if (!projectionFormat_ && std::find(formats.begin(), formats.end(), preferred) != formats.end()) projectionFormat_ = preferred;
+        }
+        if (!projectionFormat_) {
+            std::fprintf(stderr, "Refract OpenXR: the runtime offers no 8-bit RGBA or BGRA swapchain format\n");
+            return false;
+        }
+        swapRedBlue_ = projectionFormat_ == VK_FORMAT_B8G8R8A8_UNORM || projectionFormat_ == VK_FORMAT_B8G8R8A8_SRGB;
+
+        XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
+        swapchainInfo.format = projectionFormat_;
+        swapchainInfo.sampleCount = 1;
+        swapchainInfo.width = projectionWidth_;
+        swapchainInfo.height = projectionHeight_;
+        swapchainInfo.faceCount = 1;
+        swapchainInfo.arraySize = 2;
+        swapchainInfo.mipCount = 1;
+        XrResult result = createSwapchain_(session_, &swapchainInfo, &projectionSwapchain_);
+        if (result != XR_SUCCESS) {
+            std::fprintf(stderr, "Refract OpenXR: xrCreateSwapchain failed: %s (%d)\n", xr_result_name(result), result);
+            return false;
+        }
+        uint32_t imageCount = 0;
+        if (enumerateSwapchainImages_(projectionSwapchain_, 0, &imageCount, nullptr) != XR_SUCCESS || imageCount == 0) return false;
+        projectionImages_.assign(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+        if (enumerateSwapchainImages_(projectionSwapchain_, imageCount, &imageCount,
+                reinterpret_cast<XrSwapchainImageBaseHeader*>(projectionImages_.data())) != XR_SUCCESS) return false;
+        uploadedAndroidSequenceByImage_.assign(imageCount, UINT64_MAX);
+        uploadedProjectionByImage_.assign(imageCount, {});
+        uploadedExtentByImage_.assign(imageCount, {static_cast<int32_t>(projectionWidth_), static_cast<int32_t>(projectionHeight_)});
+        std::fprintf(stderr, "Refract OpenXR: projection swapchain ready %ux%u images=%u format=%lld\n",
+            projectionWidth_, projectionHeight_, imageCount, static_cast<long long>(projectionFormat_));
+        return true;
+    }
+
+    // As fill_panel on Windows: a panel (one slice of the projection image) goes to a swapchain of its own,
+    // grown in steps of 256 pixels because creating one stalls the runtime.
+    bool fill_panel(uint32_t index, VkImage source, uint32_t slice, XrExtent2Di extent)
+    {
+        auto& panel = panelSwapchains_[index];
+        const auto width = static_cast<uint32_t>(extent.width), height = static_cast<uint32_t>(extent.height);
+        if (!width || !height || width > projectionWidth_ || height > projectionHeight_) return false;
+        if (panel.handle == XR_NULL_HANDLE || panel.width < width || panel.height < height) {
+            const auto grow = [](uint32_t current, uint32_t needed, uint32_t limit) {
+                return (std::max)(current, (std::min)((needed + 255) / 256 * 256, limit));
+            };
+            const uint32_t newWidth = grow(panel.width, width, projectionWidth_), newHeight = grow(panel.height, height, projectionHeight_);
+            if (panel.handle != XR_NULL_HANDLE) {
+                renderer_->wait_idle();
+                destroySwapchain_(panel.handle);
+            }
+            panel = {};
+            XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+            info.format = projectionFormat_;
+            info.sampleCount = 1;
+            info.width = newWidth;
+            info.height = newHeight;
+            info.faceCount = 1;
+            info.arraySize = 1;
+            info.mipCount = 1;
+            const XrResult created = createSwapchain_(session_, &info, &panel.handle);
+            if (created != XR_SUCCESS) {
+                std::fprintf(stderr, "Refract OpenXR: panel swapchain %ux%u failed: %s (%d)\n", newWidth, newHeight, xr_result_name(created), created);
+                panel.handle = XR_NULL_HANDLE;
+                return false;
+            }
+            uint32_t count = 0;
+            if (enumerateSwapchainImages_(panel.handle, 0, &count, nullptr) != XR_SUCCESS || count == 0) return false;
+            panel.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+            if (enumerateSwapchainImages_(panel.handle, count, &count,
+                    reinterpret_cast<XrSwapchainImageBaseHeader*>(panel.images.data())) != XR_SUCCESS) return false;
+            panel.width = newWidth;
+            panel.height = newHeight;
+            std::fprintf(stderr, "Refract OpenXR: panel %u swapchain %ux%u\n", index, newWidth, newHeight);
+        }
+        panel.used = extent;
+        uint32_t image = 0;
+        XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (acquireSwapchainImage_(panel.handle, &acquireInfo, &image) != XR_SUCCESS || image >= panel.images.size()) return false;
+        XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = XR_INFINITE_DURATION;
+        const bool copied = waitSwapchainImage_(panel.handle, &waitInfo) == XR_SUCCESS &&
+            renderer_->copy(source, slice, panel.images[image].image, width, height);
+        XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        return releaseSwapchainImage_(panel.handle, &releaseInfo) == XR_SUCCESS && copied;
+    }
+
+    // The newest Android frame into a projection image: both layers (a quad frame's panels are its layers).
+    // Pixels arrive bottom-up (GL readback order) and are flipped here, as on Windows.
+    bool upload_android_frame(VkImage image, uint32_t imageIndex)
+    {
+        HostImageFrame::Entry shown;
+        if (imageFrame_ == nullptr || !imageFrame_->snapshot(&shown)) return false;
+        const refract::protocol::ImageFrameHeader& header = shown.header;
+        const refract::protocol::ImageProjection& projection = shown.projection;
+        const auto& pixels = shown.pixels;
+        if (header.width == 0 || header.height == 0 || header.layers == 0 || header.bytes_per_pixel != 4 || pixels == nullptr ||
+            pixels->size() < static_cast<uint64_t>(header.width) * header.height * header.layers * 4) return false;
+        if (header.sequence == uploadedAndroidSequenceByImage_[imageIndex]) return true;  // Already in this image.
+        if (projection.view_count == 2 && (header.width > projectionWidth_ || header.height > projectionHeight_)) {
+            return false; // Cropping here would change the angular scale.
+        }
+
+        const uint32_t copyWidth = (std::min)(header.width, projectionWidth_);
+        const uint32_t copyHeight = (std::min)(header.height, projectionHeight_);
+        const size_t layerBytes = static_cast<size_t>(copyWidth) * copyHeight * 4;
+        uploadBuffer_.resize(layerBytes * 2);
+        for (uint32_t layer = 0; layer < 2; ++layer) {
+            const uint32_t sourceLayer = header.layers > 1 ? layer % header.layers : 0;
+            const uint8_t* source = pixels->data() + static_cast<size_t>(sourceLayer) * header.width * header.height * 4;
+            uint8_t* dest = uploadBuffer_.data() + layer * layerBytes;
+            for (uint32_t y = 0; y < copyHeight; ++y) {
+                const uint8_t* row = source + static_cast<size_t>(header.height - 1 - y) * header.width * 4;
+                uint8_t* out = dest + static_cast<size_t>(y) * copyWidth * 4;
+                if (!swapRedBlue_) {
+                    std::memcpy(out, row, static_cast<size_t>(copyWidth) * 4);
+                    continue;
+                }
+                for (uint32_t x = 0; x < copyWidth * 4; x += 4) {
+                    out[x + 0] = row[x + 2];
+                    out[x + 1] = row[x + 1];
+                    out[x + 2] = row[x + 0];
+                    out[x + 3] = row[x + 3];
+                }
+            }
+        }
+        if (!renderer_->upload(image, uploadBuffer_.data(), copyWidth, copyHeight, 2)) return false;
+        if (!reportedAndroidImageSubmit_) {
+            std::fprintf(stderr, "Refract OpenXR: submitting Android image frames to the runtime (%ux%u layers=%u)\n",
+                header.width, header.height, header.layers);
+            reportedAndroidImageSubmit_ = true;
+        }
+        uploadedAndroidSequenceByImage_[imageIndex] = header.sequence;
+        uploadedProjectionByImage_[imageIndex] = projection;
+        uploadedExtentByImage_[imageIndex] = {static_cast<int32_t>(copyWidth), static_cast<int32_t>(copyHeight)};
+        return true;
+    }
+
+    // Fills the frame's layers: the game's quad panels if it sent those (quadCount of them), else one
+    // stereo projection layer (quadCount 0). False: nothing to show yet.
+    bool update_projection_layer(
+        XrTime displayTime,
+        std::array<XrCompositionLayerProjectionView, 2>& projectionViews,
+        XrCompositionLayerProjection& projectionLayer,
+        std::array<XrCompositionLayerQuad, refract::protocol::kMaxCompositionLayers>& quadLayers,
+        uint32_t& quadCount)
+    {
+        static refract::protocol::PerfStats stats("host-projection");
+        refract::protocol::PerfScope scope(stats);
+        quadCount = 0;
+        uint32_t imageIndex = 0;
+        XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (acquireSwapchainImage_(projectionSwapchain_, &acquireInfo, &imageIndex) != XR_SUCCESS || imageIndex >= projectionImages_.size())
+            return false;
+        XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = XR_INFINITE_DURATION;
+        bool uploaded = false, panelsReady = true;
+        if (waitSwapchainImage_(projectionSwapchain_, &waitInfo) == XR_SUCCESS) {
+            const VkImage image = projectionImages_[imageIndex].image;
+            uploaded = upload_android_frame(image, imageIndex);
+            quadCount = uploaded ? uploadedProjectionByImage_[imageIndex].quad_count() : 0;
+            for (uint32_t i = 0; i < quadCount && panelsReady; ++i)
+                panelsReady = fill_panel(i, image, i, uploadedExtentByImage_[imageIndex]);
+        }
+        XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        if (releaseSwapchainImage_(projectionSwapchain_, &releaseInfo) != XR_SUCCESS || !uploaded) return false;
+
+        const auto& composition = uploadedProjectionByImage_[imageIndex];
+        if (quadCount) {
+            if (!panelsReady) return false;
+            for (uint32_t i = 0; i < quadCount; ++i) {
+                const auto& source = composition.quads[i];
+                auto& quad = quadLayers[i];
+                quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+                quad.space = localSpace_;
+                quad.layerFlags = source.layer_flags & 7;
+                quad.eyeVisibility = static_cast<XrEyeVisibility>(source.eye_visibility);
+                quad.pose.position = {source.pose.x, source.pose.y, source.pose.z};
+                quad.pose.orientation = {source.pose.qx, source.pose.qy, source.pose.qz, source.pose.qw};
+                quad.size = {source.width, source.height};
+                quad.subImage.swapchain = panelSwapchains_[i].handle;
+                quad.subImage.imageRect.extent = panelSwapchains_[i].used;
+            }
+            return true;
+        }
+
+        XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
+        locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        locateInfo.displayTime = displayTime;
+        locateInfo.space = localSpace_;
+        XrViewState viewState{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 2> views{XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+        uint32_t viewCount = 0;
+        if (locateViews_(session_, &locateInfo, &viewState, static_cast<uint32_t>(views.size()), &viewCount, views.data()) != XR_SUCCESS ||
+            viewCount < 2) return false;
+        for (uint32_t i = 0; i < 2; ++i) {
+            projectionViews[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+            projectionViews[i].pose = views[i].pose;
+            projectionViews[i].fov = {-kAppProjectionHalfFovRadians, kAppProjectionHalfFovRadians,
+                                      kAppProjectionHalfFovRadians, -kAppProjectionHalfFovRadians};
+            // The camera that rendered this exact image, not the newest tracking pose.
+            if (composition.view_count == 2) {
+                const auto& eye = composition.views[i];
+                projectionViews[i].pose.position = {eye.pose.x, eye.pose.y, eye.pose.z};
+                projectionViews[i].pose.orientation = {eye.pose.qx, eye.pose.qy, eye.pose.qz, eye.pose.qw};
+                projectionViews[i].fov = {eye.angle_left, eye.angle_right, eye.angle_up, eye.angle_down};
+            }
+            projectionViews[i].subImage.swapchain = projectionSwapchain_;
+            projectionViews[i].subImage.imageRect = {{0, 0}, uploadedExtentByImage_[imageIndex]};
+            projectionViews[i].subImage.imageArrayIndex = i;
+        }
+        projectionLayer.space = localSpace_;
+        projectionLayer.layerFlags = composition.layer_flags;
+        projectionLayer.viewCount = 2;
+        projectionLayer.views = projectionViews.data();
+        if (!reportedProjectionSubmit_) {
+            std::fprintf(stderr, "Refract OpenXR: submitting projection layer to runtime\n");
+            reportedProjectionSubmit_ = true;
+        }
+        return true;
+    }
 #endif
 
     bool create_reference_space(XrReferenceSpaceType type, XrSpace* space)
@@ -2836,7 +3175,6 @@ private:
     PFN_xrGetActionStateBoolean getActionStateBoolean_ = nullptr;
     PFN_xrGetActionStateFloat getActionStateFloat_ = nullptr;
     PFN_xrGetActionStateVector2f getActionStateVector2f_ = nullptr;
-#if defined(_WIN32)
     PFN_xrEnumerateSwapchainFormats enumerateSwapchainFormats_ = nullptr;
     PFN_xrCreateSwapchain createSwapchain_ = nullptr;
     PFN_xrDestroySwapchain destroySwapchain_ = nullptr;
@@ -2844,6 +3182,7 @@ private:
     PFN_xrAcquireSwapchainImage acquireSwapchainImage_ = nullptr;
     PFN_xrWaitSwapchainImage waitSwapchainImage_ = nullptr;
     PFN_xrReleaseSwapchainImage releaseSwapchainImage_ = nullptr;
+#if defined(_WIN32)
     PFN_xrGetD3D11GraphicsRequirementsKHR getD3D11GraphicsRequirements_ = nullptr;
     std::mutex gpuMutex_;
     WindowsGpuReceiver gpuReceiver_;
@@ -2898,8 +3237,33 @@ private:
     bool loadingActive_ = false, loadingAnchored_ = false, loadingFollowing_ = false;
     bool reportedProjectionSubmit_ = false;
     bool reportedAndroidImageSubmit_ = false;
+#else
+    // Linux. Destroyed after the session (members go after the destructor body), as OpenXR requires.
+    std::unique_ptr<VulkanRenderer> renderer_;
+    bool vulkanEnabled_ = false;  // Else a headless, tracking-only session.
+    struct PanelSwapchain {
+        XrSwapchain handle = XR_NULL_HANDLE;
+        uint32_t width = 0, height = 0;  // The swapchain's size; the panel is its top-left `used` part.
+        XrExtent2Di used{};
+        std::vector<XrSwapchainImageVulkan2KHR> images;
+    };
+    std::array<PanelSwapchain, refract::protocol::kMaxCompositionLayers> panelSwapchains_{};
+    XrSwapchain projectionSwapchain_ = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageVulkan2KHR> projectionImages_;
+    std::vector<uint64_t> uploadedAndroidSequenceByImage_;
+    std::vector<refract::protocol::ImageProjection> uploadedProjectionByImage_;
+    std::vector<XrExtent2Di> uploadedExtentByImage_;
+    std::vector<uint8_t> uploadBuffer_;
+    int64_t projectionFormat_ = 0;
+    bool swapRedBlue_ = false;  // The swapchain is BGRA; Android sends RGBA.
+    uint32_t projectionWidth_ = refract::protocol::kTransportEyeDimension;
+    uint32_t projectionHeight_ = refract::protocol::kTransportEyeDimension;
+    bool reportedProjectionSubmit_ = false;
+    bool reportedAndroidImageSubmit_ = false;
 #endif
 #if !defined(_WIN32)
+    static inline volatile std::sig_atomic_t stopRequested_ = 0;
+    bool timespecEnabled_ = false;
     PFN_xrConvertTimespecTimeToTimeKHR convertTimespecTimeToTime_ = nullptr;
 #else
     bool win32TimeEnabled_ = false;

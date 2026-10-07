@@ -23,6 +23,16 @@ target_link_libraries(refract-host-bridge
 )
 
 if(UNIX AND NOT APPLE)
+  # Linux renders through Vulkan. libvulkan.so.1 and the OpenXR loader are opened at run time, so only
+  # headers are needed: the openxr-devel and vulkan-headers packages, or these directories.
+  set(REFRACT_OPENXR_HEADERS "" CACHE PATH "Directory holding openxr/openxr.h, if not installed system-wide")
+  set(REFRACT_VULKAN_HEADERS "" CACHE PATH "Directory holding vulkan/vulkan.h, if not installed system-wide")
+  target_sources(refract-host-bridge PRIVATE vulkan_renderer.cpp)
+  foreach(headers IN ITEMS "${REFRACT_OPENXR_HEADERS}" "${REFRACT_VULKAN_HEADERS}")
+    if(headers)
+      target_include_directories(refract-host-bridge PRIVATE "${headers}")
+    endif()
+  endforeach()
   target_link_libraries(refract-host-bridge PRIVATE dl)
 endif()
 

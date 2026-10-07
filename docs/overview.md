@@ -65,6 +65,7 @@ Implemented:
 - Minimal OpenXR runtime entry points for `hello_xr`
 - HMD and controller pose forwarding from a host OpenXR runtime
 - Windows host bridge using `XR_KHR_D3D11_enable`
+- Linux host bridge using `XR_KHR_vulkan_enable2`, with Waydroid as the Android side ([linux_waydroid.md](linux_waydroid.md))
 - SteamVR projection layer submission
 - CPU image readback from Android GLES swapchain images
 - Android local socket image proxy in the runtime APK
@@ -88,7 +89,7 @@ android-runtime/       Native Android OpenXR runtime implementation
 android-runtime-apk/   Installable Android runtime APK and runtime broker
 host-bridge/           Native host bridge talking to PC OpenXR
 protocol/              Pose/image protocol structures and transports
-container/             Waydroid/WSL helper scripts
+container/             WSL port forwarder (Linux/Waydroid: scripts/waydroid.sh)
 tests/                 Runtime smoke tests and Android loader probes
 ```
 
