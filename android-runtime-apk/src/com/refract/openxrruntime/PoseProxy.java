@@ -22,11 +22,28 @@ final class PoseProxy {
     // adb reverse, poses arrived in bursts every ~45 ms, so frame-synced games (SteamVR) waited between them
     // (AC Nexus: ~67 fps of 90). No adb fallback there: adb reverse accepts even before the bridge listens, so
     // a relay started early stayed on it for the whole session. Phones only have adb reverse.
-    static final String[] HOSTS = EMULATOR ? new String[] {"10.0.2.2"} : new String[] {"127.0.0.1", "10.0.2.2"};
+    // Waydroid's setup names the Linux host in debug.refract.host_addr, as for the runtime's own clients.
+    private static final String HOST_ADDR = systemProperty("debug.refract.host_addr");
+    static final String[] HOSTS = !HOST_ADDR.isEmpty() ? new String[] {HOST_ADDR}
+        : EMULATOR ? new String[] {"10.0.2.2"} : new String[] {"127.0.0.1", "10.0.2.2"};
     // A refused connection through the emulator's NAT takes ~2 s (Windows retries refused loopback connects).
     private static final int CONNECT_TIMEOUT_MS = EMULATOR ? 3000 : 1000;
 
     private PoseProxy() {
+    }
+
+    // android.os.SystemProperties is hidden from apps; getprop reads the same value.
+    private static String systemProperty(String name) {
+        try {
+            Process process = new ProcessBuilder("getprop", name).start();
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(process.getInputStream()))) {
+                String line = reader.readLine();
+                return line == null ? "" : line.trim();
+            }
+        } catch (IOException ex) {
+            return "";
+        }
     }
 
     // The bridge at the first of HOSTS that accepts, with Nagle off; null if none does.

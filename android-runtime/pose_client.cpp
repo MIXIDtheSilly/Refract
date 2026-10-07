@@ -1,4 +1,5 @@
 #include "pose_client.h"
+#include "host_address.h"
 #include "perf_stats.h"
 
 #include <cstdio>
@@ -81,9 +82,11 @@ refract::protocol::PoseFrame PoseClient::latest_pose_frame()
     // decoder must have one reader, including connection/close operations.
     std::lock_guard lock(mutex_);
 #if defined(__ANDROID__)
-    // Emulator: host is 10.0.2.2. Real device (debug.refract.direct_host=1): host is reached via
-    // `adb reverse tcp:38490`; the broker path blocks each query on the next pushed frame.
+    // Emulator: host is 10.0.2.2. Waydroid (debug.refract.host_addr): host is that address. Real device
+    // (debug.refract.direct_host=1): host is reached via `adb reverse tcp:38490`; the broker path blocks
+    // each query on the next pushed frame.
     static const bool direct = [] {
+        if (direct_host_address()) return true;
         char value[PROP_VALUE_MAX]{};
         __system_property_get("debug.refract.direct_host", value);
         return std::strcmp(value, "1") == 0;
@@ -422,7 +425,12 @@ bool PoseClient::ensure_emulator_connected()
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(kDefaultBridgePort);
-    inet_pton(AF_INET, emulator_ ? "10.0.2.2" : "127.0.0.1", &address.sin_addr);
+    const char* host = direct_host_address();
+    if (inet_pton(AF_INET, host ? host : emulator_ ? "10.0.2.2" : "127.0.0.1", &address.sin_addr) != 1) {
+        log_pose_client("debug.refract.host_addr is not an IPv4 address");
+        close_socket();
+        return false;
+    }
     if (connect(socket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) { return true; }
     if (errno == EINPROGRESS) { connecting_ = true; return false; }
     close_socket();
