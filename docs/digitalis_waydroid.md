@@ -39,15 +39,19 @@ The script:
 1. Checks that `bionic` has no uncommitted changes and is at `b862b505` (or `f22516cb`). It stops
    otherwise.
 2. Saves the four commits as the branch `refract-qpr0-layout`, then checks out `f22516cb`.
-3. Runs `digitalis/scripts/build-and-package-prebuilts.sh --full`. The log is
-   `/root/digitalis-qpr2-build.log`.
+3. Builds every translator package (`BERBERIS_PRODUCT_PACKAGES_ARM64_TO_X86_64`, the ARM64 guest
+   libraries included), then packages them with `digitalis/scripts/build-and-package-prebuilts.sh
+   --collect-only`. A full `m` (`--full`) fails because the tree has no `prebuilts/qemu-kernel`.
+   The script's own targeted build skips the guest libraries, so it would package an old bionic.
+   The log is `/root/digitalis-qpr2-build.log`. It then checks the bundle with
+   `digitalis_bionic_layout.py --expect qpr2` and stops if the layout is wrong.
 4. Copies the bundle to `C:\Users\mixid\Documents\digitalis-qpr2-prebuilts.tar.gz`. Give another
    path, as seen from WSL, as its first argument.
 5. Checks out `refract-qpr0-layout` again and rebuilds. The log is
    `/root/digitalis-qpr2-build.log.restore`.
 
-It returns `bionic` to the QPR0 layout even if the build fails. Both builds are incremental full
-builds of the tree: `bionic` and the system image are rebuilt.
+It returns `bionic` to the QPR0 layout even if the build fails. Both builds are incremental and
+take a few minutes.
 
 ## 2. Install it on Linux
 

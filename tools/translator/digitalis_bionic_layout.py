@@ -19,6 +19,8 @@ LAYOUTS = {0x2f8: 'qpr0', 0x300: 'qpr2'}
 
 
 def objdump():
+    if os.environ.get('LLVM_OBJDUMP'):  # e.g. an AOSP tree's prebuilts/clang (digitalis_build_qpr2.sh)
+        return Path(os.environ['LLVM_OBJDUMP'])
     sdk = Path(os.environ.get('ANDROID_HOME', Path.home() / 'Android/Sdk'))
     found = sorted(sdk.glob('ndk/*/toolchains/llvm/prebuilt/*/bin/llvm-objdump*'))
     if not found:

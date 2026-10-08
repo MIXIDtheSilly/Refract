@@ -30,9 +30,22 @@ restore() {
 }
 trap restore EXIT
 
+# Builds every package of the translator, guest libraries (*.native_bridge) included, and packages them. A full `m`
+# would also assemble the system image, which needs prebuilts/qemu-kernel (not in this tree); the packaging script's
+# own targeted build skips the guest libraries, so it would package whatever bionic out/ had before.
+build() {
+    (
+        source build/envsetup.sh >/dev/null &&
+            m $(get_build_var BERBERIS_PRODUCT_PACKAGES_ARM64_TO_X86_64) &&
+            bash digitalis/scripts/build-and-package-prebuilts.sh --collect-only
+    ) >"$1" 2>&1 || { tail -n 30 "$1"; exit 1; }
+}
+
 git -C bionic checkout -q --detach "$QPR2"
-echo "Building Digitalis with stock QPR2 bionic (log: $log); this rebuilds bionic and the system image."
-bash digitalis/scripts/build-and-package-prebuilts.sh --full >"$log" 2>&1 || { tail -n 30 "$log"; exit 1; }
+echo "Building Digitalis with stock QPR2 bionic (log: $log); this rebuilds bionic and the translator."
+build "$log"
+LLVM_OBJDUMP="$(ls -d prebuilts/clang/host/linux-x86/clang-*/bin/llvm-objdump | sort -V | tail -n1)" \
+    python3 "$(dirname "$0")/digitalis_bionic_layout.py" digitalis/dist/digitalis-prebuilts --expect qpr2
 bundle="$(ls -t digitalis/dist/*.tar.gz | head -n1)"
 cp "$bundle" "$output"
 echo "Waydroid bundle: $output ($(sha256sum "$output" | cut -d' ' -f1))"
@@ -40,5 +53,5 @@ echo "Waydroid bundle: $output ($(sha256sum "$output" | cut -d' ' -f1))"
 restore
 trap - EXIT
 echo "Rebuilding the Windows (QPR0 layout) build in out/ (log: $log.restore)."
-bash digitalis/scripts/build-and-package-prebuilts.sh --full >"$log.restore" 2>&1 || { tail -n 30 "$log.restore"; exit 1; }
+build "$log.restore"
 echo "Done. prebuilts/digitalis (Windows) is unchanged; out/ matches it again."
