@@ -201,6 +201,18 @@ int wmain(int argc, wchar_t** wargv) {
             InstallCrashDumpFilter();
         }
     }).detach();
+    // Windows 11 power-throttles (EcoQoS) processes without a foreground window, and this one is
+    // driven from the viewer: its threads get parked on E-cores of hybrid CPUs and its timer
+    // resolution request is ignored, so the game drops from ~80 to ~24 fps until the scheduler
+    // moves it back. Opt out; REFRACT_ECOQOS=1 keeps the Windows default.
+    if (!getenv("REFRACT_ECOQOS")) {
+        PROCESS_POWER_THROTTLING_STATE pt{};
+        pt.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        pt.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        pt.StateMask = 0;
+        if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof(pt)))
+            Log("power throttling opt-out failed: %lu", GetLastError());
+    }
     timeBeginPeriod(1);
     setvbuf(stdout, nullptr, _IONBF, 0);
 
