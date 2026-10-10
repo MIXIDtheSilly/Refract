@@ -2,7 +2,7 @@
 // Each check: { id, title, ok, detail, fix?: { action, label, note? } }.
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { run, powershellArgs, guestPackages } from './runtime.mjs';
+import { run, powershellArgs, guestPackages, nativeExe, nativeSysroot } from './runtime.mjs';
 import { avdHome, installAndroid, missingAndroid, multicoreReady } from './android_sdk.mjs';
 
 const exists = file => fs.access(file).then(() => true, () => false);
@@ -109,7 +109,39 @@ export async function headsetStatus(runtime) {
   }
 }
 
+// What Refract Native needs instead of Android: its runner, the PC viewer, Refract's runtime libraries, Quest firmware
+// files, and the Java and Android build tools install_apk.py converts games with.
+const nativeJdk = 'C:/Program Files/Java/jdk-27/bin/java.exe';
+async function nativeChecks(root, sdk) {
+  const parts = [
+    ['Native runner', nativeExe, { action: 'native', label: 'Build Refract Native', note: 'Needs Visual Studio with C++ and CMake. Takes several minutes.' }],
+    ['PC viewer', 'viewer/build/refract_viewer.exe', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++. Takes a few minutes.' }],
+    ['GPU sharing layer', 'build-windows-gpu-layer/Release/refract_gpu_layer.json', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++. Takes a few minutes.' }],
+    ['Refract runtime (ARM64)', 'build-android-runtime-windows-arm64-v8a/systemdriver/package/lib/arm64-v8a/libopenxr_runtime.so', { action: 'nativeRuntime', label: 'Build runtime', note: 'Needs the Android NDK.' }],
+    ['Platform stand-in (ARM64)', 'build-platform-sdk/package/lib/arm64-v8a/librefract_ovrplatform.so', { action: 'nativeRuntime', label: 'Build runtime', note: 'Needs the Android NDK.' }],
+  ];
+  const missing = [];
+  for (const [label, file, fix] of parts) if (!await exists(path.join(root, file))) missing.push({ label, fix });
+  const built = missing.length
+    ? { ok: false, detail: `Not built yet: ${missing.map(m => m.label).join(', ')}.`, fix: missing[0].fix }
+    : { ok: true, detail: 'Native runner, PC viewer, GPU sharing layer and Refract runtime are built.' };
+  const sysroot = nativeSysroot(root);
+  const firmware = await exists(path.join(sysroot, 'system'));
+  const tools = [];
+  if (!await exists(nativeJdk)) tools.push('JDK 27');
+  if (!await exists(path.join(root, '../external/dex2jar/d2j-dex2jar.bat'))) tools.push('dex2jar');
+  if (!await exists(path.join(sdk, 'build-tools'))) tools.push('Android build-tools');
+  return [{ id: 'native', title: 'Refract Native', ...built },
+    { id: 'firmware', title: 'Quest firmware files', ok: firmware, detail: firmware ? sysroot : `Refract Native runs games on a dump of Quest system files. Expected in ${sysroot}.` },
+    { id: 'nativetools', title: 'Game conversion tools', ok: !tools.length, detail: tools.length ? `Missing: ${tools.join(', ')}.` : 'JDK, dex2jar and Android build-tools found.',
+      ...(tools.includes('Android build-tools') ? { fix: { action: 'android', label: 'Set up Android', note: 'Downloads the Android SDK from Google. Setting up accepts the Android SDK License Agreement (developer.android.com/studio/terms).' } } : {}) }];
+}
+
 export async function checkSetup(root, settings) {
+  if (settings.backend === 'native') {
+    const [py, native, xr] = await Promise.all([python(), nativeChecks(root, settings.sdk), openxr()]);
+    return [py, ...native, xr];
+  }
   const [py, androidChecks, accel, parts, xr] = await Promise.all([python(), android(settings.sdk, settings.avd), hypervisor(settings.sdk), built(root, settings.sdk), openxr()]);
   return [py, ...androidChecks, accel, parts, xr];
 }
@@ -127,6 +159,12 @@ export async function fixSetup(root, settings, action, progress = () => {}) {
       const outer = `$p = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-EncodedCommand','${Buffer.from(inner, 'utf16le').toString('base64')}'; exit $p.ExitCode`;
       await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', outer], long); return;
     }
+    case 'native':
+      await run('cmd.exe', ['/d', '/c', path.join(root, 'native/build.cmd')], { ...long, cwd: root }); return;
+    case 'nativeRuntime':
+      for (const [script, parameters] of [['android-runtime-apk/build_apk.ps1', { Sdk: settings.sdk, Abi: 'arm64-v8a' }], ['platform-sdk/build_apk.ps1', { Sdk: settings.sdk }]])
+        await run('powershell.exe', powershellArgs(path.join(root, script), parameters), { ...long, cwd: root });
+      return;
     case 'build':
       for (const item of components(root, settings.sdk)) {
         if (item.build && !await exists(path.join(root, item.file))) await run(item.build[0], item.build[1], { ...long, cwd: root });

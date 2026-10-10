@@ -51,6 +51,8 @@ export function PlayButtons({ game, state, run, pending, notify, headset, onStar
     if (mode === 'pc') notify('Playing on PC. Hold the right mouse button to look around; WASD walks. Controls are in the game’s details.');
     onStarted(mode);
   });
+  // Refract Native has no headset path yet.
+  if (state.settings.backend === 'native') return <button type="button" className="btn btn-lg btn-primary" disabled={disabled} onClick={() => play('pc')}><Monitor />Play on PC</button>;
   const vrFirst = !headsetMissing(headset);
   const vr = <button key="vr" type="button" className={`btn btn-lg ${vrFirst ? 'btn-primary' : 'btn-outline'}`} disabled={disabled} onClick={() => play('vr')}><RectangleGoggles />Play in VR</button>;
   const pc = <button key="pc" type="button" className={`btn btn-lg ${vrFirst ? 'btn-outline' : 'btn-primary'}`} disabled={disabled} onClick={() => play('pc')}><Monitor />Play on PC</button>;

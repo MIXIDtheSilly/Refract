@@ -11,6 +11,7 @@ import { Library } from './pages/library';
 import { Downloads } from './pages/downloads';
 import { SettingsPage } from './pages/settings';
 import { EmulatorPage } from './pages/emulator';
+import { Welcome } from './components/welcome';
 import './styles.css';
 
 function App() {
@@ -62,11 +63,12 @@ function App() {
         {!state ? <Empty title="Loading library" action={<Loader2 className="spin" />} />
           : page === 'library' ? <Library {...shared} />
           : page === 'downloads' ? <Downloads {...shared} />
-          : page === 'emulator' ? <EmulatorPage {...shared} />
+          : page === 'emulator' && state.settings.backend !== 'native' ? <EmulatorPage {...shared} />
           : <SettingsPage key={JSON.stringify(state.settings)} {...shared} />}
       </main>
     </div>
 
+    {state && !state.settings.setupDone && <Welcome state={state} run={run} pending={pending} notify={notify} />}
     {running && <div className="now-playing" role="status">
       <span className="orbit"><LogoMark /></span>
       <div><small>Now playing {state.runningMode === 'pc' ? 'on PC' : 'in VR'}</small><strong>{running.name}</strong></div>

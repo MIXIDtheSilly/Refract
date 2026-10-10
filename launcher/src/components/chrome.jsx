@@ -34,7 +34,7 @@ export function Sidebar({ page, setPage, state, activeJobs, connecting, onConnec
       <LogoMark /><span>Refract</span>
     </button>
     <nav className="nav" aria-label="Main navigation">
-      {pages.map(([id, label, Icon]) => <button key={id} type="button" className="nav-item" data-nav={id}
+      {pages.filter(([id]) => id !== 'emulator' || state?.settings.backend !== 'native').map(([id, label, Icon]) => <button key={id} type="button" className="nav-item" data-nav={id}
         aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}>
         <Icon />{label}
         {id === 'downloads' && activeJobs > 0 && <span className="nav-badge">{activeJobs}</span>}

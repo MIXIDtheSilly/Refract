@@ -92,6 +92,13 @@ export function emulatorOptions(settings) {
   return { Cores: settings.cores ?? 6, Audio: settings.audio || 'dsound',
     ...(settings.showWindow ? { ShowWindow: true } : {}), ...(settings.hostMic === false ? { NoHostMic: true } : {}) };
 }
+// Refract Native (no emulator): refract_native.exe runs the game's ARM64 libraries on this PC against Quest firmware
+// files. Settings > Runtime chooses it; native/tools/install_apk.py prepares each game under nativeAppsDir().
+export const backends = ['emulator', 'native'];
+export const nativeAppsDir = () => path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '.', 'AppData/Local'), 'Refract/native/apps');
+export const nativeExe = 'build-native/refract_native.exe';
+// The Quest firmware dump refract_native uses as Android's system files.
+export const nativeSysroot = root => process.env.REFRACT_SYSROOT || path.resolve(root, '../dumps/horizon-dump/fs');
 export function validPackage(value) {
   if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(value || '')) throw new Error('Invalid Android package name.');
   return value;
@@ -102,7 +109,8 @@ export class Runtime {
   get port() { return this.found ?? this.settings.port; }
   adbAt(port, args, options) { return run(path.join(this.settings.sdk, 'platform-tools/adb.exe'), [...(port ? ['-s', `emulator-${port}`] : []), ...args], options); }
   adb(args, options) { return this.adbAt(this.port, args, options); }
-  async online() { return Boolean(await this.locate()); }
+  get native() { return this.settings.backend === 'native'; }
+  async online() { return this.native || Boolean(await this.locate()); }
   async avdName(port) { return (await this.adbAt(port, ['emu', 'avd', 'name'], { timeout: 5000 })).split(/\r?\n/)[0].trim(); }
   // The emulator locks its AVD, so while the same AVD runs on another port (scripts\start_emulator.ps1
   // uses 5582) a copy on the configured port exits at once. Use the running one instead.
@@ -233,6 +241,11 @@ export class Runtime {
     return { ...data, vrSdk: vrSdk(libraries), apk: path.resolve(apk), source: 'local', id: `local:${data.package}` };
   }
   async installed() {
+    if (this.native) {
+      const entries = await fs.readdir(nativeAppsDir(), { withFileTypes: true }).catch(() => []);
+      const found = await Promise.all(entries.filter(e => e.isDirectory()).map(e => fs.access(path.join(nativeAppsDir(), e.name, 'app.properties')).then(() => e.name, () => null)));
+      return new Set(found.filter(Boolean));
+    }
     if (!await this.online()) return null;
     return new Set((await this.adb(['shell', 'pm', 'list', 'packages', '-3'])).split(/\r?\n/).map(s => s.replace(/^package:/, '').trim()).filter(Boolean));
   }
@@ -253,6 +266,11 @@ export class Runtime {
     validPackage(game.package);
     if (this.child) throw new Error('Close the running game before installing.');
     if (!game.apk) throw new Error('Import or download an APK first.');
+    if (this.native) {
+      update('Preparing the game for Refract Native');
+      await run('python', [path.join(this.root, 'native/tools/install_apk.py'), game.apk, '--sdk', this.settings.sdk], { timeout: 30 * 60 * 1000 });
+      return;
+    }
     update('Starting Android'); await this.ensure(update);
     await this.checkSpace(game);
     update('Installing APK');
@@ -289,8 +307,13 @@ export class Runtime {
   launch(game, onExit, mode = 'vr') {
     if (this.child) throw new Error('A game is already running.');
     validPackage(game.package);
-    if (!/^[A-Za-z0-9_./]+$/.test(game.activity || '') || game.activity.split('/')[0] !== game.package) throw new Error('Invalid launch activity. Refresh installed games.');
-    const args = powershellArgs(path.join(this.root, 'tools/run_windows_game.ps1'), { Avd: this.settings.avd, Port: this.port,
+    if (!this.native && (!/^[A-Za-z0-9_./]+$/.test(game.activity || '') || game.activity.split('/')[0] !== game.package)) throw new Error('Invalid launch activity. Refresh installed games.');
+    if (this.native && mode !== 'pc') throw new Error('Refract Native plays on this PC for now. Use Play on PC, or switch to the Android emulator in Settings.');
+    const obb = (game.files || []).filter(f => f.kind !== 'apk').map(f => path.dirname(f.path))[0];
+    const args = this.native ? powershellArgs(path.join(this.root, 'tools/run_native_game.ps1'), { Package: game.package, GameName: game.name,
+      Sysroot: nativeSysroot(this.root), ...(obb ? { ObbDir: obb } : {}), ...(game.owned ? { Owned: true } : {}),
+      ...(validUserId(this.settings.userId) ? { UserId: this.settings.userId } : {}), ...(validEyeSize(this.settings.pcEyeSize) ? { EyeSize: this.settings.pcEyeSize } : {}) })
+      : powershellArgs(path.join(this.root, 'tools/run_windows_game.ps1'), { Avd: this.settings.avd, Port: this.port,
       Sdk: this.settings.sdk, MemoryMB: this.settings.memoryMB, Package: game.package, Activity: game.activity, GameName: game.name,
       ...(game.owned ? { Owned: true } : {}), ...(mode === 'pc' ? { PcViewer: true } : {}),
       ...(validUserId(this.settings.userId) ? { UserId: this.settings.userId } : {}),
@@ -320,7 +343,7 @@ export class Runtime {
   }
   // The emulator runs hidden, so one the launcher started stops with the launcher (a running game keeps it).
   async shutdown() {
-    if (!this.started || this.child || this.settings.keepEmulator) return;
+    if (this.native || !this.started || this.child || this.settings.keepEmulator) return;
     await this.adbAt(this.settings.port, ['shell', 'sync'], { timeout: 2000 }).catch(() => {});
     await this.adbAt(this.settings.port, ['emu', 'kill'], { timeout: 2000 }).catch(() => {});
   }

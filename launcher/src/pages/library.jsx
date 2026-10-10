@@ -29,7 +29,7 @@ export function Library({ state, run, pending, open, notify, connect, setPage, h
         <h1 className="page-title">Library</h1>
         <div className="page-sub">{state.games.length} {state.games.length === 1 ? 'game' : 'games'} · {installed} installed</div>
       </div>
-      <HeadsetStatus {...headset} />
+      {state.settings.backend !== 'native' && <HeadsetStatus {...headset} />}
     </header>
     <SetupBanner run={run} setPage={setPage} />
 

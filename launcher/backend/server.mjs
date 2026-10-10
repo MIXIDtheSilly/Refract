@@ -17,7 +17,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { MetaAuth, QuestStore, appId } from '../core/meta.mjs';
 import { downloadFile, safeName, checkSpace } from '../core/download.mjs';
 import { State } from '../core/state.mjs';
-import { Runtime, run, validPackage, audioBackends, newUserId, validUserId, validEyeSize, validRenderScale, guestPackages } from '../core/runtime.mjs';
+import { Runtime, backends, run, validPackage, audioBackends, newUserId, validUserId, validEyeSize, validRenderScale, guestPackages } from '../core/runtime.mjs';
 import { Emulator, redact, diskSizes } from '../core/emulator.mjs';
 import { checkSetup, fixSetup, headsetStatus, refreshPath } from '../core/setup.mjs';
 import { loadLibraryArtwork } from '../core/artwork.mjs';
@@ -50,7 +50,8 @@ const message = error => redact(error?.message || error);
 function publicState() {
   return { ...state.data, signedIn: Boolean(token), account, accountImage, running: runtime.game, runningMode: runtime.mode || null, busy, fixing, fixProgress, starting, emulatorTask,
     // Credentials and signed CDN URLs never reach the UI or library file.
-    games: state.data.games.map(g => ({ ...g, files: g.files?.map(f => ({ name: f.name, path: f.path, kind: f.kind, size: f.size })) })) };
+    // Games are installed per runtime: on the Android emulator (installed) or in Refract Native (nativeInstalled).
+    games: state.data.games.map(({ nativeInstalled, ...g }) => ({ ...g, installed: runtime.native ? Boolean(nativeInstalled) : Boolean(g.installed), files: g.files?.map(f => ({ name: f.name, path: f.path, kind: f.kind, size: f.size })) })) };
 }
 let changeTimer = null;
 function changed() {
@@ -68,7 +69,9 @@ async function syncInstalled() {
   const installed = await runtime.installed();
   if (!installed) return false;
   state.data.games = state.data.games.filter(g => !(g.source === 'installed' && g.package?.startsWith('com.refract.')));
-  for (const game of state.data.games) game.installed = Boolean(game.package && installed.has(game.package));
+  const flag = runtime.native ? 'nativeInstalled' : 'installed';
+  for (const game of state.data.games) game[flag] = Boolean(game.package && installed.has(game.package));
+  if (runtime.native) { await persist(); return true; }  // Native apps are installed from the library; nothing to import.
   for (const pkg of installed) {
     if (pkg.startsWith('com.refract.') || pkg.startsWith('com.google.') || state.data.games.some(g => g.package === pkg)) continue;
     try {
@@ -198,7 +201,7 @@ const methods = {
       if (hash.digest('hex') !== file.sha256) throw new Error(`${file.name} changed since download. Download it again.`);
     }
     const job = { id: randomUUID(), gameId: id, name: game.name, status: 'installing', stage: 'Preparing install' }; state.data.jobs.unshift(job); await persist();
-    try { await runtime.install(game, stage => { job.stage = stage; changed(); }); game.installed = true; job.status = 'complete'; job.stage = 'Installed'; }
+    try { await runtime.install(game, stage => { job.stage = stage; changed(); }); game[runtime.native ? 'nativeInstalled' : 'installed'] = true; job.status = 'complete'; job.stage = 'Installed'; }
     catch (error) { job.status = 'failed'; job.error = message(error); console.warn(`Install of ${job.name} failed at ${job.stage}: ${job.error}`); throw error; }
     finally { await persist(); }
   }),
@@ -206,14 +209,17 @@ const methods = {
   play: async (id, mode = 'vr') => {
     if (mode !== 'vr' && mode !== 'pc') throw new Error('Invalid play mode.');
     const game = getGame(id); if (busy) throw new Error('Wait for installation to finish.');
-    if (!game.installed) throw new Error('Install the game first.');
+    if (!(runtime.native ? game.nativeInstalled : game.installed)) throw new Error('Install the game first.');
     if (runtime.child) throw new Error('A game is already running.');
     // Start and prepare Android here (not in the session script) so the Refract runtime is current.
     starting = { gameId: id, stage: mode === 'vr' ? 'Checking VR headset' : 'Starting Android' }; changed();
     try {
-      if (mode === 'vr') await runtime.checkHeadset();
-      starting = { gameId: id, stage: 'Starting Android' }; changed();
-      await exclusive(() => runtime.ensure(stage => { starting = { gameId: id, stage }; changed(); }));
+      // Refract Native has no Android to start (and no headset path yet).
+      if (!runtime.native) {
+        if (mode === 'vr') await runtime.checkHeadset();
+        starting = { gameId: id, stage: 'Starting Android' }; changed();
+        await exclusive(() => runtime.ensure(stage => { starting = { gameId: id, stage }; changed(); }));
+      }
     }
     finally { starting = null; changed(); }
     runtime.launch(game, async (code, tail) => {
@@ -289,7 +295,7 @@ const methods = {
   },
   settings: async values => {
     const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'cores', 'showWindow', 'audio', 'hostMic', 'keepEmulator', 'userId',
-      'pcEyeSize', 'vrRenderScale'];
+      'pcEyeSize', 'vrRenderScale', 'backend', 'setupDone'];
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
     if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
     const settings = { ...state.data.settings };
@@ -303,7 +309,10 @@ const methods = {
     if (!validUserId(settings.userId)) throw new Error('The user ID must be a whole number from 1 to 9223372036854775807.');
     if (!validEyeSize(settings.pcEyeSize) || !validRenderScale(settings.vrRenderScale))
       throw new Error('Check the resolution: PC eye size 512 to 4096 (a multiple of 8), VR render scale 25 to 200%.');
+    if (!backends.includes(settings.backend) || typeof settings.setupDone !== 'boolean') throw new Error('Choose how Refract should run games.');
+    const switched = settings.backend !== state.data.settings.backend;
     state.data.settings = settings; runtime.settings = settings; await persist();
+    if (switched) await syncInstalled().catch(() => {});
   },
   // The shell opens these after validating them.
   openFolder: async id => { const game = getGame(id); const target = game.apk ? path.dirname(game.apk) : state.data.settings.downloadDir; await fs.mkdir(target, { recursive: true }); return { openPath: target }; },
@@ -427,7 +436,9 @@ const loaded = (async () => {
   state = new State(dataDirectory); await state.load();
   // Digitalis (the ARM64 translator Refract needs) is built for Android 16, so the default AVD is API 36.
   state.data.settings = { avd: 'refract-google-api36', port: 5580, memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'),
-    cores: 6, showWindow: false, audio: 'dsound', hostMic: true, keepEmulator: false, pcEyeSize: 1600, vrRenderScale: 100, ...state.data.settings };
+    cores: 6, showWindow: false, audio: 'dsound', hostMic: true, keepEmulator: false, pcEyeSize: 1600, vrRenderScale: 100,
+    // First run shows the setup wizard, which asks which runtime to use (Settings > Runtime changes it later).
+    backend: 'emulator', setupDone: false, ...state.data.settings };
   // A saved SDK path that has no SDK in it came from an earlier default; look for the real one.
   if (!await isSdk(state.data.settings.sdk)) state.data.settings.sdk = await findSdk();
   // Refract no longer needs games patched; drop the old ovrport setting.

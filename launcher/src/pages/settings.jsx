@@ -2,6 +2,7 @@ import { Cpu, RefreshCw } from 'lucide-react';
 import { call } from '../api';
 import { SetupPanel } from '../components/setup';
 import { useSettingsForm } from '../components/settings-form';
+import { RuntimeChoice } from '../components/runtime-choice';
 
 // A random id in the range the backend picks from (core/runtime.mjs newUserId): 16-17 digits, below 2^53.
 function newUserId() {
@@ -21,6 +22,11 @@ export function SettingsPage({ state, run, pending, notify, connect, setPage }) 
   return <div className="page">
     <header className="page-head"><div><h1 className="page-title">Settings</h1></div></header>
     <form id="settings-form" className="settings" onSubmit={save}>
+      <section className="panel">
+        <h2>Runtime</h2>
+        <p>How Refract runs games. Games are installed separately for each runtime, so switching shows the games installed for that one.</p>
+        <RuntimeChoice value={draft.backend} onChange={value => edit('backend', value)} />
+      </section>
       <SetupPanel state={state} run={run} pending={pending} notify={notify} />
       <section className="panel">
         <div className="panel-row">
@@ -66,12 +72,12 @@ export function SettingsPage({ state, run, pending, notify, connect, setPage }) 
         <p>Where APK and expansion files are saved. Five GB stays free so Android can still boot.</p>
         {field('downloadDir', 'Download folder', { required: true }, true)}
       </section>
-      <section className="panel">
+      {draft.backend !== 'native' && <section className="panel">
         <div className="panel-row">
           <div><h2>Android runtime</h2><p style={{ margin: '3px 0 0', color: 'var(--muted)' }}>The virtual device, memory, CPU cores and audio are on the Emulator page, with its logs and debug tools.</p></div>
           <button type="button" className="btn btn-outline" onClick={() => setPage('emulator')}><Cpu />Open Emulator</button>
         </div>
-      </section>
+      </section>}
       {saveBar}
     </form>
   </div>;
