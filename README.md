@@ -87,13 +87,15 @@ It has since grown well beyond it: Refract adds its own Windows launcher, the Vu
 layers, the translator performance work, the Platform SDK stand-in and much more. See
 [CREDITS.md](CREDITS.md).
 
-**Using Refract code requires visible credit.** If you use, modify or redistribute Refract code,
-you must credit Refract and link to <https://github.com/MIXIDtheSilly/Refract> somewhere users
-can see it (a README, an About or credits page, or release notes). See [LICENSE](LICENSE) for
-the exact wording.
+Refract is licensed under the **GNU General Public License v3.0 or later** ([LICENSE](LICENSE)),
+with one additional term for visible credit ([NOTICE](NOTICE)):
 
-Refract is free for **non-commercial use only**. You may not sell it or use it in a paid product,
-a paid service or for-profit business operations. For commercial use, ask first (see
-[LICENSE](LICENSE)). This applies to code written for Refract. Code that still comes from AXRB
-stays MIT, and its copyright notice is kept in [LICENSE](LICENSE). The launcher
-([launcher/](launcher/)) is GPL-3.0-or-later because it includes code adapted from RiftLift.
+- **Projects built on Refract must stay open source.** If you distribute Refract, a modified
+  version or a project that includes Refract code, you must release its full source code under
+  GPL-3.0-or-later as well.
+- **Using Refract code requires visible credit.** You must credit Refract and link to
+  <https://github.com/MIXIDtheSilly/Refract> where users can see it (a README, an About or
+  credits page, or release notes). See [NOTICE](NOTICE) for the exact wording.
+
+Code that still comes from AXRB was released under the MIT License; its copyright notice is kept
+in [NOTICE](NOTICE).

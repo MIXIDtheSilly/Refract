@@ -1,0 +1,76 @@
+Refract
+Copyright (C) 2026 Refract contributors
+https://github.com/MIXIDtheSilly/Refract
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version, together with the additional term below.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program (see LICENSE). If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+Additional term: visible credit (GNU GPL version 3, Section 7(b))
+
+As permitted by Section 7(b) of the GNU General Public License version 3, the
+following author attribution must be preserved by anyone who conveys Refract, a
+modified version of it, or a work that contains Refract code, in source or
+object form:
+
+    Based on Refract: https://github.com/MIXIDtheSilly/Refract
+
+The attribution must name "Refract", link to the address above, and appear
+where users will see it:
+
+  - in the work's Appropriate Legal Notices (as defined in Section 0 of the
+    GPL), if it displays any, such as an About or credits screen; and
+  - in the work's user-facing documentation, such as its README, a credits
+    page or its release notes.
+
+Keeping the attribution only in source files does not meet this term.
+
+This term covers the code written for Refract. It does not apply to the AXRB
+code, the code adapted from RiftLift or the other third-party components
+listed below, which keep their own notices.
+
+---
+
+Other code
+
+Refract started as a fork of AXRB. The code that still comes from AXRB was
+released under the MIT License, and its copyright notice and license text must
+be kept:
+
+  MIT License
+
+  Copyright (c) 2026 Feline Reintgen (AXRB)
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+launcher/core/meta.mjs includes code adapted from RiftLift (GPL-3.0-or-later).
+See launcher/THIRD_PARTY_NOTICES.md.
+
+prebuilts/digitalis/ and other third-party components keep their own licenses;
+see CREDITS.md and the notices in those folders.
