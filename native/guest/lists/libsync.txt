@@ -1,0 +1,11 @@
+# Exports of the firmware's libsync.so (tools/gen_lists.py).
+sw_sync_fence_create
+sw_sync_timeline_create
+sw_sync_timeline_inc
+sync_fence_info
+sync_fence_info_free
+sync_file_info
+sync_file_info_free
+sync_merge
+sync_pt_info
+sync_wait

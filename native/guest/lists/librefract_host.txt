@@ -1,0 +1,6 @@
+# Host interface for the guest launcher (src/host_runtime.cpp).
+refract_host_init
+refract_host_run
+refract_host_service_wait
+refract_host_adopt_ready
+refract_host_log

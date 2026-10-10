@@ -1,0 +1,15 @@
+# Exports of the firmware's libamidi.so (tools/gen_lists.py).
+AMidiDevice_fromJava@LIBAMIDI
+AMidiDevice_getDefaultProtocol@LIBAMIDI
+AMidiDevice_getNumInputPorts@LIBAMIDI
+AMidiDevice_getNumOutputPorts@LIBAMIDI
+AMidiDevice_getType@LIBAMIDI
+AMidiDevice_release@LIBAMIDI
+AMidiInputPort_close@LIBAMIDI
+AMidiInputPort_open@LIBAMIDI
+AMidiInputPort_send@LIBAMIDI
+AMidiInputPort_sendFlush@LIBAMIDI
+AMidiInputPort_sendWithTimestamp@LIBAMIDI
+AMidiOutputPort_close@LIBAMIDI
+AMidiOutputPort_open@LIBAMIDI
+AMidiOutputPort_receive@LIBAMIDI
