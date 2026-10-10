@@ -55,7 +55,10 @@ void StartHostProfiler(const std::string& filter) {
         names.push_back(filter.substr(at, comma - at));
         at = comma + 1;
     }
-    std::thread([names, filter] {
+    // REFRACT_PROFILE_SECS: report window (default 20 s).
+    const char* secs = getenv("REFRACT_PROFILE_SECS");
+    DWORD window = std::max(1, secs ? atoi(secs) : 20) * 1000;
+    std::thread([names, filter, window] {
         SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
         SymInitialize(GetCurrentProcess(), nullptr, TRUE);
         std::unordered_map<u64, std::string> cache;
@@ -87,7 +90,7 @@ void StartHostProfiler(const std::string& filter) {
                 if (ok)
                     ++samples[name][Describe(ctx.Rip, cache)];
             }
-            if (GetTickCount() - start < 20000)
+            if (GetTickCount() - start < window)
                 continue;
             start = GetTickCount();
             Log("--- host profile ('%s') ---", filter.c_str());

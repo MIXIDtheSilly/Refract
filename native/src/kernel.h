@@ -43,6 +43,10 @@ struct GuestThread {
     std::atomic<bool> sample_req{false};
     std::atomic<bool> profile_req{false};
     std::atomic<int> in_syscall{-1};
+    // Futex statistics for the REFRACT_PROFILE report: waits, time blocked, waits ended by a
+    // wake, summed wake-call-to-running latency, waits satisfied while spinning.
+    std::atomic<u64> fx_waits{0}, fx_blocked_ns{0}, fx_woken{0}, fx_wake_ns{0}, fx_spun{0};
+    std::atomic<u64> fx_ecore{0};  // waits that ended on a low-efficiency-class (E) core
 
     // True when an unblocked signal is pending (interrupts blocking syscalls).
     bool SignalPending() const { return (pending.load() & ~sigmask.load()) != 0; }

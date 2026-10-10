@@ -84,10 +84,49 @@ struct FutexWaiter {
     u64 addr;
     u32 bitset;
     GuestThread* t;
-    bool woken;
+    std::atomic<bool> woken{false};
+    std::atomic<bool> sleeping{false};  // false while spinning: the waker can skip SetEvent
+    u64 wake_ns = 0;                    // when the waker woke it (wake latency statistics)
 };
+// REFRACT_FUTEX_SPIN: microseconds a waiter polls for its wake before blocking (0 = off).
+// Unity hands work between its main and job threads through futexes many times per frame, and
+// a Win32 event wake costs a context switch each time. REFRACT_FUTEX_SPIN_AB=1 makes the
+// profiler toggle it every report window for an A/B comparison.
+const u64 g_futex_spin_cfg = [] {
+    const char* v = getenv("REFRACT_FUTEX_SPIN");
+    return static_cast<u64>(v ? atoi(v) : 0) * 1000;
+}();
+std::atomic<u64> g_futex_spin_ns{g_futex_spin_cfg};
+
+// Logical processors that are E-cores (efficiency class below the highest) on hybrid CPUs.
+bool OnEfficiencyCore() {
+    static const std::vector<bool> ecore = [] {
+        std::vector<bool> v;
+        ULONG len = 0;
+        GetSystemCpuSetInformation(nullptr, 0, &len, GetCurrentProcess(), 0);
+        std::vector<char> buf(len);
+        auto* info = reinterpret_cast<SYSTEM_CPU_SET_INFORMATION*>(buf.data());
+        if (!len || !GetSystemCpuSetInformation(info, len, &len, GetCurrentProcess(), 0))
+            return v;
+        BYTE top = 0;
+        for (ULONG at = 0; at < len; at += reinterpret_cast<SYSTEM_CPU_SET_INFORMATION*>(buf.data() + at)->Size)
+            top = std::max(top, reinterpret_cast<SYSTEM_CPU_SET_INFORMATION*>(buf.data() + at)->CpuSet.EfficiencyClass);
+        for (ULONG at = 0; at < len; at += reinterpret_cast<SYSTEM_CPU_SET_INFORMATION*>(buf.data() + at)->Size) {
+            auto& cs = reinterpret_cast<SYSTEM_CPU_SET_INFORMATION*>(buf.data() + at)->CpuSet;
+            if (cs.Group != 0)
+                continue;
+            if (v.size() <= cs.LogicalProcessorIndex)
+                v.resize(cs.LogicalProcessorIndex + 1);
+            v[cs.LogicalProcessorIndex] = cs.EfficiencyClass < top;
+        }
+        return v;
+    }();
+    DWORD cpu = GetCurrentProcessorNumber();
+    return cpu < ecore.size() && ecore[cpu];
+}
 std::mutex g_futex_mu;
 std::map<u64, std::deque<FutexWaiter*>> g_futex_queues;
+std::atomic<u64> g_futex_timed{0}, g_futex_short{0};  // timed waits; those under 2 ms (profile report)
 
 void RemoveWaiterLocked(FutexWaiter* w) {
     auto it = g_futex_queues.find(w->addr);
@@ -114,8 +153,10 @@ int WakeLocked(u64 uaddr, int n, u32 bitset) {
         FutexWaiter* w = *qi;
         if (w->bitset & bitset) {
             qi = q.erase(qi);
+            w->wake_ns = MonotonicNs();
             w->woken = true;
-            SetEvent(w->t->wake_event);
+            if (w->sleeping)
+                SetEvent(w->t->wake_event);
             ++woke;
         } else {
             ++qi;
@@ -138,22 +179,64 @@ s64 FutexWait(GuestThread* t, u64 uaddr, u32 val, u32 bitset, s64 deadline_ns, b
         return -EFAULT_;
     if (cur != val)
         return -EAGAIN_;
-    FutexWaiter w{uaddr, bitset, t, false};
+    FutexWaiter w;
+    w.addr = uaddr;
+    w.bitset = bitset;
+    w.t = t;
+    const u64 spin_ns = g_futex_spin_ns;
+    w.sleeping = spin_ns == 0;
     g_futex_queues[uaddr].push_back(&w);
     lk.unlock();
-    for (;;) {
-        DWORD ms = INFINITE;
-        if (deadline_ns >= 0) {
-            u64 now = realtime ? RealtimeNs() : MonotonicNs();
-            if (now >= static_cast<u64>(deadline_ns))
-                ms = 0;
-            else
-                ms = static_cast<DWORD>((static_cast<u64>(deadline_ns) - now + 999999) / 1000000);
+    const u64 start = MonotonicNs();
+    auto finish = [&](s64 r) {
+        u64 end = MonotonicNs();
+        ++t->fx_waits;
+        t->fx_blocked_ns += end - start;
+        if (OnEfficiencyCore())
+            ++t->fx_ecore;
+        if (r == 0) {
+            ++t->fx_woken;
+            t->fx_wake_ns += end > w.wake_ns ? end - w.wake_ns : 0;
         }
-        WaitForSingleObject(t->wake_event, ms);
+        return r;
+    };
+    if (!w.sleeping) {
+        u64 limit = start + spin_ns;
+        if (deadline_ns >= 0 && !realtime)
+            limit = std::min<u64>(limit, static_cast<u64>(deadline_ns));
+        while (!w.woken && !t->SignalPending() && MonotonicNs() < limit)
+            YieldProcessor();
+        if (w.woken) {
+            ++t->fx_spun;
+            lk.lock();  // the waker may still be inside WakeLocked
+            return finish(0);
+        }
+        w.sleeping = true;  // a wake racing with this store may also SetEvent: a spurious wakeup
+    }
+    for (;;) {
+        if (w.woken)
+            break;
+        if (deadline_ns >= 0) {
+            // Timed waits use the high-resolution timer: a millisecond WaitForSingleObject timeout
+            // turns the sub-millisecond waits of Unity's job system into 1-2 ms stalls.
+            u64 now = realtime ? RealtimeNs() : MonotonicNs();
+            if (now < static_cast<u64>(deadline_ns)) {
+                ++g_futex_timed;
+                if (static_cast<u64>(deadline_ns) - now < 2000000)
+                    ++g_futex_short;
+                LARGE_INTEGER due;
+                due.QuadPart = -static_cast<LONGLONG>((static_cast<u64>(deadline_ns) - now + 99) / 100);
+                SetWaitableTimer(t->sleep_timer, &due, 0, nullptr, nullptr, FALSE);
+                HANDLE hs[2] = {t->wake_event, t->sleep_timer};
+                WaitForMultipleObjects(2, hs, FALSE, INFINITE);
+                CancelWaitableTimer(t->sleep_timer);
+            }
+        } else {
+            WaitForSingleObject(t->wake_event, INFINITE);
+        }
         lk.lock();
         if (w.woken)
-            return 0;
+            return finish(0);
         bool timed_out = false;
         if (deadline_ns >= 0) {
             u64 now = realtime ? RealtimeNs() : MonotonicNs();
@@ -161,10 +244,12 @@ s64 FutexWait(GuestThread* t, u64 uaddr, u32 val, u32 bitset, s64 deadline_ns, b
         }
         if (timed_out || t->SignalPending()) {
             RemoveWaiterLocked(&w);
-            return timed_out ? -ETIMEDOUT_ : -EINTR_;
+            return finish(timed_out ? -ETIMEDOUT_ : -EINTR_);
         }
         lk.unlock();
     }
+    lk.lock();
+    return finish(0);
 }
 
 s64 FutexWake(u64 uaddr, int n, u32 bitset) {
@@ -422,7 +507,10 @@ void StartProfiler(const std::string& filter) {
         names.push_back(filter.substr(at, comma - at));
         at = comma + 1;
     }
-    std::thread([filter, names] {
+    // REFRACT_PROFILE_SECS: report window (default 30 s).
+    const char* secs = getenv("REFRACT_PROFILE_SECS");
+    int ticks = std::max(1, (secs ? atoi(secs) : 30) * 20);
+    std::thread([filter, names, ticks] {
         for (int tick = 1;; ++tick) {
             Sleep(50);
             {
@@ -440,7 +528,7 @@ void StartProfiler(const std::string& filter) {
                     }
                 }
             }
-            if (tick % 600)
+            if (tick % ticks)
                 continue;
             std::vector<std::pair<int, std::string>> top;
             int total;
@@ -453,7 +541,8 @@ void StartProfiler(const std::string& filter) {
                 g_profile_total = 0;
             }
             std::sort(top.rbegin(), top.rend());
-            Log("--- profile (%d samples, '%s') ---", total, filter.c_str());
+            Log("--- profile (%d samples, '%s'; futex timed waits %llu, %llu under 2 ms) ---", total,
+                filter.c_str(), g_futex_timed.exchange(0), g_futex_short.exchange(0));
             // Per thread: samples, share blocked in syscalls, hottest leaf (pc < caller) pairs.
             struct ThreadStats {
                 int samples = 0, blocked = 0;
@@ -483,6 +572,34 @@ void StartProfiler(const std::string& filter) {
             }
             for (size_t i = 0; i < top.size() && i < 25; ++i)
                 Log("%5.1f%% %s", 100.0 * top[i].first / std::max(1, total), top[i].second.c_str());
+            // Futex waits per thread over the window (all threads), busiest first.
+            struct FutexStats {
+                u64 waits, blocked_ns, woken, wake_ns, spun, ecore;
+                std::string name;
+            };
+            std::vector<FutexStats> fx;
+            {
+                std::lock_guard lock(Proc().threads_mu);
+                for (auto& [tid, t] : Proc().threads)
+                    if (u64 n = t->fx_waits.exchange(0))
+                        fx.push_back({n, t->fx_blocked_ns.exchange(0), t->fx_woken.exchange(0),
+                                      t->fx_wake_ns.exchange(0), t->fx_spun.exchange(0), t->fx_ecore.exchange(0), t->name});
+            }
+            std::sort(fx.begin(), fx.end(), [](auto& a, auto& b) { return a.waits > b.waits; });
+            const double secs = ticks / 20.0;
+            static const bool ab = getenv("REFRACT_FUTEX_SPIN_AB") != nullptr;
+            Log("  futex spin this window: %llu us", g_futex_spin_ns.load() / 1000);
+            if (ab) {
+                g_futex_spin_ns = g_futex_spin_ns ? 0 : g_futex_spin_cfg;
+                Log("  futex spin now %llu us", g_futex_spin_ns.load() / 1000);
+            }
+            for (size_t i = 0; i < fx.size() && i < 12; ++i)
+                Log("  futex %-16s %7.0f waits/s, blocked %4.0f%%, avg wait %6.1f us, woken %3.0f%% "
+                    "(avg wake latency %5.1f us), spun %3.0f%%, on E-cores %3.0f%%",
+                    fx[i].name.c_str(), fx[i].waits / secs, fx[i].blocked_ns / (secs * 1e7),
+                    fx[i].blocked_ns / 1e3 / fx[i].waits, 100.0 * fx[i].woken / fx[i].waits,
+                    fx[i].woken ? fx[i].wake_ns / 1e3 / fx[i].woken : 0.0,
+                    100.0 * fx[i].spun / fx[i].waits, 100.0 * fx[i].ecore / fx[i].waits);
         }
     }).detach();
 }
