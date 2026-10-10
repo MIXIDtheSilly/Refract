@@ -3,6 +3,8 @@
 // firmware's build.prop files plus Refract's settings.
 #include "properties.h"
 
+#include <windows.h>
+
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -113,6 +115,33 @@ void LoadPropFile(const std::filesystem::path& path, std::map<std::string, std::
     }
 }
 
+// Non-comment, trimmed lines of a text file.
+std::vector<std::string> ConfigLines(const std::filesystem::path& path) {
+    std::vector<std::string> out;
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t b = line.find_first_not_of(" \t\r");
+        const size_t e = line.find_last_not_of(" \t\r");
+        if (b != std::string::npos && line[b] != '#')
+            out.push_back(line.substr(b, e - b + 1));
+    }
+    return out;
+}
+
+// The Meta Platform SDK stand-in's settings, as scripts/launch.ps1 sets them on the emulator: games
+// listed in scripts/owned_games.txt are entitled, scripts/platform_user_id.txt sets the user id.
+void LoadPlatformSettings(std::map<std::string, std::string>& props) {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const auto scripts = std::filesystem::path(exe).parent_path().parent_path() / L"scripts";
+    for (const std::string& game : ConfigLines(scripts / L"owned_games.txt"))
+        props.emplace("debug.refract.platform.owned." + game, "1");
+    const auto ids = ConfigLines(scripts / L"platform_user_id.txt");
+    if (!ids.empty())
+        props.emplace("debug.refract.platform.user_id", ids[0]);
+}
+
 }  // namespace
 
 void SetupSystemProperties(const std::wstring& sysroot, const std::wstring& data_dir,
@@ -132,6 +161,7 @@ void SetupSystemProperties(const std::wstring& sysroot, const std::wstring& data
     props.emplace("debug.refract.stream_eyes", "2");
     props.emplace("debug.refract.direct_host", "0");
     props.emplace("debug.refract.platform.verbose", "0");
+    LoadPlatformSettings(props);
     props.emplace("ro.build.version.sdk", "32");
     props.emplace("ro.build.version.release", "12");
     props.emplace("ro.product.manufacturer", "Oculus");

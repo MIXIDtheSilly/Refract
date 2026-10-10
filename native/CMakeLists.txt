@@ -73,6 +73,8 @@ add_executable(refract_native
   src/inet.cpp
   src/trace.cpp
   src/android_hle.cpp
+  src/audio_hle.cpp
+  src/sqlite_jni.cpp
   src/jni_bridge.cpp
   src/host_runtime.cpp
   src/native_entry.asm
@@ -81,7 +83,7 @@ target_compile_definitions(refract_native PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _
 target_include_directories(refract_native PRIVATE src
   "${REFRACT_EXTERNAL_SRC}/Vulkan-Headers/include"
   "${REFRACT_JDK}/include" "${REFRACT_JDK}/include/win32")
-target_link_libraries(refract_native PRIVATE dynarmic astcdec winmm bcrypt dbghelp ws2_32)
+target_link_libraries(refract_native PRIVATE dynarmic astcdec winmm bcrypt dbghelp ws2_32 ole32)
 if(MSVC)
   target_compile_options(refract_native PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W3 /utf-8 /permissive- /bigobj>)
   target_link_options(refract_native PRIVATE /STACK:8388608)

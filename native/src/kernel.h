@@ -57,6 +57,7 @@ struct Process {
     std::string exe_path;   // guest path of the main executable
     std::string cmdline;    // NUL separated
     std::string package;    // Android package name (for /proc/self/cmdline)
+    u64 start_stack = 0;    // main thread's initial SP (/proc/self/stat startstack)
     int ncpus = 8;
 
     std::mutex threads_mu;

@@ -38,9 +38,11 @@ std::string ThreadName(int tid) {
 
 std::string StatLine(int tid, const std::string& comm) {
     u64 start_ticks = 100;
+    // startstack (field 28): bionic's pthread_getattr_np finds the main stack's mapping with it.
     return Format("%d (%s) R 1 %d %d 0 -1 4194624 0 0 0 0 0 0 0 0 20 0 %zu 0 %llu 0 0 "
-                  "18446744073709551615 0 0 0 0 0 0 0 4612 1640 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-                  tid, comm.c_str(), Proc().pid, Proc().pid, Proc().threads.size(), start_ticks);
+                  "18446744073709551615 0 0 %llu 0 0 0 0 4612 1640 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+                  tid, comm.c_str(), Proc().pid, Proc().pid, Proc().threads.size(), start_ticks,
+                  static_cast<unsigned long long>(Proc().start_stack));
 }
 
 std::optional<std::string> ProcSelf(const std::string& rel) {
@@ -147,6 +149,19 @@ void SetupProcfs(const std::string& ld_config) {
         if (p == "/proc/loadavg")
             return std::string("1.00 1.00 1.00 2/500 4242\n");
         return std::nullopt;
+    });
+    fs.AddDirectories([](const std::string& p) {
+        auto rel = SelfRelative(p);
+        if (!rel)
+            return false;
+        if (rel->empty() || *rel == "task" || *rel == "fd")
+            return true;
+        // task/<tid>
+        if (rel->rfind("task/", 0) == 0 && rel->find('/', 5) == std::string::npos) {
+            const int tid = atoi(rel->c_str() + 5);
+            return tid == Proc().pid || !ThreadName(tid).empty();
+        }
+        return false;
     });
     fs.AddLinkResolver([](const std::string& p) -> std::optional<std::string> {
         auto rel = SelfRelative(p);

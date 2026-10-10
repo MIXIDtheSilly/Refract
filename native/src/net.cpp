@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <vector>
 
 #include "files.h"
@@ -599,6 +600,38 @@ s64 SysConnect(GuestThread* t, int fd, u64 addr, u32 len) {
     std::string path(reinterpret_cast<const char*>(sa.data() + 2), strnlen(reinterpret_cast<const char*>(sa.data() + 2), sa.size() - 2));
     if (path == "/dev/socket/logdw") {
         s->MakeLogd();
+        return 0;
+    }
+    if (path == "/dev/socket/dnsproxyd") {
+        // netd's DNS proxy: one NUL-terminated command per connection, answered from the host.
+        auto to_guest = std::make_shared<StreamBuf>();
+        auto from_guest = std::make_shared<StreamBuf>();
+        s->ConnectPair(to_guest, from_guest);
+        std::thread([to_guest, from_guest] {
+            std::string cmd;
+            for (u64 deadline = MonotonicNs() + 30000000000ull; MonotonicNs() < deadline;) {
+                {
+                    std::lock_guard lock(from_guest->mu);
+                    auto nul = std::find(from_guest->data.begin(), from_guest->data.end(), u8{0});
+                    if (nul != from_guest->data.end()) {
+                        cmd.assign(from_guest->data.begin(), nul);
+                        break;
+                    }
+                    if (from_guest->writer_closed)
+                        break;
+                }
+                Sleep(1);
+            }
+            if (!cmd.empty()) {
+                std::vector<u8> reply = DnsProxyReply(cmd);
+                StreamWrite(*to_guest, reply.data(), reply.size());
+            }
+            {
+                std::lock_guard lock(to_guest->mu);
+                to_guest->writer_closed = true;
+            }
+            IoNotify();
+        }).detach();
         return 0;
     }
     RN_INFO("connect(unix %s) refused", path.c_str());

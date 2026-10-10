@@ -447,12 +447,16 @@ private:
     s64 rcv_timeout_ms_ = 0, snd_timeout_ms_ = 0;
 };
 
-s64 InetSocketCreate(int domain, int type, int protocol) {
+bool WinsockStarted() {
     static const bool started = [] {
         WSADATA d;
         return WSAStartup(MAKEWORD(2, 2), &d) == 0;
     }();
-    if (!started)
+    return started;
+}
+
+s64 InetSocketCreate(int domain, int type, int protocol) {
+    if (!WinsockStarted())
         return -ENETDOWN_;
     const int base = type & 0xf;
     if (base != L_SOCK_STREAM && base != L_SOCK_DGRAM)
@@ -496,5 +500,101 @@ s64 InetGetsockopt(InetSocket* s, int level, int name, u64 val, u64 len_addr) {
     return s->GetOpt(level, name, val, len_addr);
 }
 s64 InetShutdown(InetSocket* s, int how) { return s->Shutdown(how); }
+
+std::vector<u8> DnsProxyReply(const std::string& command) {
+    // bionic's android_getaddrinfo_proxy reads "222\0" then, per result, BE32 1 + flags, family,
+    // socktype, protocol, addrlen, sockaddr, namelen, name; BE32 0 ends the list. Failure:
+    // a "401\0" code and the EAI_* error as a native int.
+    constexpr int kEaiAgain = 2, kEaiFail = 4, kEaiFamily = 5, kEaiNodata = 7, kEaiNoname = 8, kEaiService = 9;
+    std::vector<u8> out;
+    auto code = [&](const char* c) { out.insert(out.end(), c, c + 4); };
+    auto be32 = [&](u32 v) {
+        for (int s = 24; s >= 0; s -= 8)
+            out.push_back(static_cast<u8>(v >> s));
+    };
+    auto fail = [&](s32 eai) {
+        out.clear();
+        code("401");
+        out.insert(out.end(), reinterpret_cast<u8*>(&eai), reinterpret_cast<u8*>(&eai) + 4);
+        return out;
+    };
+    char host[1024] = {}, serv[256] = {};
+    int flags = -1, family = -1, socktype = -1, protocol = -1;
+    unsigned netid = 0;
+    if (sscanf(command.c_str(), "getaddrinfo %1023s %255s %d %d %d %d %u", host, serv, &flags, &family, &socktype,
+               &protocol, &netid) < 6) {
+        RN_INFO("dnsproxyd: unsupported command '%s'", command.c_str());
+        return fail(kEaiFail);
+    }
+    if (!WinsockStarted())
+        return fail(kEaiAgain);
+    ADDRINFOA hints{};
+    if (flags != -1) {
+        hints.ai_flags = (flags & 0x1 ? AI_PASSIVE : 0) | (flags & 0x2 ? AI_CANONNAME : 0) |
+                         (flags & 0x4 ? AI_NUMERICHOST : 0) | (flags & 0x400 ? AI_NUMERICSERV : 0);
+        hints.ai_family = family == L_AF_INET ? AF_INET : family == L_AF_INET6 ? AF_INET6 : AF_UNSPEC;
+        hints.ai_socktype = socktype > 0 ? socktype : 0;
+        hints.ai_protocol = protocol > 0 ? protocol : 0;
+    }
+    const char* h = strcmp(host, "^") ? host : nullptr;
+    const char* s = strcmp(serv, "^") ? serv : nullptr;
+    ADDRINFOA* res = nullptr;
+    int err = getaddrinfo(h, s, flags != -1 ? &hints : nullptr, &res);
+    if (err != 0) {
+        RN_INFO("dnsproxyd: getaddrinfo(%s, %s) failed: %d", host, serv, err);
+        switch (err) {
+        case WSATRY_AGAIN: return fail(kEaiAgain);
+        case WSANO_DATA: return fail(kEaiNodata);
+        case WSATYPE_NOT_FOUND: return fail(kEaiService);
+        case WSAEAFNOSUPPORT: return fail(kEaiFamily);
+        case WSAHOST_NOT_FOUND: return fail(kEaiNoname);
+        default: return fail(kEaiFail);
+        }
+    }
+    code("222");
+    int n = 0;
+    for (ADDRINFOA* ai = res; ai; ai = ai->ai_next) {
+        u8 sa[28] = {};
+        u32 sa_len;
+        if (ai->ai_family == AF_INET) {
+            auto* in = reinterpret_cast<sockaddr_in*>(ai->ai_addr);
+            u16 fam = L_AF_INET;
+            memcpy(sa, &fam, 2);
+            memcpy(sa + 2, &in->sin_port, 2);
+            memcpy(sa + 4, &in->sin_addr, 4);
+            sa_len = 16;
+        } else if (ai->ai_family == AF_INET6) {
+            auto* in6 = reinterpret_cast<sockaddr_in6*>(ai->ai_addr);
+            u16 fam = L_AF_INET6;
+            memcpy(sa, &fam, 2);
+            memcpy(sa + 2, &in6->sin6_port, 2);
+            memcpy(sa + 4, &in6->sin6_flowinfo, 4);
+            memcpy(sa + 8, &in6->sin6_addr, 16);
+            memcpy(sa + 24, &in6->sin6_scope_id, 4);
+            sa_len = 28;
+        } else {
+            continue;
+        }
+        be32(1);
+        be32(static_cast<u32>(flags != -1 ? flags : 0));
+        be32(ai->ai_family == AF_INET ? L_AF_INET : L_AF_INET6);
+        be32(static_cast<u32>(ai->ai_socktype));
+        be32(static_cast<u32>(ai->ai_protocol));
+        be32(sa_len);
+        out.insert(out.end(), sa, sa + sa_len);
+        if (ai->ai_canonname) {
+            u32 len = static_cast<u32>(strlen(ai->ai_canonname) + 1);
+            be32(len);
+            out.insert(out.end(), ai->ai_canonname, ai->ai_canonname + len);
+        } else {
+            be32(0);
+        }
+        ++n;
+    }
+    be32(0);
+    freeaddrinfo(res);
+    RN_INFO("dnsproxyd: %s -> %d addresses", host, n);
+    return out;
+}
 
 }  // namespace rn

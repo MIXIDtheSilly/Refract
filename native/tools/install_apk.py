@@ -43,8 +43,18 @@ def parse_value(raw: str) -> str:
     if re.match(r"^-?\d+\.\d+$", raw):
         return "float:" + raw
     if raw.startswith("@"):
-        return "int:" + raw[1:]
+        return "ref:" + raw[1:]  # resolved against resources.arsc at run time, as PackageParser does
     return "string:" + raw.strip('"')
+
+
+def meta_value(out: dict, el: dict) -> None:
+    """<meta-data>: android:resource is the resource id, android:value the (resolved) value."""
+    name = re.match(r'^"([^"]*)"', el["attrs"].get("name", ""))
+    name = name.group(1) if name else el["attrs"].get("name", "")
+    if "resource" in el["attrs"] and el["attrs"]["resource"].startswith("@"):
+        out[name] = "int:" + el["attrs"]["resource"][1:]
+    elif "value" in el["attrs"]:
+        out[name] = parse_value(el["attrs"]["value"])
 
 
 def manifest(aapt2: Path, apk: Path) -> dict:
@@ -94,9 +104,11 @@ def manifest(aapt2: Path, apk: Path) -> dict:
         cls = name_of(app_el)
         if cls:
             info["application"] = cls if not cls.startswith(".") else info["package"] + cls
+        if app_el["attrs"].get("theme", "").startswith("@"):
+            info["theme"] = app_el["attrs"]["theme"][1:]
         for c in app_el["children"]:
-            if c["tag"] == "meta-data" and "value" in c["attrs"]:
-                info["meta"][name_of(c)] = parse_value(c["attrs"]["value"])
+            if c["tag"] == "meta-data":
+                meta_value(info["meta"], c)
     launch = None
     for a in activities:
         for f in (c for c in a["children"] if c["tag"] == "intent-filter"):
@@ -108,9 +120,11 @@ def manifest(aapt2: Path, apk: Path) -> dict:
         if not info["activity"]:
             n = name_of(launch)
             info["activity"] = n if not n.startswith(".") else info["package"] + n
+        if launch["attrs"].get("theme", "").startswith("@"):
+            info["activity_theme"] = launch["attrs"]["theme"][1:]
         for c in launch["children"]:
-            if c["tag"] == "meta-data" and "value" in c["attrs"]:
-                info["activity_meta"][name_of(c)] = parse_value(c["attrs"]["value"])
+            if c["tag"] == "meta-data":
+                meta_value(info["activity_meta"], c)
     if not info["activity"]:
         sys.exit("no launchable activity found in the manifest")
     return info
@@ -126,6 +140,8 @@ def main() -> int:
     ap.add_argument("--runtime", type=Path,
                     default=REPO / "build-android-runtime-windows-arm64-v8a" / "systemdriver" / "package" / "lib" / "arm64-v8a",
                     help="Refract's ARM64 libopenxr_runtime.so + librefract_driver.so (android-runtime-apk/build_apk.ps1 -Abi arm64-v8a)")
+    ap.add_argument("--platform", type=Path, default=REPO / "build-platform-sdk" / "package" / "lib" / "arm64-v8a",
+                    help="Refract's Meta Platform SDK stand-in, librefract_ovrplatform.so (platform-sdk/build_apk.ps1)")
     args = ap.parse_args()
     apk = args.apk.resolve()
 
@@ -153,6 +169,12 @@ def main() -> int:
                 sys.exit(f"{args.runtime / name} missing: run android-runtime-apk/build_apk.ps1 -Abi arm64-v8a")
             shutil.copy2(args.runtime / name, libdir / name)
         print("  Refract OpenXR runtime (com.oculus.systemdriver stand-in)")
+        # Refract's Meta Platform SDK stand-in (package com.oculus.horizon on the emulator): the game's
+        # libovrplatformloader.so loads its EntryPoint through createPackageContext, which is this app here.
+        if not (args.platform / "librefract_ovrplatform.so").exists():
+            sys.exit(f"{args.platform / 'librefract_ovrplatform.so'} missing: run platform-sdk/build_apk.ps1")
+        shutil.copy2(args.platform / "librefract_ovrplatform.so", libdir / "librefract_ovrplatform.so")
+        print("  Refract Platform SDK (com.oculus.horizon stand-in)")
         # Unity dlopen()s plugins by bare name ("OculusXRPlugin"); the same file under that name
         # lets the linker match it with the already loaded library (same inode).
         for so in sorted(libdir.glob("lib*.so")):
@@ -170,13 +192,13 @@ def main() -> int:
             jars.append(out)
         java = args.jdk / "bin" / "java.exe"
         shim = REPO / "build-native" / "java" / "refract-android.jar"
-        # DriverLoader joins the app's classes, so the app rewrite below sends its loadLibrary calls
-        # to the guest linker like the app's own.
-        driver_src = REPO / "android-runtime-apk" / "systemdriver" / "src"
+        # DriverLoader and the Platform SDK EntryPoint join the app's classes, so the app rewrite below
+        # sends their loadLibrary calls to the guest linker like the app's own.
+        driver_src = [REPO / "android-runtime-apk" / "systemdriver" / "src", REPO / "platform-sdk" / "apk" / "src"]
         driver_classes = tmp / "systemdriver"
         subprocess.run([str(args.jdk / "bin" / "javac.exe"), "-nowarn", "--release", "21", "-proc:none",
                         "-cp", str(shim), "-d", str(driver_classes)]
-                       + [str(p) for p in driver_src.rglob("*.java")], check=True)
+                       + [str(p) for d in driver_src for p in d.rglob("*.java")], check=True)
         driver_jar = tmp / "systemdriver.jar"
         with zipfile.ZipFile(driver_jar, "w") as dz:
             for p in driver_classes.rglob("*.class"):
@@ -207,6 +229,9 @@ def main() -> int:
     ]
     if info.get("application"):
         props.append(f"application={info['application']}")
+    for key in ("theme", "activity_theme"):
+        if info.get(key):
+            props.append(f"{key.replace('_', '.')}={info[key]}")
     props += [f"meta.{k}={v}" for k, v in sorted(info["meta"].items())]
     props += [f"activity.meta.{k}={v}" for k, v in sorted(info["activity_meta"].items())]
     (dest / "app.properties").write_text("\n".join(props) + "\n", encoding="utf-8")

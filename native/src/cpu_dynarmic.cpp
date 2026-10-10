@@ -1,6 +1,7 @@
 // CpuCore backed by Dynarmic's A64 JIT. Guest memory is identity mapped, so the
 // JIT uses fastmem with a zero base and the slow-path callbacks touch host memory
 // directly (guarded against faults).
+#include <string>
 #include <windows.h>
 
 #include <intrin.h>
@@ -121,14 +122,18 @@ public:
         c.dczid_el0 = 0x14;
         c.define_unpredictable_behaviour = true;
         c.code_cache_size = 128 * 1024 * 1024;
-        // Exact ARM NaN/FMA/FPCR emulation costs a lot in float-heavy game code;
-        // REFRACT_JIT_ACCURATE=1 keeps it.
-        static const bool accurate = getenv("REFRACT_JIT_ACCURATE") && *getenv("REFRACT_JIT_ACCURATE") == '1';
-        if (!accurate) {
-            c.unsafe_optimizations = true;
-            c.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP | Dynarmic::OptimizationFlag::Unsafe_InaccurateNaN |
-                               Dynarmic::OptimizationFlag::Unsafe_IgnoreStandardFPCRValue | Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA;
-        }
+        // Exact ARM NaN/FMA/FPCR emulation costs some speed in float-heavy game code, but the
+        // unsafe FP flags made remote players' arms sink over time in Yeeps (2026-10-10), so FP is
+        // exact by default. REFRACT_JIT_FASTFP=all enables every unsafe FP flag, or a comma list of
+        // reduced,nan,fpcr,fma to bisect which one matters.
+        static const std::string fastfp = [] { const char* e = getenv("REFRACT_JIT_FASTFP"); return std::string(e ? e : ""); }();
+        auto fp_on = [&](const char* name) {
+            return fastfp == "all" || (!fastfp.empty() && (',' + fastfp + ',').find(std::string(",") + name + ",") != std::string::npos);
+        };
+        if (fp_on("reduced")) { c.unsafe_optimizations = true; c.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP; }
+        if (fp_on("nan"))     { c.unsafe_optimizations = true; c.optimizations |= Dynarmic::OptimizationFlag::Unsafe_InaccurateNaN; }
+        if (fp_on("fpcr"))    { c.unsafe_optimizations = true; c.optimizations |= Dynarmic::OptimizationFlag::Unsafe_IgnoreStandardFPCRValue; }
+        if (fp_on("fma"))     { c.unsafe_optimizations = true; c.optimizations |= Dynarmic::OptimizationFlag::Unsafe_UnfuseFMA; }
         // With the global monitor every STXR checks all other monitor slots inline (1023 of them
         // with CpuInit(1024)): kilobytes of code per guest atomic. Ignoring it, a store-exclusive
         // is a lock cmpxchg against the value its load-exclusive saw (ABA-tolerant, like the LSE

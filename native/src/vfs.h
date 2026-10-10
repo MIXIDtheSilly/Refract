@@ -32,6 +32,8 @@ public:
                       std::function<std::optional<std::string>(const std::string&)> gen);
     // Dynamic symlinks such as /proc/self/exe and /proc/self/fd/N.
     void AddLinkResolver(std::function<std::optional<std::string>(const std::string&)> fn);
+    // Directories a generator's tree has besides those implied by its files (e.g. /proc/self).
+    void AddDirectories(std::function<bool(const std::string&)> is_dir);
     void AddDevice(const std::string& path, std::function<FilePtr()> factory);
 
     // Makes `path` absolute against cwd (or the directory of dirfd) and removes
@@ -74,6 +76,7 @@ private:
                           std::function<std::optional<std::string>(const std::string&)>>>
         generators_;
     std::vector<std::function<std::optional<std::string>(const std::string&)>> link_resolvers_;
+    std::vector<std::function<bool(const std::string&)>> dir_predicates_;
     std::map<std::string, std::function<FilePtr()>> devices_;
     std::string cwd_ = "/";
 };

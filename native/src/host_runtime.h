@@ -31,6 +31,9 @@ bool LoadAppConfig(const std::wstring& app_dir);
 void RegisterHostRuntime();
 // The calling host thread's guest thread, adopting it if it has none.
 GuestThread* EnsureGuestThread();
+// The guest launcher's dlopen/dlsym, called on the calling thread (adopted if needed).
+u64 GuestDlopen(const std::string& path);
+u64 GuestDlsym(u64 handle, const char* name);
 // clone() on the service thread: hand the new thread to the adopting host thread.
 bool CompleteAdoption(u64 token, GuestThread* child);
 

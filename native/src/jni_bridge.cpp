@@ -257,8 +257,10 @@ std::string NameOf(jmethodID m) {
 enum CallKind { kVirtual, kNonvirtual, kStatic };
 enum CallForm { kVarargs, kVaList, kArray };
 
+void LogPendingException(const char* where);
+
 template <CallKind K, CallForm F, char R>
-void JniCall(GuestThread* t) {
+void JniCallInner(GuestThread* t) {
     ArgReader rd(t);
     rd.NextInt();  // guest JNIEnv*
     jobject obj = nullptr;
@@ -349,6 +351,15 @@ void JniCall(GuestThread* t) {
 #undef RN_CALL
 }
 
+// Java exceptions escaping a call from guest code usually explain what the guest does next
+// (C++ wrappers such as the OpenXR loader's turn them into C++ exceptions).
+template <CallKind K, CallForm F, char R>
+void JniCall(GuestThread* t) {
+    JniCallInner<K, F, R>(t);
+    if (g_verbose >= 1 && Env()->ExceptionCheck())
+        LogPendingException("Java exception in a guest JNI call");
+}
+
 template <CallForm F>
 void JniNewObject(GuestThread* t) {
     ArgReader rd(t);
@@ -395,7 +406,7 @@ jclass J_GetSuperclass(u64, jclass c) { return E->GetSuperclass(c); }
 jboolean J_IsAssignableFrom(u64, jclass a, jclass b) { return E->IsAssignableFrom(a, b); }
 jobject J_ToReflectedField(u64, jclass c, jfieldID f, jboolean s) { return E->ToReflectedField(c, f, s); }
 // Logs exceptions guest code throws (they usually explain a failed library load).
-void LogThrowable(jthrowable t) {
+void LogThrowable(jthrowable t, const char* what = "guest JNI Throw") {
     if (g_verbose < 1 || !t)
         return;
     jclass sw = E->FindClass("java/io/StringWriter"), pw = E->FindClass("java/io/PrintWriter");
@@ -407,9 +418,16 @@ void LogThrowable(jthrowable t) {
         E->ExceptionClear();
     if (s) {
         const char* c = E->GetStringUTFChars(s, nullptr);
-        Log("guest JNI Throw: %s", c);
+        Log("%s: %s", what, c);
         E->ReleaseStringUTFChars(s, c);
     }
+}
+void LogPendingException(const char* where) {
+    jthrowable ex = E->ExceptionOccurred();
+    E->ExceptionClear();
+    LogThrowable(ex, where);
+    E->Throw(ex);
+    E->DeleteLocalRef(ex);
 }
 jint J_Throw(u64, jthrowable t) {
     LogThrowable(t);

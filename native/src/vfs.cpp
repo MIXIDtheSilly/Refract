@@ -76,6 +76,11 @@ void Vfs::AddGenerator(const std::string& prefix,
     generators_.emplace_back(Normalize(prefix), std::move(gen));
 }
 
+void Vfs::AddDirectories(std::function<bool(const std::string&)> is_dir) {
+    std::lock_guard lock(mu_);
+    dir_predicates_.push_back(std::move(is_dir));
+}
+
 void Vfs::AddLinkResolver(std::function<std::optional<std::string>(const std::string&)> fn) {
     std::lock_guard lock(mu_);
     link_resolvers_.push_back(std::move(fn));
@@ -232,6 +237,17 @@ void Vfs::Classify(const std::string& p, Node* out) {
         if (gen && gen(p))
             return;
         out->kind = Node::None;
+        std::vector<std::function<bool(const std::string&)>> dirs;
+        {
+            std::lock_guard lock(mu_);
+            dirs = dir_predicates_;
+        }
+        for (const auto& is_dir : dirs) {
+            if (is_dir(p)) {
+                out->kind = Node::VirtualDir;
+                return;
+            }
+        }
     }
     if (auto mh = MountHost(p)) {
         DWORD attr = GetFileAttributesW(mh->first.c_str());

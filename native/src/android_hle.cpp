@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "files.h"
+#include "host_runtime.h"
 #include "jni_bridge.h"
 #include "net.h"
 #include "thunks.h"
@@ -305,9 +306,17 @@ void* A_ALooper_prepare(s32) {
         tls_looper = new HostLooper;
     return tls_looper;
 }
-void A_ALooper_acquire(HostLooper* l) { l->refs++; }
-void A_ALooper_release(HostLooper* l) { l->refs--; }
+void A_ALooper_acquire(HostLooper* l) {
+    if (l)
+        l->refs++;
+}
+void A_ALooper_release(HostLooper* l) {
+    if (l)
+        l->refs--;
+}
 void A_ALooper_wake(HostLooper* l) {
+    if (!l)
+        return;
     l->woken = true;
     IoNotify();
 }
@@ -510,13 +519,32 @@ void* NativeWindowHwnd(const void* window) {
     return w ? w->hwnd : nullptr;
 }
 
+// refract.app.NativeLooper: the main thread's Java Looper runs on its ALooper, as on
+// Android, so fds and choreographer callbacks native code adds to it get dispatched.
+jlong JNICALL N_looperPrepare(JNIEnv*, jclass) {
+    EnsureGuestThread();
+    return reinterpret_cast<jlong>(A_ALooper_prepare(0));
+}
+jint JNICALL N_looperPollOnce(JNIEnv*, jclass, jlong, jint timeout_ms) { return A_ALooper_pollOnce(timeout_ms, 0, 0, 0); }
+void JNICALL N_looperWake(JNIEnv*, jclass, jlong looper) { A_ALooper_wake(reinterpret_cast<HostLooper*>(looper)); }
+
 bool RegisterAndroidNatives(JNIEnv* env) {
     jclass c = env->FindClass("refract/view/NativeWindows");
     if (!c)
         return false;
     JNINativeMethod m{const_cast<char*>("createNativeWindow"), const_cast<char*>("(IILjava/lang/String;)J"),
                       reinterpret_cast<void*>(&N_createNativeWindow)};
-    return env->RegisterNatives(c, &m, 1) == JNI_OK;
+    if (env->RegisterNatives(c, &m, 1) != JNI_OK)
+        return false;
+    jclass l = env->FindClass("refract/app/NativeLooper");
+    if (!l)
+        return false;
+    JNINativeMethod lm[] = {
+        {const_cast<char*>("prepare"), const_cast<char*>("()J"), reinterpret_cast<void*>(&N_looperPrepare)},
+        {const_cast<char*>("pollOnce"), const_cast<char*>("(JI)I"), reinterpret_cast<void*>(&N_looperPollOnce)},
+        {const_cast<char*>("wake"), const_cast<char*>("(J)V"), reinterpret_cast<void*>(&N_looperWake)},
+    };
+    return env->RegisterNatives(l, lm, sizeof(lm) / sizeof(lm[0])) == JNI_OK;
 }
 
 void RegisterAndroidHle() {

@@ -23,6 +23,8 @@
 #include <mutex>
 
 #include "android_hle.h"
+#include "audio_hle.h"
+#include "sqlite_jni.h"
 #include "files.h"
 #include "jni_bridge.h"
 #include "linux_abi.h"
@@ -333,6 +335,8 @@ int H_run() {
         Fatal("refract.Runtime is missing from %s", Narrow(shim).c_str());
     if (!RegisterAndroidNatives(env))
         Fatal("refract.view.NativeWindows is missing from %s", Narrow(shim).c_str());
+    RegisterAudioNatives(env);
+    RegisterSqliteNatives(env);
 
     jclass launcher = env->FindClass("refract/Launcher");
     jmethodID main = launcher ? env->GetStaticMethodID(launcher, "main", "([Ljava/lang/String;)V") : nullptr;
@@ -437,6 +441,14 @@ GuestThread* EnsureGuestThread() {
     SetCurrentThread(child);
     RN_TRACE("adopted host thread %lu as guest thread %d", GetCurrentThreadId(), child->tid);
     return child;
+}
+
+u64 GuestDlopen(const std::string& path) {
+    return CallGuest(EnsureGuestThread(), g_helpers.dlopen, {reinterpret_cast<u64>(path.c_str()), 2 /*RTLD_NOW*/});
+}
+
+u64 GuestDlsym(u64 handle, const char* name) {
+    return CallGuest(EnsureGuestThread(), g_helpers.dlsym, {handle, reinterpret_cast<u64>(name)});
 }
 
 bool CompleteAdoption(u64 token, GuestThread* child) {

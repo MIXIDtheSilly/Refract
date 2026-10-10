@@ -23,6 +23,7 @@
 #include "thunks.h"
 #include "vulkan_hle.h"
 #include "android_hle.h"
+#include "audio_hle.h"
 #include "host_runtime.h"
 #include "jni_bridge.h"
 #include "trace.h"
@@ -264,6 +265,7 @@ int wmain(int argc, wchar_t** wargv) {
     InitThunks();
     RegisterVulkanHle();
     RegisterAndroidHle();
+    RegisterAudioHle();
     RegisterJniHle();
     RegisterHostRuntime();
 
@@ -353,6 +355,7 @@ int wmain(int argc, wchar_t** wargv) {
     const u64 hwcap = lx::HWCAP_FP_ | lx::HWCAP_ASIMD_ | lx::HWCAP_AES_ | lx::HWCAP_PMULL_ | lx::HWCAP_SHA1_ |
                       lx::HWCAP_SHA2_ | lx::HWCAP_CRC32_ | lx::HWCAP_ASIMDDP_;
     u64 sp = SetupInitialStack(guest_argv, envp, exe, has_interp ? &interp : nullptr, exe_path, hwcap, 0);
+    P.start_stack = sp;
 
     auto* main_thread = new GuestThread;
     main_thread->tid = P.pid;

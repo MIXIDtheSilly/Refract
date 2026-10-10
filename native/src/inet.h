@@ -1,6 +1,9 @@
 // AF_INET / AF_INET6 sockets, backed by Winsock.
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include "common.h"
 #include "files.h"
 
@@ -23,5 +26,9 @@ s64 InetRecvfrom(InetSocket* s, u64 buf, u64 len, int flags, u64 addr, u64 addrl
 s64 InetSetsockopt(InetSocket* s, int level, int name, u64 val, u32 len);
 s64 InetGetsockopt(InetSocket* s, int level, int name, u64 val, u64 len_addr);
 s64 InetShutdown(InetSocket* s, int how);
+
+// netd's /dev/socket/dnsproxyd: the reply to one command ("getaddrinfo host serv flags family
+// socktype protocol netid"), resolved with Winsock in bionic's wire format.
+std::vector<u8> DnsProxyReply(const std::string& command);
 
 }  // namespace rn
