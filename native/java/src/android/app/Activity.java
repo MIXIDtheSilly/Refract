@@ -16,6 +16,8 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
+import java.util.ArrayList;
+import java.util.function.Consumer;
 import refract.view.WindowImpl;
 
 // Implements Window.Callback and KeyEvent.Callback through the merged android.jar class
@@ -52,17 +54,41 @@ public class Activity extends android.view.ContextThemeWrapper {
         mWindow.setCallback((Window.Callback) (Object) this);
     }
 
-    protected void onCreate(Bundle savedInstanceState) {}
+    final ArrayList<Application.ActivityLifecycleCallbacks> mLifecycleCallbacks = new ArrayList<>();
+    FragmentManager mFragments;
+
+    public void registerActivityLifecycleCallbacks(Application.ActivityLifecycleCallbacks callback) {
+        synchronized (mLifecycleCallbacks) {
+            mLifecycleCallbacks.add(callback);
+        }
+    }
+    public void unregisterActivityLifecycleCallbacks(Application.ActivityLifecycleCallbacks callback) {
+        synchronized (mLifecycleCallbacks) {
+            mLifecycleCallbacks.remove(callback);
+        }
+    }
+    /** Runs f for the application's then the activity's lifecycle callbacks. */
+    void refractDispatch(Consumer<Application.ActivityLifecycleCallbacks> f) {
+        Application.ActivityLifecycleCallbacks[] own;
+        synchronized (mLifecycleCallbacks) {
+            own = mLifecycleCallbacks.toArray(new Application.ActivityLifecycleCallbacks[0]);
+        }
+        if (mApplication != null)
+            for (Application.ActivityLifecycleCallbacks c : mApplication.refractCallbacks()) f.accept(c);
+        for (Application.ActivityLifecycleCallbacks c : own) f.accept(c);
+    }
+
+    protected void onCreate(Bundle savedInstanceState) { refractDispatch(c -> c.onActivityCreated(this, savedInstanceState)); }
     protected void onPostCreate(Bundle savedInstanceState) {}
-    protected void onStart() {}
+    protected void onStart() { refractDispatch(c -> c.onActivityStarted(this)); }
     protected void onRestart() {}
-    protected void onResume() {}
+    protected void onResume() { refractDispatch(c -> c.onActivityResumed(this)); }
     protected void onPostResume() {}
-    protected void onPause() {}
-    protected void onStop() {}
-    protected void onDestroy() {}
+    protected void onPause() { refractDispatch(c -> c.onActivityPaused(this)); }
+    protected void onStop() { refractDispatch(c -> c.onActivityStopped(this)); }
+    protected void onDestroy() { refractDispatch(c -> c.onActivityDestroyed(this)); }
     protected void onNewIntent(Intent intent) {}
-    protected void onSaveInstanceState(Bundle outState) {}
+    protected void onSaveInstanceState(Bundle outState) { refractDispatch(c -> c.onActivitySaveInstanceState(this, outState)); }
     protected void onRestoreInstanceState(Bundle savedInstanceState) {}
     public void onWindowFocusChanged(boolean hasFocus) {}
     public void onAttachedToWindow() {}
@@ -110,7 +136,10 @@ public class Activity extends android.view.ContextThemeWrapper {
     public void setTitle(CharSequence title) {}
     public void setTitle(int titleId) {}
     public ActionBar getActionBar() { return null; }
-    public FragmentManager getFragmentManager() { return null; }
+    public FragmentManager getFragmentManager() {
+        if (mFragments == null) mFragments = new refract.app.FragmentManagerImpl();
+        return mFragments;
+    }
     public OnBackInvokedDispatcher getOnBackInvokedDispatcher() { return mBackDispatcher; }
 
     public final void runOnUiThread(Runnable action) {

@@ -36,3 +36,16 @@ libcore/util/
 android/view/InsetsFlags
 android/os/Parcel$SquashReadHelper
 android/app/WindowConfiguration
+com/android/internal/R$
+android/net/UriCodec
+android/content/pm/Signature
+android/content/pm/PackageManager$Flags
+android/content/pm/PackageManager$PackageInfoFlags
+android/content/pm/PackageManager$ApplicationInfoFlags
+android/content/pm/PackageManager$ComponentInfoFlags
+android/content/pm/PackageManager$ResolveInfoFlags
+org/json/
+android/database/
+!android/database/ContentObserver
+dalvik/system/CloseGuard
+dalvik/system/BlockGuard

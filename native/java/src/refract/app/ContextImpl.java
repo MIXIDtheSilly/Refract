@@ -101,7 +101,12 @@ public class ContextImpl extends Context {
     @Override public Resources getResources() { return Resources.getSystem(); }
     private Resources.Theme theme;
     @Override public synchronized Resources.Theme getTheme() {
-        if (theme == null) theme = Resources.getSystem().newTheme();
+        if (theme == null) {
+            theme = Resources.getSystem().newTheme();
+            int id = Manifest.theme(false);
+            if (id == 0) id = Resources.getSystem().getIdentifier("Theme.DeviceDefault", "style", "android");
+            if (id != 0) theme.applyStyle(id, true);
+        }
         return theme;
     }
     @Override public PackageManager getPackageManager() { return PackageManagerImpl.get(); }
@@ -112,7 +117,12 @@ public class ContextImpl extends Context {
         return h::post;
     }
     @Override public Context getApplicationContext() { return applicationContext != null ? applicationContext : this; }
-    @Override public ClassLoader getClassLoader() { return ContextImpl.class.getClassLoader(); }
+    private static ClassLoader classLoader;
+    @Override public synchronized ClassLoader getClassLoader() {
+        if (classLoader == null)
+            classLoader = new dalvik.system.PathClassLoader(Runtime.APK, Runtime.NATIVE_LIBRARY_DIR, ContextImpl.class.getClassLoader());
+        return classLoader;
+    }
     @Override public Display getDisplay() { return refract.view.WindowManagerImpl.get().getDefaultDisplay(); }
     @Override public Context createConfigurationContext(android.content.res.Configuration c) { return this; }
     @Override public Context createDisplayContext(Display d) { return this; }

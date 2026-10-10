@@ -19,6 +19,7 @@ public final class Looper {
     public static void prepareMainLooper() {
         prepare();
         main = current.get();
+        main.mQueue.mPtr = refract.app.NativeLooper.prepare();
     }
 
     public static Looper getMainLooper() { return main; }

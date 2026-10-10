@@ -9,6 +9,7 @@ final class SystemServices {
     static Object create(String name, Context ctx) {
         return switch (name) {
             case Context.WINDOW_SERVICE -> refract.view.WindowManagerImpl.get();
+            case Context.LAYOUT_INFLATER_SERVICE -> new refract.view.LayoutInflaterImpl(ctx);
             case Context.ACTIVITY_SERVICE -> new android.app.ActivityManager();
             case Context.AUDIO_SERVICE -> new android.media.AudioManager();
             case Context.POWER_SERVICE -> new android.os.PowerManager();
@@ -27,6 +28,7 @@ final class SystemServices {
             case Context.NOTIFICATION_SERVICE -> new android.app.NotificationManager();
             case Context.CAMERA_SERVICE -> new android.hardware.camera2.CameraManager();
             case Context.WIFI_SERVICE -> new android.net.wifi.WifiManager();
+            case Context.BIOMETRIC_SERVICE -> new android.hardware.biometrics.BiometricManager();
             default -> null;
         };
     }
@@ -35,6 +37,7 @@ final class SystemServices {
         String n = c.getName();
         return switch (n) {
             case "android.view.WindowManager" -> Context.WINDOW_SERVICE;
+            case "android.view.LayoutInflater" -> Context.LAYOUT_INFLATER_SERVICE;
             case "android.app.ActivityManager" -> Context.ACTIVITY_SERVICE;
             case "android.media.AudioManager" -> Context.AUDIO_SERVICE;
             case "android.os.PowerManager" -> Context.POWER_SERVICE;
@@ -48,6 +51,12 @@ final class SystemServices {
             case "android.content.ClipboardManager" -> Context.CLIPBOARD_SERVICE;
             case "android.os.storage.StorageManager" -> Context.STORAGE_SERVICE;
             case "android.os.BatteryManager" -> Context.BATTERY_SERVICE;
+            case "android.app.KeyguardManager" -> Context.KEYGUARD_SERVICE;
+            case "android.location.LocationManager" -> Context.LOCATION_SERVICE;
+            case "android.app.NotificationManager" -> Context.NOTIFICATION_SERVICE;
+            case "android.hardware.camera2.CameraManager" -> Context.CAMERA_SERVICE;
+            case "android.net.wifi.WifiManager" -> Context.WIFI_SERVICE;
+            case "android.hardware.biometrics.BiometricManager" -> Context.BIOMETRIC_SERVICE;
             default -> null;
         };
     }

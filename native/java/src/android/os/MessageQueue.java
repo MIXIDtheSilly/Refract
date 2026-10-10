@@ -15,6 +15,7 @@ public final class MessageQueue {
         int onFileDescriptorEvents(java.io.FileDescriptor fd, int events);
     }
 
+    long mPtr;  // the thread's ALooper (main thread), polled instead of wait(); 0 = none
     private Message head;
     private boolean quitting;
     private final ArrayList<IdleHandler> idle = new ArrayList<>();
@@ -34,6 +35,7 @@ public final class MessageQueue {
             p.next = msg;
         }
         notifyAll();
+        if (mPtr != 0) refract.app.NativeLooper.wake(mPtr);
         return true;
     }
 
@@ -63,17 +65,24 @@ public final class MessageQueue {
                     if (!keep) removeIdleHandler(h);
                 }
             }
+            long timeout;
             synchronized (this) {
                 long now = SystemClock.uptimeMillis();
                 if (head != null && head.when <= now) continue;
                 if (quitting) return null;
-                try {
-                    if (head == null) wait();
-                    else wait(Math.max(1, head.when - now));
-                } catch (InterruptedException e) {
-                    // keep looping
+                timeout = head == null ? -1 : Math.max(1, head.when - now);
+                if (mPtr == 0) {
+                    try {
+                        if (timeout < 0) wait();
+                        else wait(timeout);
+                    } catch (InterruptedException e) {
+                        // keep looping
+                    }
+                    continue;
                 }
             }
+            // Native looper: runs its fd/frame callbacks; enqueueMessage wakes it.
+            refract.app.NativeLooper.pollOnce(mPtr, (int) Math.min(timeout, Integer.MAX_VALUE));
         }
     }
 
@@ -81,6 +90,7 @@ public final class MessageQueue {
         quitting = true;
         if (!safe) head = null;
         notifyAll();
+        if (mPtr != 0) refract.app.NativeLooper.wake(mPtr);
     }
 
     synchronized boolean hasMessages(Handler h, int what, Object obj) {

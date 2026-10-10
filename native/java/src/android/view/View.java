@@ -100,6 +100,7 @@ public class View {
         if (changed && mObserver != null) mObserver.refractDispatchGlobalLayout();
     }
     protected void onLayout(boolean changed, int l, int t, int r, int b) {}
+    protected void onFinishInflate() {}
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {}
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {}
     public final void measure(int widthMeasureSpec, int heightMeasureSpec) { onMeasure(widthMeasureSpec, heightMeasureSpec); }
@@ -204,7 +205,7 @@ public class View {
     public void setAlpha(float alpha) {}
     public void setWillNotDraw(boolean willNotDraw) {}
     public Display getDisplay() { return refract.view.WindowManagerImpl.get().getDefaultDisplay(); }
-    public WindowInsets getRootWindowInsets() { return null; }
+    public WindowInsets getRootWindowInsets() { return mAttached ? WindowInsets.refractNone() : null; }
     public android.os.IBinder getWindowToken() { return null; }
     public android.content.res.Resources getResources() { return mContext.getResources(); }
 

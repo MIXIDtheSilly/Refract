@@ -115,6 +115,9 @@ public class ShimBuilder {
     // Methods of android.content.Context (name+descriptor), for ContextWrapper delegation.
     static final Set<String> contextMethods = new HashSet<>();
     static final ClassDesc CONTEXT = ClassDesc.ofInternalName("android/content/Context");
+    static final ClassDesc CONTEXT_SUPPORT = ClassDesc.ofInternalName("refract/app/ContextSupport");
+    static final Set<String> CONTEXT_FINALS = Set.of("getText", "getString", "getColor", "getDrawable",
+            "getColorStateList", "obtainStyledAttributes", "getSystemService");
 
     static void loadParameters(CodeBuilder cob, MethodTypeDesc t) {
         int slot = 1;
@@ -133,6 +136,7 @@ public class ShimBuilder {
         ClassModel cm = CF.parse(bytes);
         final boolean isInterface = cm.flags().has(AccessFlag.INTERFACE);
         final boolean isContextWrapper = cm.thisClass().asInternalName().equals("android/content/ContextWrapper");
+        final boolean isContext = cm.thisClass().asInternalName().equals("android/content/Context");
         boolean hasNoArgCtor = false;
         for (MethodModel m : cm.methods())
             if (m.methodName().stringValue().equals("<init>") && m.methodType().stringValue().equals("()V"))
@@ -185,6 +189,23 @@ public class ShimBuilder {
                         loadParameters(cob, mm.methodTypeSymbol());
                         cob.invokevirtual(CONTEXT, mm.methodName().stringValue(), mm.methodTypeSymbol());
                         returnValue(cob, mm.methodTypeSymbol());
+                    });
+                });
+                return;
+            }
+            if (ce instanceof MethodModel mm && isContext && mm.code().isPresent() && isStub(mm.code().get())
+                    && CONTEXT_FINALS.contains(mm.methodName().stringValue()) && mm.flags().has(AccessFlag.FINAL)) {
+                // Context's final helpers (obtainStyledAttributes, getString...): static
+                // refract.app.ContextSupport.<name>(Context, args...), as they can't be overridden.
+                clb.withMethod(mm.methodName(), mm.methodType(), mm.flags().flagsMask(), mb -> {
+                    for (MethodElement me : mm)
+                        if (!(me instanceof CodeModel)) mb.with(me);
+                    mb.withCode(cob -> {
+                        MethodTypeDesc t = mm.methodTypeSymbol();
+                        cob.aload(0);
+                        loadParameters(cob, t);
+                        cob.invokestatic(CONTEXT_SUPPORT, mm.methodName().stringValue(), t.insertParameterTypes(0, CONTEXT));
+                        returnValue(cob, t);
                     });
                 });
                 return;
@@ -337,7 +358,9 @@ public class ShimBuilder {
         return m.methodName().stringValue() + m.methodType().stringValue();
     }
 
-    static byte[] mergeClass(byte[] baseBytes, byte[] overlayBytes) {
+    /** Overlay class + the base's members it lacks. A stub base's static initializer is dropped: it
+     *  would overwrite the overlay's constants with the stub's nulls (seen through JNI/reflection). */
+    static byte[] mergeClass(byte[] baseBytes, byte[] overlayBytes, boolean baseIsReal) {
         ClassModel base = CF.parse(baseBytes);
         ClassModel over = CF.parse(overlayBytes);
         if (!base.superclass().map(c -> c.asInternalName()).equals(over.superclass().map(c -> c.asInternalName())))
@@ -354,7 +377,8 @@ public class ShimBuilder {
         boolean old = (baseBytes[7] & 0xff) == 49;
         return CF.transformClass(over, ClassTransform.endHandler(clb -> {
             for (MethodModel m : base.methods())
-                if (!overMethods.contains(key(m))) clb.with(m);
+                if (!overMethods.contains(key(m)) && (baseIsReal || !m.methodName().stringValue().equals("<clinit>")))
+                    clb.with(m);
             for (FieldModel f : base.fields())
                 if (!overFields.contains(f.fieldName().stringValue())) clb.with(f);
         }).andThen((clb, ce) -> {
@@ -394,6 +418,21 @@ public class ShimBuilder {
         return b;
     }
 
+    /** fixReal, plus stack maps for what must stay at version >= 50 (interfaces with default or static
+     *  methods), which dex2jar doesn't write. */
+    static byte[] fixRealFramed(byte[] b, String name) {
+        b = fixReal(b);
+        ClassModel cm = CF.parse(b);
+        if (cm.majorVersion() >= 50 && lacksStackMaps(cm)) {
+            try {
+                b = CF_GEN.transformClass(CF_GEN.parse(b), ClassTransform.transformingMethodBodies(FIX_INTERFACE_CALLS));
+            } catch (RuntimeException ex) {
+                System.err.println("warning: no stack maps for " + name + " (" + ex.getMessage() + ")");
+            }
+        }
+        return b;
+    }
+
     static void merge(Path baseJar, Path realJar, Path overlayDir, Path out) throws IOException {
         addHierarchy(overlayDir);
         addHierarchy(realJar);
@@ -426,11 +465,11 @@ public class ShimBuilder {
                 byte[] r = real.remove(e.getName());
                 if (r != null) {
                     b = r;
-                    b = fixReal(b);
+                    b = fixRealFramed(b, e.getName());
                 }
                 byte[] o = overlay.get(e.getName());
                 if (o != null) {
-                    b = mergeClass(b, o);
+                    b = mergeClass(b, o, r != null);
                     merged++;
                     done.add(e.getName());
                 }
@@ -440,10 +479,10 @@ public class ShimBuilder {
             }
             for (var re : real.entrySet()) {
                 // Firmware classes without an android.jar counterpart (internal helpers).
-                byte[] b = fixReal(re.getValue());
+                byte[] b = fixRealFramed(re.getValue(), re.getKey());
                 byte[] o = overlay.get(re.getKey());
                 if (o != null) {
-                    b = mergeClass(b, o);
+                    b = mergeClass(b, o, true);
                     merged++;
                     done.add(re.getKey());
                 }
@@ -714,6 +753,55 @@ public class ShimBuilder {
         }
     }
 
+    static int framed;
+    static final Map<String, Boolean> interfaces = new HashMap<>();
+
+    static boolean isInterface(String internalName) {
+        return interfaces.computeIfAbsent(internalName, n -> {
+            byte[] b = hierarchy.get(n + ".class");
+            if (b != null) return CF.parse(b).flags().has(AccessFlag.INTERFACE);
+            try {
+                return Class.forName(n.replace('/', '.'), false, ClassLoader.getPlatformClassLoader()).isInterface();
+            } catch (ClassNotFoundException | LinkageError e) {
+                return false;
+            }
+        });
+    }
+
+    static boolean isMisrefInterfaceCall(InvokeInstruction ii) {
+        return (ii.opcode() == Opcode.INVOKESTATIC || ii.opcode() == Opcode.INVOKESPECIAL) && !ii.isInterface()
+                && isInterface(ii.owner().asInternalName());
+    }
+
+    static boolean callsInterfaceMethodsAsClass(ClassModel cm) {
+        for (MethodModel m : cm.methods())
+            if (m.code().isPresent())
+                for (CodeElement ce : m.code().get())
+                    if (ce instanceof InvokeInstruction ii && isMisrefInterfaceCall(ii)) return true;
+        return false;
+    }
+
+    static final CodeTransform FIX_INTERFACE_CALLS = (cob, e) -> {
+        if (e instanceof InvokeInstruction ii && isMisrefInterfaceCall(ii))
+            cob.invoke(ii.opcode(), ii.owner().asSymbol(), ii.name().stringValue(), ii.typeSymbol(), true);
+        else
+            cob.with(e);
+    };
+
+    /** A method with branches or exception handlers but no StackMapTable (dex2jar output). */
+    static boolean lacksStackMaps(ClassModel cm) {
+        for (MethodModel m : cm.methods()) {
+            if (m.code().isEmpty()) continue;
+            CodeModel code = m.code().get();
+            if (code.findAttribute(java.lang.classfile.Attributes.stackMapTable()).isPresent()) continue;
+            if (!code.exceptionHandlers().isEmpty()) return true;
+            for (CodeElement ce : code)
+                if (ce instanceof BranchInstruction || ce instanceof TableSwitchInstruction
+                        || ce instanceof LookupSwitchInstruction) return true;
+        }
+        return false;
+    }
+
     static boolean hasIndy(ClassModel cm) {
         for (MethodModel m : cm.methods())
             if (m.code().isPresent())
@@ -843,7 +931,21 @@ public class ShimBuilder {
                                     + " stay unmapped for java.io (" + ex.getMessage() + ")");
                         }
                     }
-                    if (!hasIndy(CF.parse(b))) b = fixReal(b);
+                    ClassModel cm = CF.parse(b);
+                    boolean ifaceCalls = callsInterfaceMethodsAsClass(cm);
+                    if (!hasIndy(cm) && !ifaceCalls) b = fixReal(b);
+                    cm = CF.parse(b);
+                    if (ifaceCalls || (cm.majorVersion() >= 50 && lacksStackMaps(cm))) {
+                        // Classes that must stay at version >= 52 (invokedynamic, static/private interface
+                        // methods) are only verified with stack maps, which dex2jar doesn't write; it also
+                        // emits Methodref where interface methods need an InterfaceMethodref.
+                        try {
+                            b = CF_GEN.transformClass(CF_GEN.parse(b), ClassTransform.transformingMethodBodies(FIX_INTERFACE_CALLS));
+                            framed++;
+                        } catch (RuntimeException ex) {
+                            System.err.println("warning: no stack maps for " + e.getName() + " (" + ex.getMessage() + ")");
+                        }
+                    }
                     n++;
                 }
                 jo.putNextEntry(new JarEntry(e.getName()));
@@ -851,6 +953,7 @@ public class ShimBuilder {
                 jo.closeEntry();
             }
         }
-        System.out.println("app: " + n + " classes, " + rewrites + " call sites rewritten -> " + out);
+        System.out.println("app: " + n + " classes, " + rewrites + " call sites rewritten, stack maps added to "
+                + framed + " -> " + out);
     }
 }

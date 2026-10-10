@@ -41,6 +41,7 @@ public final class Manifest {
             String value = colon > 0 ? raw.substring(colon + 1) : raw;
             try {
                 switch (type) {
+                    case "ref" -> putResolved(b, name, (int) Long.decode(value).longValue());
                     case "boolean" -> b.putBoolean(name, Boolean.parseBoolean(value));
                     case "int" -> b.putInt(name, (int) Long.decode(value).longValue());
                     case "float" -> b.putFloat(name, Float.parseFloat(value));
@@ -51,6 +52,26 @@ public final class Manifest {
             }
         }
         return b;
+    }
+
+    /** The launch activity's theme (falling back to the application's) or the application's; 0 if none. */
+    public static int theme(boolean activity) {
+        String v = activity ? get("activity.theme", get("theme", null)) : get("theme", null);
+        try {
+            return v == null ? 0 : (int) Long.decode(v).longValue();
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** android:value="@type/name": the referenced value, typed (PackageParser.parseMetaData). */
+    private static void putResolved(Bundle b, String name, int id) {
+        ResourceTable.Value v = ResourceTable.get().value(id);
+        if (v == null) b.putInt(name, id);
+        else if (v.type == ResourceTable.TYPE_STRING) b.putString(name, v.string);
+        else if (v.type == ResourceTable.TYPE_BOOLEAN) b.putBoolean(name, v.data != 0);
+        else if (v.type == ResourceTable.TYPE_FLOAT) b.putFloat(name, Float.intBitsToFloat(v.data));
+        else b.putInt(name, v.data);
     }
 
     public static Bundle metaData() { return bundle("meta."); }
