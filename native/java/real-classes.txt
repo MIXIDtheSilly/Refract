@@ -1,0 +1,38 @@
+# Classes taken whole from the firmware's own framework (dex2jar of framework.jar
+# and core-libart.jar) instead of android.jar stubs. These are plain Java utility
+# and data classes; anything tied to system services stays stubbed or is
+# implemented in src/. One internal-name prefix per line; "!" excludes.
+android/util/
+!android/util/Log
+!android/util/Slog
+!android/util/EventLog
+android/text/
+android/graphics/Rect
+android/graphics/RectF
+android/graphics/Point
+android/graphics/PointF
+android/graphics/Insets
+android/net/Uri
+android/content/ComponentName
+android/content/Intent
+android/content/IntentFilter
+android/content/ContentValues
+android/content/pm/ApplicationInfo
+android/content/pm/ActivityInfo
+android/content/pm/PackageInfo
+android/content/pm/PackageItemInfo
+android/content/pm/ComponentInfo
+android/content/res/Configuration
+android/os/LocaleList
+android/os/PatternMatcher
+android/view/ViewGroup$LayoutParams
+android/view/ViewGroup$MarginLayoutParams
+android/view/WindowManager$LayoutParams
+android/widget/FrameLayout$LayoutParams
+android/widget/LinearLayout$LayoutParams
+android/widget/RelativeLayout$LayoutParams
+com/android/internal/util/
+libcore/util/
+android/view/InsetsFlags
+android/os/Parcel$SquashReadHelper
+android/app/WindowConfiguration
