@@ -41,7 +41,7 @@ docs/                 Setup guides and design notes
 
 ## Getting started
 
-Requirements: Windows 11, an Nvidia GPU, the Android SDK with the Android Emulator and NDK,
+Requirements: Windows 11, the Android SDK with the Android Emulator and NDK,
 CMake and Ninja, and SteamVR.
 
 1. Build and set up the emulator path. See
