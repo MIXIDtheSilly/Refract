@@ -19,7 +19,7 @@ function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed ($LASTEXITCODE)" }
 }
-$clang = Join-Path $Sdk "ndk\$NdkVersion\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe"
+$clang = Join-Path $Sdk "ndk\$NdkVersion\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe"
 $target = @{ 'x86_64' = 'x86_64-linux-android29'; 'arm64-v8a' = 'aarch64-linux-android29' }[$Abi]
 foreach ($required in @("$bt\aapt2.exe", "$bt\d8.bat", "$bt\zipalign.exe", "$bt\apksigner.bat", "$Jdk\bin\javac.exe", $androidJar, $toolchain, $ninja, $cmake, $clang)) {
     if (!(Test-Path -LiteralPath $required)) { throw "Missing prerequisite: $required" }
@@ -62,7 +62,7 @@ try {
     Run "$Jdk\bin\javac.exe" (@('-source', '8', '-target', '8', '-Xlint:-options', '-bootclasspath', "$build\android.jar", '-d', "$driver\classes") + $sources)
     $classes = @(Get-ChildItem "$driver\classes" -Recurse -Filter *.class | ForEach-Object FullName)
     Run "$bt\d8.bat" (@('--min-api', '29', '--output', "$driver\dex") + $classes)
-    Run $clang @("--target=$target", '-shared', '-fPIC', '-O2', '-Wall', '-o', "$driver\package\lib\$Abi\librefract_driver.so", "$PSScriptRoot\systemdriver\refract_driver.c", '-llog', '-ldl')
+    Run $clang @("--target=$target", '-shared', '-fPIC', '-O2', '-std=c++17', '-static-libstdc++', '-Wall', '-Wextra', '-Wl,--no-undefined', '-o', "$driver\package\lib\$Abi\librefract_driver.so", "$PSScriptRoot\systemdriver\refract_driver.cpp", '-llog', '-ldl')
     Copy-Item "$build\runtime\android-runtime\libopenxr_runtime.so" "$driver\package\lib\$Abi" -Force
     Copy-Item "$driver\dex\classes.dex" "$driver\package" -Force
     Run "$Jdk\bin\jar.exe" @('uf', "$driver\unsigned.apk", '-C', "$driver\package", 'classes.dex', '-C', "$driver\package", 'lib')
