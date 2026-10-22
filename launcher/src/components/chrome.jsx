@@ -2,6 +2,7 @@ import { ArrowDownToLine, Cpu, LayoutGrid, Loader2, Minus, Settings, Square, Use
 import { useState } from 'react';
 import { windowControls } from '../api';
 import { LogoMark } from './logo';
+import { extensionPages } from '../extensions';
 
 export function TitleBar() {
   if (!windowControls) return null;
@@ -19,6 +20,7 @@ const pages = [
   ['library', 'Library', LayoutGrid],
   ['downloads', 'Downloads', ArrowDownToLine],
   ['emulator', 'Emulator', Cpu],  // Called Android on Linux (see Sidebar).
+  ...extensionPages.map(({ id, label, icon }) => [id, label, icon]),
   ['settings', 'Settings', Settings],
 ];
 

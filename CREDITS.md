@@ -1,5 +1,11 @@
 # Credits
 
+## Refract
+
+Refracture XR is a fork of [Refract](https://github.com/MIXIDtheSilly/Refract) by MIXID. The runtimes, the
+launcher, the translator patches, the GPU and VR plumbing and the Platform SDK stand-in are Refract's work.
+Refracture adds the Unknown sources page and its backend (see [docs/unknown_sources.md](docs/unknown_sources.md)).
+
 ## AXRB
 
 Refract started as a fork of [AXRB](https://github.com/Android-XR-Bridge/AXRB) (Android Extended

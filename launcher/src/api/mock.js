@@ -1,5 +1,6 @@
 // Sample backend for previewing the UI in a browser. Nothing here touches Meta,
 // Android or the file system.
+import { sideloadMock } from './mock-sideload';
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hours = n => new Date(Date.now() - n * 3600000).toISOString();
 const listeners = new Set();
@@ -228,6 +229,7 @@ const methods = {
   openFolder: async () => null,
   openStore: async () => null,
 };
+Object.assign(methods, sideloadMock({ state, emit, find, wait }));
 
 export async function call(method, ...args) {
   if (!methods[method]) throw new Error(`Unknown launcher request: ${method}`);

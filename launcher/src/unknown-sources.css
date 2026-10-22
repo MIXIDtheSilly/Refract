@@ -1,0 +1,19 @@
+/* Unknown sources page. Uses the launcher's colour tokens (styles.css). */
+.us-intro { max-width: 720px; margin: -6px 0 22px; color: var(--muted); font-size: 14.5px; line-height: 1.55; }
+.us-list { display: grid; gap: 12px; }
+.us-row { border-radius: var(--radius); background: var(--surface); }
+.us-main { display: flex; align-items: center; gap: 16px; padding: 14px 16px; }
+.us-main .cover { width: 92px; flex-shrink: 0; border-radius: 10px; }
+.us-text { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.us-name { font-size: 16px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.us-meta { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+.us-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
+.us-flag { padding: 2px 10px; border-radius: 999px; font-size: 12px; background: var(--raised); color: var(--muted); }
+.us-flag.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.us-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.us-options { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 16px 12px; border-top: 1px solid var(--line); }
+.us-options label { display: flex; align-items: center; gap: 12px; cursor: pointer; font-size: 13.5px; color: var(--muted); }
+.us-options label span { max-width: 460px; }
+.us-results { margin-top: 18px; display: grid; gap: 6px; font-size: 13.5px; color: var(--muted); }
+.us-results ul { margin: 0; padding-left: 18px; }
+@media (max-width: 760px) { .us-main { flex-wrap: wrap; } .us-actions { width: 100%; } }

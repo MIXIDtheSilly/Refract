@@ -1,0 +1,77 @@
+name: CI
+
+# Runs only when started by hand from the Actions tab.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  launcher:
+    name: Launcher (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: launcher/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install launcher dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: launcher
+      # Refract's own suite assumes Linux or its maintainer's setup in places (its waydroid test expects a Linux adb path), so it
+      # runs on Linux. Windows runs the Unknown sources tests, which are this fork's.
+      - name: Launcher tests
+        run: ${{ runner.os == 'Linux' && 'npm test' || 'node --test tests/sideload.test.mjs' }}
+        working-directory: launcher
+      - name: Refracture tooling tests
+        run: python -m unittest discover -s tests -p "test_refracture*.py"
+      - name: Build the interface
+        run: npm run build
+        working-directory: launcher
+      # The release build brands a throwaway copy (tools/refracture_brand.py). Fails here, on the pull request, when a merge
+      # from Refract changed a line the branding replaces.
+      - name: Branding still matches Refract's files
+        run: python tools/refracture_brand.py --check
+      - name: The branded interface builds
+        run: |
+          python ../tools/refracture_brand.py
+          npm run build
+        working-directory: launcher
+        shell: bash
+
+  shell:
+    name: Tauri shell (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: launcher/package-lock.json
+      - name: System libraries for Tauri
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: launcher/src-tauri
+      # The shell embeds the built interface, so that comes first.
+      - name: Build the interface
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+        working-directory: launcher
+      - name: Check the shell compiles
+        run: cargo check --locked
+        working-directory: launcher/src-tauri

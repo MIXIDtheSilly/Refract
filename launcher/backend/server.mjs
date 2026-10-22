@@ -26,6 +26,7 @@ import { checkSetupLinux, fixSetupLinux, headsetStatusLinux } from '../core/setu
 import { loadLibraryArtwork } from '../core/artwork.mjs';
 import { remoteZipNames, vrSdk } from '../core/apk_sdk.mjs';
 import { checkUpdate, cleanUpdate, installUpdate } from '../core/update.mjs';
+import { sideloadMethods } from './sideload.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(directory, '../..');
@@ -353,6 +354,8 @@ const methods = {
   openFolder: async id => { const game = getGame(id); const target = game.apk ? path.dirname(game.apk) : state.data.settings.downloadDir; await fs.mkdir(target, { recursive: true }); return { openPath: target }; },
   openStore: async id => ({ openUrl: `https://www.meta.com/experiences/${appId(id)}/` }),
 };
+// Unknown sources (games not from the Meta store) live in backend/sideload.mjs; this is their only hook.
+Object.assign(methods, sideloadMethods({ get state() { return state; }, get runtime() { return runtime; }, persist, getGame, exclusive, absolute, methods }));
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function androidPort() { const port = await runtime.findPort(); if (!port) throw new Error('Android is not running.'); return port; }

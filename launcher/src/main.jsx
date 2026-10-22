@@ -11,6 +11,7 @@ import { Library } from './pages/library';
 import { Downloads } from './pages/downloads';
 import { SettingsPage } from './pages/settings';
 import { EmulatorPage } from './pages/emulator';
+import { extensionPages } from './extensions';
 import { Welcome } from './components/welcome';
 import { UpdateDialog } from './components/update';
 import './styles.css';
@@ -58,6 +59,7 @@ function App() {
   const running = state?.running && state.games.find(g => g.id === state.running);
   const headset = useHeadset(state);
   const shared = { state, run, pending, notify, setPage, connect, open: setSelected, headset };
+  const Extension = extensionPages.find(p => p.id === page)?.Page;
 
   return <div className={`app ${native ? 'native' : 'browser'}`}>
     <TitleBar />
@@ -68,6 +70,7 @@ function App() {
           : page === 'library' ? <Library {...shared} />
           : page === 'downloads' ? <Downloads {...shared} />
           : page === 'emulator' && state.settings.backend !== 'native' ? <EmulatorPage {...shared} />
+          : Extension ? <Extension {...shared} />
           : <SettingsPage key={JSON.stringify(state.settings)} {...shared} />}
       </main>
     </div>

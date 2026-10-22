@@ -33,6 +33,11 @@ async fn call(app: AppHandle, window: WebviewWindow, backend: State<'_, Backend>
             Some(paths) => backend.request("import", paths).await,
             None => Ok(Value::Null),
         },
+        // Unknown sources (backend/sideload.mjs): same picker as Import APK, the backend keeps these games apart from Meta's.
+        "sideloadAdd" => match pick(&window, Pick::Apk).await {
+            Some(paths) => backend.request("sideloadAdd", paths).await,
+            None => Ok(Value::Null),
+        },
         "importAssets" => {
             let id = args.first().cloned().unwrap_or(Value::Null);
             match pick(&window, Pick::Assets).await {
