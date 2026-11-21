@@ -1,6 +1,6 @@
 package android.os;
 
-/** Reports the Quest 2 (Horizon OS, Android 14) build the firmware sysroot came from. */
+/** Reports the Quest 3 model on the Horizon OS (Android 14) identity. */
 public class Build {
     public static final boolean IS_EMULATOR = false;
     public static final boolean IS_DEBUGGABLE = false;
@@ -19,7 +19,7 @@ public class Build {
     public static final String CPU_ABI2 = "";
     public static final String MANUFACTURER = "Oculus";
     public static final String BRAND = "oculus";
-    public static final String MODEL = "Quest 2";
+    public static final String MODEL = "Quest 3";
     public static final String SOC_MANUFACTURER = "Qualcomm";
     public static final String SOC_MODEL = "SM8250";
     public static final String BOOTLOADER = "unknown";

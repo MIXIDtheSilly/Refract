@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "refract-launcher"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "serde_json",
  "tauri",

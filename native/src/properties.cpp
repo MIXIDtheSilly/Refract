@@ -165,7 +165,7 @@ void SetupSystemProperties(const std::wstring& sysroot, const std::wstring& data
     props.emplace("ro.build.version.sdk", "32");
     props.emplace("ro.build.version.release", "12");
     props.emplace("ro.product.manufacturer", "Oculus");
-    props.emplace("ro.product.model", "Quest 2");
+    props.emplace("ro.product.model", "Quest 3");
     props.emplace("ro.product.brand", "oculus");
     props.emplace("ro.product.device", "hollywood");
     props.emplace("ro.product.name", "hollywood");

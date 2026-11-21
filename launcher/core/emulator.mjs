@@ -339,7 +339,7 @@ $xr = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Khronos\\OpenXR\\1').ActiveRuntime
     const files = [
       { label: 'Host bridge', file: 'build-windows-nvidia/host-bridge/refract-host-bridge.exe' },
       { label: 'PC viewer', file: 'viewer/build/refract_viewer.exe' },
-      { label: 'GPU sharing layer', file: 'build-windows-gpu-layer/Release/refract_gpu_layer.json' },
+      { label: 'GPU sharing layer', file: 'build-windows-gpu-layer/Release/refract_gpu_layer.dll' },
       ...this.runtime.guestPackages.map(p => ({ label: p.label, file: p.apk, package: p.package })),
     ];
     return Promise.all(files.map(async item => {

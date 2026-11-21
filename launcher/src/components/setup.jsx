@@ -25,8 +25,13 @@ export function SetupBanner({ run, setPage }) {
 export function SetupPanel({ state, run, pending, notify }) {
   const [checks, refresh, setChecks] = useSetup(run);
   const fix = check => run(`fix-${check.id}`, async () => {
-    setChecks(await call('fixSetup', check.fix.action));
-    notify(check.fix.action === 'hypervisor' ? 'Restart Windows to finish turning on Windows Hypervisor Platform.' : `${check.title} is set up`);
+    const updated = await call('fixSetup', check.fix.action);
+    setChecks(updated);
+    if (check.fix.action === 'hypervisor') notify('Restart Windows to finish turning on Windows Hypervisor Platform.');
+    else {
+      const result = updated.find(item => item.id === check.id);
+      notify(result && !result.ok ? result.detail : `${check.title} is set up`);
+    }
   });
   const ready = checks && checks.every(c => c.ok || c.optional);
   // Checks that share one fix (Android and the virtual device) show its button once.

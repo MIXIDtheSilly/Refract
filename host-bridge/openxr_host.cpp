@@ -445,6 +445,9 @@ public:
         if (appLocalSpace_ != XR_NULL_HANDLE && destroySpace_) destroySpace_(appLocalSpace_);
 #if defined(_WIN32)
         if (statsSwapchain_ != XR_NULL_HANDLE && destroySwapchain_ != nullptr) destroySwapchain_(statsSwapchain_);
+        for (auto& eye : steamVrEyeSwapchains_) {
+            if (eye.handle != XR_NULL_HANDLE && destroySwapchain_ != nullptr) destroySwapchain_(eye.handle);
+        }
         if (projectionSwapchain_ != XR_NULL_HANDLE && destroySwapchain_ != nullptr) {
             destroySwapchain_(projectionSwapchain_);
             projectionSwapchain_ = XR_NULL_HANDLE;
@@ -618,6 +621,24 @@ public:
             return false;
         }
 
+        XrInstanceProperties instanceProperties{XR_TYPE_INSTANCE_PROPERTIES};
+        result = getInstanceProperties_(instance_, &instanceProperties);
+        if (result != XR_SUCCESS) {
+            std::fprintf(stderr, "Refract OpenXR: xrGetInstanceProperties failed: %s (%d)\n", xr_result_name(result), result);
+            return false;
+        }
+        std::fprintf(stderr, "Refract OpenXR: runtime=%s\n", instanceProperties.runtimeName);
+#if defined(_WIN32)
+        const char* separateEyeSetting = std::getenv("REFRACT_STEAMVR_EYE_SWAPCHAINS");
+        const bool steamVrRuntime = std::strstr(instanceProperties.runtimeName, "SteamVR") != nullptr;
+        separateSteamVrEyeSwapchains_ = steamVrRuntime && separateEyeSetting != nullptr &&
+            std::strcmp(separateEyeSetting, "1") == 0;
+        if (steamVrRuntime) {
+            std::fprintf(stderr, "Refract OpenXR: separate SteamVR eye swapchains %s (set REFRACT_STEAMVR_EYE_SWAPCHAINS=1 to enable)\n",
+                separateSteamVrEyeSwapchains_ ? "enabled" : "disabled");
+        }
+#endif
+
         XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
         systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
         result = getSystem_(instance_, &systemInfo, &systemId_);
@@ -724,6 +745,7 @@ public:
         refract::protocol::PoseFrame frame = latest_frame(sequence);
         frame.hmd_flags = frame.local_origin_flags = 0;
         frame.hmd_velocity = frame.local_origin_velocity = {};
+        frame.view_count = 0;
         frame.controllers[0] = {};
         frame.controllers[1] = {};
         for (size_t hand = 0; hand < 2; ++hand) {
@@ -876,6 +898,29 @@ public:
                     frame.hmd.y,
                     frame.hmd.z);
             }
+        }
+
+        XrViewLocateInfo viewLocateInfo{XR_TYPE_VIEW_LOCATE_INFO};
+        viewLocateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        viewLocateInfo.displayTime = locateTime;
+        viewLocateInfo.space = localSpace_;
+        XrViewState viewState{XR_TYPE_VIEW_STATE};
+        std::array<XrView, 2> views{XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+        uint32_t viewCount = 0;
+        const XrResult viewResult = locateViews_(
+            session_, &viewLocateInfo, &viewState, static_cast<uint32_t>(views.size()), &viewCount, views.data());
+        if (viewResult == XR_SUCCESS && viewCount == 2 &&
+            (viewState.viewStateFlags & (XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT)) ==
+                    (XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
+            for (size_t i = 0; i < views.size(); ++i) {
+                frame.views[i] = {
+                    to_protocol_pose(views[i].pose),
+                    views[i].fov.angleLeft, views[i].fov.angleRight,
+                    views[i].fov.angleUp, views[i].fov.angleDown,
+                };
+            }
+            frame.view_count = 2;
+            if (!refract::protocol::valid_eye_views(frame)) frame.view_count = 0;
         }
 
         // REFRACT_PREDICTION_LEAD_MS predicts controllers and hands that much further, for the frames the
@@ -1713,6 +1758,7 @@ private:
     bool load_instance_functions()
     {
         return load_func("xrDestroyInstance", &destroyInstance_) &&
+            load_func("xrGetInstanceProperties", &getInstanceProperties_) &&
             load_func("xrGetSystem", &getSystem_) &&
             load_func("xrEnumerateViewConfigurationViews", &enumerateViewConfigurationViews_) &&
             load_func("xrCreateSession", &createSession_) &&
@@ -1853,17 +1899,27 @@ private:
 #if defined(_DEBUG)
         flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
-        hr = D3D11CreateDevice(
-            selectedAdapter.get(),
-            D3D_DRIVER_TYPE_UNKNOWN,
-            nullptr,
-            flags,
-            featureLevels,
-            sizeof(featureLevels) / sizeof(featureLevels[0]),
-            D3D11_SDK_VERSION,
-            d3dDevice_.put(),
-            &createdFeatureLevel,
-            d3dContext_.put());
+        auto createDevice = [&](UINT deviceFlags) {
+            return D3D11CreateDevice(
+                selectedAdapter.get(),
+                D3D_DRIVER_TYPE_UNKNOWN,
+                nullptr,
+                deviceFlags,
+                featureLevels,
+                sizeof(featureLevels) / sizeof(featureLevels[0]),
+                D3D11_SDK_VERSION,
+                d3dDevice_.put(),
+                &createdFeatureLevel,
+                d3dContext_.put());
+        };
+        hr = createDevice(flags);
+#if defined(_DEBUG)
+        if (hr == DXGI_ERROR_SDK_COMPONENT_MISSING && (flags & D3D11_CREATE_DEVICE_DEBUG)) {
+            std::fprintf(stderr, "Refract OpenXR: D3D11 debug layer unavailable; retrying without it\n");
+            flags &= ~D3D11_CREATE_DEVICE_DEBUG;
+            hr = createDevice(flags);
+        }
+#endif
         if (FAILED(hr)) {
             std::fprintf(stderr, "Refract OpenXR: D3D11CreateDevice failed: 0x%08lx\n", static_cast<unsigned long>(hr));
             return false;
@@ -2015,6 +2071,37 @@ private:
             return false;
         }
 
+        if (separateSteamVrEyeSwapchains_) {
+            for (uint32_t eye = 0; eye < 2; ++eye) {
+                auto& eyeSwapchain = steamVrEyeSwapchains_[eye];
+                if (eyeSwapchain.handle != XR_NULL_HANDLE) continue;
+
+                XrSwapchainCreateInfo eyeInfo = swapchainInfo;
+                eyeInfo.arraySize = 1;
+                result = createSwapchain_(session_, &eyeInfo, &eyeSwapchain.handle);
+                if (result != XR_SUCCESS) {
+                    std::fprintf(stderr, "Refract OpenXR: SteamVR eye %u swapchain failed: %s (%d)\n",
+                        eye, xr_result_name(result), result);
+                    return false;
+                }
+                uint32_t eyeImageCount = 0;
+                result = enumerateSwapchainImages_(eyeSwapchain.handle, 0, &eyeImageCount, nullptr);
+                if (result != XR_SUCCESS || eyeImageCount == 0) {
+                    std::fprintf(stderr, "Refract OpenXR: SteamVR eye %u image enumeration failed: %s (%d)\n",
+                        eye, xr_result_name(result), result);
+                    return false;
+                }
+                eyeSwapchain.images.assign(eyeImageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+                result = enumerateSwapchainImages_(eyeSwapchain.handle, eyeImageCount, &eyeImageCount,
+                    reinterpret_cast<XrSwapchainImageBaseHeader*>(eyeSwapchain.images.data()));
+                if (result != XR_SUCCESS) {
+                    std::fprintf(stderr, "Refract OpenXR: SteamVR eye %u image enumeration failed: %s (%d)\n",
+                        eye, xr_result_name(result), result);
+                    return false;
+                }
+            }
+        }
+
         std::fprintf(
             stderr,
             "Refract OpenXR: projection swapchain ready %ux%u images=%u\n",
@@ -2022,6 +2109,26 @@ private:
             projectionHeight_,
             imageCount);
         return true;
+    }
+
+    bool copy_steamvr_eye(uint32_t eye, ID3D11Texture2D* source, uint64_t sequence, uint32_t width, uint32_t height)
+    {
+        auto& swapchain = steamVrEyeSwapchains_[eye];
+        uint32_t imageIndex = 0;
+        XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        XrResult result = acquireSwapchainImage_(swapchain.handle, &acquireInfo, &imageIndex);
+        if (result != XR_SUCCESS || imageIndex >= swapchain.images.size()) return false;
+
+        XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = XR_INFINITE_DURATION;
+        result = waitSwapchainImage_(swapchain.handle, &waitInfo);
+        if (result != XR_SUCCESS) return false;
+
+        d3dContext_.get()->CopySubresourceRegion(swapchain.images[imageIndex].texture, 0, 0, 0, 0, source, eye, nullptr);
+        debug_capture_frame(d3dContext_.get(), swapchain.images[imageIndex].texture, width, height, sequence, 0,
+            eye == 0 ? "submitted eye 0" : "submitted eye 1", eye == 0 ? "output-eye0" : "output-eye1");
+        XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        return releaseSwapchainImage_(swapchain.handle, &releaseInfo) == XR_SUCCESS;
     }
 
     // An atlas frame's table (after its WindowsGpuFrame; the image server checked it).
@@ -2175,6 +2282,15 @@ private:
                 cached ? i : mixedBatch ? i + (mixedProjection ? 2 : 0) : i,
                 mixedBatch ? uploadedMixedExtents_[imageIndex][i] : uploadedExtentByImage_[imageIndex]);
         }
+        bool eyesReady = true;
+        if (separateSteamVrEyeSwapchains_ && !loading && composition.view_count == 2) {
+            const auto eyeExtent = uploadedExtentByImage_[imageIndex];
+            const auto sequence = uploadedAndroidSequenceByImage_[imageIndex];
+            for (uint32_t eye = 0; eye < 2 && eyesReady; ++eye) {
+                eyesReady = copy_steamvr_eye(eye, projectionImages_[imageIndex].texture, sequence,
+                    static_cast<uint32_t>(eyeExtent.width), static_cast<uint32_t>(eyeExtent.height));
+            }
+        }
 
         XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         result = releaseSwapchainImage_(projectionSwapchain_, &releaseInfo);
@@ -2186,6 +2302,10 @@ private:
             mixedProjection = false;
             quadCount = place_loading_card(displayTime, quadLayers[0]) ? 1 : 0;
             return quadCount != 0;
+        }
+        if (!eyesReady) {
+            std::fprintf(stderr, "Refract OpenXR: SteamVR eye texture copy failed\n");
+            return false;
         }
         {
             // Diagnostics: what the display frames actually showed, every 5 s.
@@ -2262,13 +2382,15 @@ private:
                 projectionViews[i].pose.orientation = {eye.pose.qx, eye.pose.qy, eye.pose.qz, eye.pose.qw};
                 projectionViews[i].fov = {eye.angle_left, eye.angle_right, eye.angle_up, eye.angle_down};
             }
-            projectionViews[i].subImage.swapchain = projectionSwapchain_;
+            projectionViews[i].subImage.swapchain = separateSteamVrEyeSwapchains_
+                ? steamVrEyeSwapchains_[i].handle
+                : projectionSwapchain_;
             projectionViews[i].subImage.imageRect.offset = {0, 0};
             projectionViews[i].subImage.imageRect.extent = {
                 static_cast<int32_t>(projectionWidth_),
                 static_cast<int32_t>(projectionHeight_),
             };
-            projectionViews[i].subImage.imageArrayIndex = i;
+            projectionViews[i].subImage.imageArrayIndex = separateSteamVrEyeSwapchains_ ? 0 : i;
             if (projection.view_count == 2) {
                 projectionViews[i].subImage.imageRect.extent = uploadedExtentByImage_[imageIndex];
             }
@@ -2469,7 +2591,10 @@ private:
             uploadedProjectionByImage_[imageIndex] = projection;
             uploadedExtentByImage_[imageIndex] = {static_cast<int32_t>(header.width), static_cast<int32_t>(header.height)};
             mirror_.present(d3dContext_.get(), texture, header.width, header.height, static_cast<DXGI_FORMAT>(projectionFormat_), header.sequence);
-            if (projection.view_count == 2) debug_capture_frame(d3dContext_.get(), texture, header.width, header.height, header.sequence);
+            if (projection.view_count == 2) {
+                debug_capture_frame(d3dContext_.get(), texture, header.width, header.height, header.sequence, 0, "scene eye 0");
+                debug_capture_frame(d3dContext_.get(), texture, header.width, header.height, header.sequence, 1, "scene eye 1");
+            }
             if (!reportedGpuImage_) { std::fprintf(stderr, "Refract GPU: shared Windows textures active; no pixel TCP transfer\n"); reportedGpuImage_ = true; }
             return true;
         }
@@ -3501,6 +3626,7 @@ private:
     }();
 
     PFN_xrDestroyInstance destroyInstance_ = nullptr;
+    PFN_xrGetInstanceProperties getInstanceProperties_ = nullptr;
     PFN_xrGetSystem getSystem_ = nullptr;
     PFN_xrEnumerateViewConfigurationViews enumerateViewConfigurationViews_ = nullptr;
     PFN_xrCreateSession createSession_ = nullptr;
@@ -3569,6 +3695,12 @@ private:
     MirrorWindow mirror_;
     ComPtr<ID3D11Device> d3dDevice_;
     ComPtr<ID3D11DeviceContext> d3dContext_;
+    struct EyeSwapchain {
+        XrSwapchain handle = XR_NULL_HANDLE;
+        std::vector<XrSwapchainImageD3D11KHR> images;
+    };
+    std::array<EyeSwapchain, 2> steamVrEyeSwapchains_{};
+    bool separateSteamVrEyeSwapchains_ = false;
     XrSwapchain projectionSwapchain_ = XR_NULL_HANDLE;
     std::vector<XrSwapchainImageD3D11KHR> projectionImages_;
     std::vector<uint64_t> uploadedAndroidSequenceByImage_;

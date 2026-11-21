@@ -46,11 +46,29 @@ int main()
     loaderInfo.minInterfaceVersion = 1;
     loaderInfo.maxInterfaceVersion = XR_CURRENT_LOADER_RUNTIME_VERSION;
     loaderInfo.minApiVersion = XR_MAKE_VERSION(1, 0, 0);
-    loaderInfo.maxApiVersion = XR_MAKE_VERSION(1, 0, 0);
+    loaderInfo.maxApiVersion = XR_MAKE_VERSION(1, 1, 51);
 
     XrNegotiateRuntimeRequest runtimeRequest{};
     if (xrNegotiateLoaderRuntimeInterface(&loaderInfo, &runtimeRequest) != XR_SUCCESS ||
-        runtimeRequest.getInstanceProcAddr == nullptr) {
+        runtimeRequest.getInstanceProcAddr == nullptr ||
+        runtimeRequest.runtimeApiVersion != XR_MAKE_VERSION(1, 1, 51)) {
+        return EXIT_FAILURE;
+    }
+
+    XrNegotiateLoaderInfo legacyLoaderInfo = loaderInfo;
+    legacyLoaderInfo.maxApiVersion = XR_MAKE_VERSION(1, 0, 34);
+    XrNegotiateRuntimeRequest legacyRuntimeRequest{};
+    if (xrNegotiateLoaderRuntimeInterface(&legacyLoaderInfo, &legacyRuntimeRequest) != XR_SUCCESS ||
+        legacyRuntimeRequest.runtimeApiVersion != legacyLoaderInfo.maxApiVersion) {
+        return EXIT_FAILURE;
+    }
+
+    XrNegotiateLoaderInfo unsupportedLoaderInfo = loaderInfo;
+    unsupportedLoaderInfo.minApiVersion = XR_MAKE_VERSION(1, 2, 0);
+    unsupportedLoaderInfo.maxApiVersion = XR_MAKE_VERSION(1, 2, 0);
+    XrNegotiateRuntimeRequest unsupportedRuntimeRequest{};
+    if (xrNegotiateLoaderRuntimeInterface(&unsupportedLoaderInfo, &unsupportedRuntimeRequest) !=
+        XR_ERROR_API_VERSION_UNSUPPORTED) {
         return EXIT_FAILURE;
     }
 
@@ -62,7 +80,15 @@ int main()
 
     XrInstanceCreateInfo instanceCreateInfo{};
     instanceCreateInfo.type = XR_TYPE_INSTANCE_CREATE_INFO;
-    instanceCreateInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+    instanceCreateInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 1, 51);
+
+    XrInstanceCreateInfo unsupportedInstanceCreateInfo = instanceCreateInfo;
+    unsupportedInstanceCreateInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 1, 52);
+    XrInstance unsupportedInstance = nullptr;
+    if (xrCreateInstance(&unsupportedInstanceCreateInfo, &unsupportedInstance) != XR_ERROR_API_VERSION_UNSUPPORTED ||
+        unsupportedInstance != nullptr) {
+        return EXIT_FAILURE;
+    }
 
     XrInstance instance = nullptr;
     if (xrCreateInstance(&instanceCreateInfo, &instance) != XR_SUCCESS || instance == nullptr) {
@@ -174,9 +200,13 @@ int main()
 
     XrSystemProperties systemProperties{};
 #if defined(REFRACT_INPUT_FIXTURE)
-    refract_input_fixture().render_width = 2880;
-    refract_input_fixture().render_height = 3200;
-    refract_input_fixture().local_origin_flags = refract_input_fixture().hmd_flags = 15;
+    auto& hostFrame = refract_input_fixture();
+    hostFrame.render_width = 2880;
+    hostFrame.render_height = 3200;
+    hostFrame.local_origin_flags = hostFrame.hmd_flags = 15;
+    hostFrame.view_count = 2;
+    hostFrame.views[0] = {{-0.038f, 1.65f, -0.1f, 0, 0, 0, 1}, -0.75f, 0.8f, 0.7f, -0.72f};
+    hostFrame.views[1] = {{0.038f, 1.65f, -0.1f, 0, 0, 0, 1}, -0.8f, 0.75f, 0.72f, -0.7f};
 #endif
     using EnumerateViews = XrResult(XRAPI_PTR*)(XrInstance, XrSystemId, XrViewConfigurationType, uint32_t, uint32_t*, XrViewConfigurationView*);
     auto enumerateViews = get<EnumerateViews>(runtimeRequest.getInstanceProcAddr, instance, "xrEnumerateViewConfigurationViews");
@@ -564,7 +594,11 @@ int main()
         return EXIT_FAILURE;
     }
 #if defined(REFRACT_INPUT_FIXTURE)
-    if ((viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0) return EXIT_FAILURE;
+    if ((viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0 ||
+        std::fabs(views[0].pose.position.x + 0.038f) > 1e-5f ||
+        std::fabs(views[1].pose.position.x - 0.038f) > 1e-5f ||
+        std::fabs(views[0].fov.angleRight - 0.8f) > 1e-5f ||
+        std::fabs(views[1].fov.angleLeft + 0.8f) > 1e-5f) return EXIT_FAILURE;
 #else
     if (viewState.viewStateFlags != 0) return EXIT_FAILURE; // No real host pose yet.
 #endif

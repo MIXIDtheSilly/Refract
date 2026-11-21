@@ -7,7 +7,7 @@ public final class SystemProperties {
     private static final ConcurrentHashMap<String, String> props = new ConcurrentHashMap<>();
 
     static {
-        props.put("ro.product.model", "Quest 2");
+        props.put("ro.product.model", "Quest 3");
         props.put("ro.product.manufacturer", "Oculus");
         props.put("ro.build.version.sdk", "32");
         props.put("ro.sf.lcd_density", "320");

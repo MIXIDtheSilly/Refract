@@ -2,8 +2,18 @@
 # Builds the ARM64 guest side: HLE stub libraries and the refract_app launcher,
 # into build-native/guest/{lib64,bin}.
 set -e
-NDK=${NDK:-$USERPROFILE/Android/Sdk/ndk/27.3.13750724}
+SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+if [ -z "$SDK" ]; then
+  if [ -n "${LOCALAPPDATA:-}" ]; then SDK="$LOCALAPPDATA/Android/Sdk"; else SDK="$HOME/Android/Sdk"; fi
+fi
+SDK="$(cygpath -u "$SDK")"
+NDK=${NDK:-$SDK/ndk/27.3.13750724}
+if [ ! -d "$NDK" ]; then NDK="$(cygpath -u "$NDK")"; fi
 BIN="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
+if [ ! -f "$BIN/clang.exe" ]; then
+  echo "Android NDK compiler not found: $BIN/clang.exe" >&2
+  exit 1
+fi
 CC="$BIN/clang.exe --target=aarch64-linux-android29"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/../../build-native/guest"

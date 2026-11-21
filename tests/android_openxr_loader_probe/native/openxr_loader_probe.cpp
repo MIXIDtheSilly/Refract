@@ -150,7 +150,7 @@ std::string run_probe(JNIEnv* env, jobject activity)
         "Refract",
         XR_MAX_ENGINE_NAME_SIZE - 1);
     createInfo.applicationInfo.engineVersion = 1;
-    createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+    createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 1, 51);
 
     XrInstance instance = XR_NULL_HANDLE;
     result = xrCreateInstance(&createInfo, &instance);

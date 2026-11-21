@@ -17,7 +17,7 @@ const renderScales = [50, 60, 70, 80, 90, 100, 110, 125, 150, 175, 200];
 const withCurrent = (list, value) => Number.isInteger(value) && !list.includes(value) ? [...list, value].sort((a, b) => a - b) : list;
 
 export function SettingsPage({ state, run, pending, notify, connect, setPage }) {
-  const { draft, edit, field, save, saveBar } = useSettingsForm({ state, run, pending, notify });
+  const { draft, edit, field, toggle, save, saveBar } = useSettingsForm({ state, run, pending, notify });
 
   return <div className="page">
     <header className="page-head"><div><h1 className="page-title">Settings</h1></div></header>
@@ -72,6 +72,14 @@ export function SettingsPage({ state, run, pending, notify, connect, setPage }) 
         <p>Where APK and expansion files are saved. Five GB stays free so Android can still boot.</p>
         {field('downloadDir', 'Download folder', { required: true }, true)}
       </section>
+      {state.platform !== 'linux' && <section className="panel">
+        <h2>Debug</h2>
+        <p>Experimental projection diagnostics. Changes apply the next time a VR game starts.</p>
+        {toggle('steamVrEyeSwapchains', 'SteamVR separate eye swapchains',
+          'Experimental compatibility option for duplicated eye images.')}
+        {toggle('captureStereoFrames', 'Capture stereo diagnostic frames',
+          'Saves up to four pairs of eye images in build-windows-game. Game content may be visible; turn this off after capturing.')}
+      </section>}
       {draft.backend !== 'native' && <section className="panel">
         <div className="panel-row">
           <div><h2>Android runtime</h2><p style={{ margin: '3px 0 0', color: 'var(--muted)' }}>{state.platform === 'linux' ? 'Android runs in Waydroid. Its status, logs and debug tools are on the Android page.' : 'The virtual device, memory, CPU cores and audio are on the Emulator page, with its logs and debug tools.'}</p></div>

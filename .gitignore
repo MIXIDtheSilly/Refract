@@ -1,6 +1,7 @@
 # Build outputs
 build/
 build-*/
+jdk/
 out/
 dist/
 cmake-build-*/

@@ -17,6 +17,27 @@ test('an empty SDK folder needs every pinned Android package', async t => {
   assert.ok(!(await missingAndroid(sdk)).some(p => p.id === 'emulator'));
 });
 
+test('build tools readiness matches the version used by Android runtime builds', async t => {
+  const sdk = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-sdk-'));
+  t.after(() => fs.rm(sdk, { recursive: true, force: true }));
+  const buildTools = path.join(sdk, 'build-tools');
+  await fs.mkdir(path.join(buildTools, '36.0.0'), { recursive: true });
+  await fs.writeFile(path.join(buildTools, '36.0.0/aapt2.exe'), '');
+  assert.ok((await missingAndroid(sdk)).some(p => p.id === 'build-tools'));
+  await fs.mkdir(path.join(buildTools, '36.1.0'), { recursive: true });
+  await fs.writeFile(path.join(buildTools, '36.1.0/aapt2.exe'), '');
+  assert.ok(!(await missingAndroid(sdk)).some(p => p.id === 'build-tools'));
+});
+
+test('Android platform 34 readiness is required for the native Java shim', async t => {
+  const sdk = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-sdk-'));
+  t.after(() => fs.rm(sdk, { recursive: true, force: true }));
+  assert.ok((await missingAndroid(sdk)).some(p => p.id === 'platform-34'));
+  await fs.mkdir(path.join(sdk, 'platforms/android-34'), { recursive: true });
+  await fs.writeFile(path.join(sdk, 'platforms/android-34/android.jar'), '');
+  assert.ok(!(await missingAndroid(sdk)).some(p => p.id === 'platform-34'));
+});
+
 test('the virtual device is created with the tested hardware settings', async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'refract-avd-'));
   const previous = process.env.ANDROID_AVD_HOME;

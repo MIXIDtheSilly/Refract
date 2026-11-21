@@ -23,6 +23,9 @@ int main()
         frames[i].render_width = 2880; frames[i].render_height = 3200;
         frames[i].local_origin = {0.4f, 1.6f, -0.2f, 0, 0, 0, 1};
         frames[i].local_origin_flags = frames[i].hmd_flags = 15;
+        frames[i].view_count = 2;
+        frames[i].views[0] = {{-0.032f, 1.6f, 0.0f, 0, 0, 0, 1}, -0.8f, 0.9f, 0.7f, -0.75f};
+        frames[i].views[1] = {{0.032f, 1.6f, 0.0f, 0, 0, 0, 1}, -0.9f, 0.8f, 0.75f, -0.7f};
         frames[i].hmd.x = static_cast<float>(i + 10);
         frames[i].aim[0].x = static_cast<float>(i + 20);
         frames[i].aim[1].qx = 0.5f;
@@ -43,6 +46,9 @@ int main()
             latest.sequence != 3 || latest.hmd.x != 12.0f || latest.display_period_ns != 13'888'889 ||
             latest.render_width != 2880 || latest.render_height != 3200 ||
             latest.local_origin.y != 1.6f || latest.local_origin_flags != 15 || latest.hmd_flags != 15 ||
+            latest.view_count != 2 || !valid_eye_views(latest) ||
+            latest.views[0].pose.x != -0.032f || latest.views[1].pose.x != 0.032f ||
+            latest.views[0].angle_right != 0.9f || latest.views[1].angle_left != -0.9f ||
             latest.aim[0].x != 22.0f || latest.aim[1].qx != 0.5f ||
             latest.hands[1].source != 2 || latest.hands[1].joints[25].flags != 15 ||
             latest.hands[1].joints[25].radius != 0.007f || latest.hands[1].joints[25].pose.z != 0.3f ||
@@ -86,6 +92,11 @@ int main()
     if (!decoder.append(&legacy, 2408, latest) || latest.version != 5 || latest.local_origin.y != 1.6f ||
         !decoder.append(&frames[2], sizeof(PoseFrame), latest) || latest.version != kPoseFrameVersion ||
         latest.grip_velocity[1].linear.x != 1.5f) return EXIT_FAILURE;
+    decoder.reset(); legacy.version = 6;  // v6 hosts: 2600 bytes, no located eye views.
+    if (!decoder.append(&legacy, offsetof(PoseFrame, view_count), latest) || latest.version != 6 ||
+        latest.view_count != 0 || valid_eye_views(latest) ||
+        !decoder.append(&frames[2], sizeof(PoseFrame), latest) || latest.version != kPoseFrameVersion ||
+        !valid_eye_views(latest)) return EXIT_FAILURE;
 
     auto same = [](Vector3 a, Vector3 b) {
         return std::fabs(a.x - b.x) < 1e-5f && std::fabs(a.y - b.y) < 1e-5f && std::fabs(a.z - b.z) < 1e-5f;

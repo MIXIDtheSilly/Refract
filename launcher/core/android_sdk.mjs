@@ -19,8 +19,10 @@ const property = async (file, key) => (await fs.readFile(file, 'utf8').catch(() 
 export const androidPackages = [
   { id: 'platform-tools', label: 'Android platform tools', file: 'platform-tools_r37.0.1-win.zip', sha1: 'e03e78b1d80b396f1c3358e31251cb31740e1110', size: 8044989,
     dir: 'platform-tools', ready: sdk => exists(path.join(sdk, 'platform-tools/adb.exe')) },
-  { id: 'build-tools', label: 'Android build tools 36', file: 'build-tools_r36_windows.zip', sha1: 'f16ccffd34de8790dede813a6c7d8e2c11a27b50', size: 58699878,
-    dir: 'build-tools/36.0.0', ready: async sdk => !!await sdkAapt2(sdk) },
+  { id: 'build-tools', label: 'Android build tools 36.1.0', file: 'build-tools_r36.1_windows.zip', sha1: '95f048ae758dad90617975fe3f787f038b03338c', size: 59366211,
+    dir: 'build-tools/36.1.0', ready: sdk => exists(path.join(sdk, 'build-tools/36.1.0/aapt2.exe')) },
+  { id: 'platform-34', label: 'Android platform 34', file: 'platform-34-ext7_r03.zip', sha1: '1f2e9478d6a7601425ceaa553311dc43191f103d', size: 63180081,
+    dir: 'platforms/android-34', ready: sdk => exists(path.join(sdk, 'platforms/android-34/android.jar')) },
   { id: 'emulator', label: 'Android Emulator 37.1.11', file: 'emulator-windows_x64-15917651.zip', sha1: '54fa750822ff462d57e04fc8e98e60f08df2bb61', size: 441926448,
     dir: 'emulator', ready: async sdk => await property(path.join(sdk, 'emulator/source.properties'), 'Pkg.BuildId') === '15917651' },
   { id: 'image', label: 'Android 16 system image', file: 'sys-img/google_apis/x86_64-36_r07.zip', sha1: 'c6bf44bdcd885bb902b4ba752d111a073ad7a817', size: 1895447397,
@@ -173,9 +175,12 @@ export async function missingAndroid(sdk) {
 
 // Refract Native (and Linux) needs only aapt2 (it reads each game's manifest), not the emulator.
 export async function installBuildTools(sdk, progress = () => {}) {
-  const item = linux ? linuxBuildTools : androidPackages.find(p => p.id === 'build-tools');
+  const items = linux ? [linuxBuildTools] : androidPackages.filter(p => p.id === 'build-tools' || p.id === 'platform-34');
   await fs.mkdir(sdk, { recursive: true });
-  if (!await sdkAapt2(sdk)) await extract(sdk, item, await download(sdk, item, progress), progress);
+  for (const item of items) {
+    const ready = item.ready ? await item.ready(sdk) : !!await sdkAapt2(sdk);
+    if (!ready) await extract(sdk, item, await download(sdk, item, progress), progress);
+  }
   await fs.rm(path.join(sdk, '.refract-downloads'), { recursive: true, force: true });
 }
 

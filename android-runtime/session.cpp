@@ -59,6 +59,9 @@ namespace refract::runtime {
 namespace {
 
 constexpr XrSystemId kSystemId = 1;
+constexpr XrVersion kMinimumRuntimeApiVersion = XR_MAKE_VERSION(1, 0, 0);
+// OVRPlugin 1.1.51 creates its own instance with this OpenXR API version.
+constexpr XrVersion kRuntimeApiVersion = XR_MAKE_VERSION(1, 1, 51);
 constexpr float kEyeHalfIpdMeters = 0.0315f;
 constexpr float kProjectionHalfFovRadians = 0.95f;
 
@@ -2048,7 +2051,8 @@ XrResult XRAPI_CALL xrCreateInstance_impl(const XrInstanceCreateInfo* createInfo
     if (createInfo->type != XR_TYPE_INSTANCE_CREATE_INFO) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    if (createInfo->applicationInfo.apiVersion > XR_MAKE_VERSION(1, 1, 0)) {
+    if (createInfo->applicationInfo.apiVersion < kMinimumRuntimeApiVersion ||
+        createInfo->applicationInfo.apiVersion > kRuntimeApiVersion) {
         return XR_ERROR_API_VERSION_UNSUPPORTED;
     }
 
@@ -3542,22 +3546,30 @@ XrResult XRAPI_CALL xrLocateViews_impl(
     if (viewCapacityInput == 0 || views == nullptr) return XR_SUCCESS;
     const XrPosef hmdWorld = protocol_pose_to_xr(poseFrame.hmd);
     const XrPosef baseWorld = world_pose_for_space(*baseRecord, poseFrame);
+    const bool useHostViews = refract::protocol::valid_eye_views(poseFrame);
     const uint32_t count = viewCapacityInput < 2 ? viewCapacityInput : 2;
     for (uint32_t i = 0; i < count; ++i) {
         if (views[i].type != XR_TYPE_VIEW) {
             return XR_ERROR_VALIDATION_FAILURE;
         }
 
-        XrPosef eyeOffset = identity_pose();
-        eyeOffset.position.x = i == 0 ? -kEyeHalfIpdMeters : kEyeHalfIpdMeters;
-        const XrPosef eyeWorld = multiply_pose(hmdWorld, eyeOffset);
+        XrPosef eyeWorld;
+        if (useHostViews) {
+            const auto& hostView = poseFrame.views[i];
+            eyeWorld = protocol_pose_to_xr(hostView.pose);
+            views[i].fov = {hostView.angle_left, hostView.angle_right, hostView.angle_up, hostView.angle_down};
+        } else {
+            XrPosef eyeOffset = identity_pose();
+            eyeOffset.position.x = i == 0 ? -kEyeHalfIpdMeters : kEyeHalfIpdMeters;
+            eyeWorld = multiply_pose(hmdWorld, eyeOffset);
+            float halfWidth = 0.0f, halfHeight = 0.0f;
+            view_half_angles(halfWidth, halfHeight);
+            views[i].fov.angleLeft = -halfWidth;
+            views[i].fov.angleRight = halfWidth;
+            views[i].fov.angleUp = halfHeight;
+            views[i].fov.angleDown = -halfHeight;
+        }
         views[i].pose = multiply_pose(inverse_pose(baseWorld), eyeWorld);
-        float halfWidth = 0.0f, halfHeight = 0.0f;
-        view_half_angles(halfWidth, halfHeight);
-        views[i].fov.angleLeft = -halfWidth;
-        views[i].fov.angleRight = halfWidth;
-        views[i].fov.angleUp = halfHeight;
-        views[i].fov.angleDown = -halfHeight;
     }
     return XR_SUCCESS;
 }
@@ -3998,8 +4010,9 @@ XrResult negotiate_loader_runtime_interface(
         loaderInfo->maxInterfaceVersion < XR_CURRENT_LOADER_RUNTIME_VERSION) {
         return XR_ERROR_INITIALIZATION_FAILED;
     }
-    if (loaderInfo->minApiVersion > XR_MAKE_VERSION(1, 0, 0) ||
-        loaderInfo->maxApiVersion < XR_MAKE_VERSION(1, 0, 0)) {
+    const XrVersion negotiatedApiVersion = (std::min)(loaderInfo->maxApiVersion, kRuntimeApiVersion);
+    if (negotiatedApiVersion < kMinimumRuntimeApiVersion ||
+        negotiatedApiVersion < loaderInfo->minApiVersion) {
         return XR_ERROR_API_VERSION_UNSUPPORTED;
     }
 
@@ -4008,7 +4021,7 @@ XrResult negotiate_loader_runtime_interface(
     runtimeRequest->structVersion = XR_RUNTIME_INFO_STRUCT_VERSION;
     runtimeRequest->structSize = sizeof(XrNegotiateRuntimeRequest);
     runtimeRequest->runtimeInterfaceVersion = XR_CURRENT_LOADER_RUNTIME_VERSION;
-    runtimeRequest->runtimeApiVersion = XR_MAKE_VERSION(1, 0, 0);
+    runtimeRequest->runtimeApiVersion = negotiatedApiVersion;
     runtimeRequest->getInstanceProcAddr = xrGetInstanceProcAddr_impl;
     return XR_SUCCESS;
 }

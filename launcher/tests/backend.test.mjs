@@ -33,12 +33,16 @@ test('backend answers over stdio, validates settings and keeps secrets out of st
   assert.equal(state.ok, true);
   assert.equal(state.value.signedIn, false);
   assert.equal(state.value.settings.avd, 'refract-google-api36');
+  assert.equal(state.value.settings.steamVrEyeSwapchains, false);
+  assert.equal(state.value.settings.captureStereoFrames, false);
 
   assert.match((await request('settings', { port: 5581 })).error, /even-numbered port/);
   assert.equal(state.value.settings.cores, 6);
   assert.match((await request('settings', { cores: 9 })).error, /CPU cores/);
   assert.match((await request('settings', { audio: 'alsa' })).error, /audio/);
   assert.match((await request('settings', { showWindow: 'yes' })).error, /CPU cores/);
+  assert.match((await request('settings', { steamVrEyeSwapchains: 'yes' })).error, /SteamVR separate eye swapchains/);
+  assert.match((await request('settings', { captureStereoFrames: 'yes' })).error, /stereo diagnostic capture/);
   assert.match((await request('emulatorAction', 'format')).error, /Unknown emulator action/);
   assert.match((await request('openLogs', '../../Windows')).error, /Unknown folder/);
   assert.match((await request('logFile', 'C:/Windows/win.ini')).error, /Unknown log file/);
@@ -59,9 +63,12 @@ test('backend answers over stdio, validates settings and keeps secrets out of st
   assert.equal(logout.ok, true);
   assert.ok(events.some(e => e.event === 'secret' && e.value === null));
 
-  const saved = await request('settings', { port: 5582, sdk: data, downloadDir: data });
+  const saved = await request('settings', { port: 5582, sdk: data, downloadDir: data, steamVrEyeSwapchains: true, captureStereoFrames: true });
   assert.equal(saved.ok, true);
   child.stdin.end();
   assert.equal(await exited, 0);
-  assert.equal(JSON.parse(await fs.readFile(path.join(data, 'library.json'), 'utf8')).settings.port, 5582);
+  const persisted = JSON.parse(await fs.readFile(path.join(data, 'library.json'), 'utf8')).settings;
+  assert.equal(persisted.port, 5582);
+  assert.equal(persisted.steamVrEyeSwapchains, true);
+  assert.equal(persisted.captureStereoFrames, true);
 });
