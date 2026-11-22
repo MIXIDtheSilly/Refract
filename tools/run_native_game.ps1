@@ -3,6 +3,7 @@
     -PcViewer: pose_input_server.py (keyboard, mouse, gamepad) + refract_viewer.exe window on this PC.
     Otherwise: the host bridge sends the game to the VR headset. Either way refract_native.exe runs the game that
     native/tools/install_apk.py prepared, and closing the viewer or bridge window ends the session.
+    -TracePlatform: logs platform-related JNI calls, OpenXR calls, and verbose platform SDK messages.
 #>
 param(
     [string]$GameName,
@@ -11,6 +12,7 @@ param(
     [string]$ObbDir,
     [switch]$Owned,
     [switch]$PcViewer,
+    [switch]$TracePlatform,
     [ValidatePattern('^[1-9][0-9]{0,18}$')][string]$UserId,
     [ValidateRange(512, 4096)][int]$EyeSize = 1600,
     [ValidateRange(25, 200)][int]$RenderScale = 100,
@@ -109,9 +111,15 @@ try {
         }
     }
 
-    $arguments = @('--sysroot', "`"$Sysroot`"", '--app', "`"$appDir`"")
+    $arguments = @()
+    $arguments += '--sysroot', "`"$Sysroot`"", '--app', "`"$appDir`""
     $arguments += '--prop', "debug.refract.platform.owned.$Package=$(if ($Owned) { 1 } else { 0 })"
     if ($UserId) { $arguments += '--prop', "debug.refract.platform.user_id=$UserId" }
+    if ($TracePlatform) {
+        $arguments += '--trace-platform'
+        $arguments += '--prop', 'debug.refract.log_calls=1'
+        $arguments += '--prop', 'debug.refract.platform.verbose=1'
+    }
     # As in run_windows_game.ps1: ASTC textures are stored as RGBA8, which overflows a 10 GB card in Batman: Arkham Shadow.
     if ($Package -eq 'com.camouflaj.manta') { $arguments += '--prop', 'debug.refract.texture_mip_limit=1' }
     # In VR the bridge sends one pose per headset frame and the game starts its frames on them, with the runtime's field of view.

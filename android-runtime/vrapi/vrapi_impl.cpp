@@ -77,7 +77,7 @@ struct XrSpaceVelocity { XrStructureType type; void* next; XrFlags64 velocityFla
 
 #define REFRACT_XR_FUNCTIONS(X) \
     X(xrCreateInstance) X(xrDestroyInstance) X(xrGetSystem) X(xrPollEvent) X(xrCreateSession) X(xrDestroySession) \
-    X(xrBeginSession) X(xrEndSession) X(xrEnumerateViewConfigurationViews) X(xrCreateReferenceSpace) \
+    X(xrBeginSession) X(xrEndSession) X(xrRequestExitSession) X(xrEnumerateViewConfigurationViews) X(xrCreateReferenceSpace) \
     X(xrDestroySpace) X(xrLocateSpace) X(xrLocateViews) X(xrCreateSwapchain) X(xrDestroySwapchain) \
     X(xrEnumerateSwapchainImages) X(xrAcquireSwapchainImage) X(xrWaitSwapchainImage) X(xrReleaseSwapchainImage) \
     X(xrWaitFrame) X(xrBeginFrame) X(xrEndFrame) X(xrStringToPath) X(xrCreateActionSet) X(xrCreateAction) \
@@ -348,6 +348,7 @@ using xrCreateSession_fn = XrResult(XRAPI_PTR*)(XrInstance, const XrSessionCreat
 using xrDestroySession_fn = XrResult(XRAPI_PTR*)(XrSession);
 using xrBeginSession_fn = XrResult(XRAPI_PTR*)(XrSession, const XrSessionBeginInfo*);
 using xrEndSession_fn = XrResult(XRAPI_PTR*)(XrSession);
+using xrRequestExitSession_fn = XrResult(XRAPI_PTR*)(XrSession);
 using xrEnumerateViewConfigurationViews_fn = XrResult(XRAPI_PTR*)(XrInstance, XrSystemId, XrViewConfigurationType, uint32_t, uint32_t*, XrViewConfigurationView*);
 using xrCreateReferenceSpace_fn = XrResult(XRAPI_PTR*)(XrSession, const XrReferenceSpaceCreateInfo*, XrSpace*);
 using xrDestroySpace_fn = XrResult(XRAPI_PTR*)(XrSpace);
@@ -708,7 +709,10 @@ void destroy_session() {
         chain->xr = nullptr;
     }
     if (s.sessionState == XR_SESSION_STATE_FOCUSED || s.sessionState == XR_SESSION_STATE_VISIBLE ||
-        s.sessionState == XR_SESSION_STATE_SYNCHRONIZED) XR_CALL(xrEndSession, s.session);
+        s.sessionState == XR_SESSION_STATE_SYNCHRONIZED) {
+        XR_CALL(xrRequestExitSession, s.session);
+        XR_CALL(xrEndSession, s.session);
+    }
     XR_CALL(xrDestroySession, s.session);
     s.session = nullptr;
     s.sessionState = XR_SESSION_STATE_UNKNOWN;

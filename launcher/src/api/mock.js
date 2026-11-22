@@ -21,7 +21,7 @@ const state = {
   signedIn: true, account: 'Quest player', running: null, busy: false,
   settings: { sdk: 'C:\\Users\\you\\AppData\\Local\\Android\\Sdk', avd: 'refract-google-api36', port: 5580, memoryMB: 8192,
     downloadDir: 'C:\\Users\\you\\Downloads\\Refract', cores: 6, showWindow: false, audio: 'dsound', hostMic: true, keepEmulator: false,
-    pcEyeSize: 1600, vrRenderScale: 100, steamVrEyeSwapchains: false, captureStereoFrames: false, backend: 'emulator', setupDone: false },
+    pcEyeSize: 1600, vrRenderScale: 100, steamVrEyeSwapchains: false, captureStereoFrames: false, tracePlatform: false, backend: 'emulator', setupDone: false },
   emulatorTask: null, version: '0.2.0', updateProgress: '',
   games: [
     { ...catalog[0], source: 'meta', owned: true, installed: true, downloaded: true, apk: 'yeeps.apk', package: 'com.TrassGames.G2Companion', version: '1.42.0', lastPlayed: hours(3), description: describe('Yeeps') },

@@ -127,6 +127,7 @@ async function nativeChecks(root, sdk) {
   const parts = [
     ['Native runner', nativeExe, { action: 'native', label: 'Build Refract Native', note: 'Needs Visual Studio with C++, CMake, JDK 27 and native source dependencies. Takes several minutes.' }],
     ['ARM64 guest launcher', 'build-native/guest/bin/refract_app', { action: 'native', label: 'Build Refract Native', note: 'Needs Git Bash and Android NDK 27.3.13750724.' }],
+    ['Quest OS SDK shim', 'build-native/guest/lib64/libossdk.oculus.so', { action: 'native', label: 'Build Refract Native', note: 'Needs Git Bash and Android NDK 27.3.13750724.' }],
     ['Android Java shim', 'build-native/java/refract-android.jar', { action: 'native', label: 'Build Refract Native', note: 'Needs Android platform 34, the Android system files and dex2jar.' }],
     ['PC viewer', 'viewer/build/refract_viewer.exe', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++ and the Android SDK/NDK build packages. Takes a few minutes.' }],
     ['GPU sharing layer', 'build-windows-gpu-layer/Release/refract_gpu_layer.dll', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++ and the Android NDK. Takes a few minutes.' }],
@@ -137,7 +138,7 @@ async function nativeChecks(root, sdk) {
   for (const [label, file, fix] of parts) if (!await exists(path.join(root, file))) missing.push({ label, fix });
   const built = missing.length
     ? { ok: false, detail: `Not built yet: ${missing.map(m => m.label).join(', ')}.`, fix: missing[0].fix }
-    : { ok: true, detail: 'Native runner, ARM64 guest launcher, Android Java shim, PC viewer, GPU sharing layer and Refract runtime are built.' };
+    : { ok: true, detail: 'Native runner, ARM64 guest launcher, Quest OS SDK shim, Android Java shim, PC viewer, GPU sharing layer and Refract runtime are built.' };
   const sysroot = nativeSysroot(root);
   const firmware = await exists(path.join(sysroot, 'system'));
   const tools = [];

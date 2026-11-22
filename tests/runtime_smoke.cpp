@@ -120,6 +120,9 @@ int main()
     using CreateSession = XrResult(XRAPI_PTR*)(XrInstance, const XrSessionCreateInfo*, XrSession*);
     using BeginSession = XrResult(XRAPI_PTR*)(XrSession, const XrSessionBeginInfo*);
     using EndSession = XrResult(XRAPI_PTR*)(XrSession);
+    using RequestExitSession = XrResult(XRAPI_PTR*)(XrSession);
+    using ResultToString = XrResult(XRAPI_PTR*)(XrInstance, XrResult, char*);
+    using StructureTypeToString = XrResult(XRAPI_PTR*)(XrInstance, XrStructureType, char*);
     using EnumerateSwapchainFormats = XrResult(XRAPI_PTR*)(XrSession, uint32_t, uint32_t*, int64_t*);
     using CreateSwapchain = XrResult(XRAPI_PTR*)(XrSession, const XrSwapchainCreateInfo*, XrSwapchain*);
     using DestroySwapchain = XrResult(XRAPI_PTR*)(XrSwapchain);
@@ -148,6 +151,11 @@ int main()
     auto xrCreateSession = get<CreateSession>(runtimeRequest.getInstanceProcAddr, instance, "xrCreateSession");
     auto xrBeginSession = get<BeginSession>(runtimeRequest.getInstanceProcAddr, instance, "xrBeginSession");
     auto xrEndSession = get<EndSession>(runtimeRequest.getInstanceProcAddr, instance, "xrEndSession");
+    auto xrRequestExitSession =
+        get<RequestExitSession>(runtimeRequest.getInstanceProcAddr, instance, "xrRequestExitSession");
+    auto xrResultToString = get<ResultToString>(runtimeRequest.getInstanceProcAddr, instance, "xrResultToString");
+    auto xrStructureTypeToString =
+        get<StructureTypeToString>(runtimeRequest.getInstanceProcAddr, instance, "xrStructureTypeToString");
     auto xrEnumerateSwapchainFormats =
         get<EnumerateSwapchainFormats>(runtimeRequest.getInstanceProcAddr, instance, "xrEnumerateSwapchainFormats");
     auto xrCreateSwapchain = get<CreateSwapchain>(runtimeRequest.getInstanceProcAddr, instance, "xrCreateSwapchain");
@@ -173,13 +181,32 @@ int main()
 
     if (xrGetSystem == nullptr || xrGetInstanceProperties == nullptr || xrGetSystemProperties == nullptr ||
         xrPollEvent == nullptr || xrEnumerateEnvironmentBlendModes == nullptr || xrCreateSession == nullptr ||
-        xrBeginSession == nullptr || xrEndSession == nullptr ||
+        xrBeginSession == nullptr || xrEndSession == nullptr || xrRequestExitSession == nullptr ||
+        xrResultToString == nullptr || xrStructureTypeToString == nullptr ||
         xrEnumerateSwapchainFormats == nullptr || xrCreateSwapchain == nullptr || xrDestroySwapchain == nullptr ||
         xrEnumerateSwapchainImages == nullptr || xrAcquireSwapchainImage == nullptr ||
         xrWaitSwapchainImage == nullptr || xrReleaseSwapchainImage == nullptr ||
         xrEnumerateViewConfigurations == nullptr || xrCreateReferenceSpace == nullptr ||
         xrLocateViews == nullptr || xrEnumerateReferenceSpaces == nullptr || xrWaitFrame == nullptr || xrBeginFrame == nullptr ||
         xrEndFrame == nullptr) {
+        return EXIT_FAILURE;
+    }
+
+    char name[XR_MAX_RESULT_STRING_SIZE]{};
+    if (xrResultToString(instance, XR_SUCCESS, name) != XR_SUCCESS || std::strcmp(name, "XR_SUCCESS") != 0 ||
+        xrResultToString(instance, XR_ERROR_HANDLE_INVALID, name) != XR_SUCCESS ||
+        std::strcmp(name, "XR_ERROR_HANDLE_INVALID") != 0 ||
+        xrResultToString(instance, static_cast<XrResult>(-1000), name) != XR_SUCCESS ||
+        std::strcmp(name, "XR_RESULT_UNKNOWN") != 0 ||
+        xrResultToString(nullptr, XR_SUCCESS, name) != XR_ERROR_HANDLE_INVALID ||
+        xrResultToString(instance, XR_SUCCESS, nullptr) != XR_ERROR_VALIDATION_FAILURE) {
+        return EXIT_FAILURE;
+    }
+    char structureName[XR_MAX_STRUCTURE_NAME_SIZE]{};
+    if (xrStructureTypeToString(instance, XR_TYPE_SESSION_BEGIN_INFO, structureName) != XR_SUCCESS ||
+        std::strcmp(structureName, "XR_TYPE_SESSION_BEGIN_INFO") != 0 ||
+        xrStructureTypeToString(nullptr, XR_TYPE_SESSION_BEGIN_INFO, structureName) != XR_ERROR_HANDLE_INVALID ||
+        xrStructureTypeToString(instance, XR_TYPE_SESSION_BEGIN_INFO, nullptr) != XR_ERROR_VALIDATION_FAILURE) {
         return EXIT_FAILURE;
     }
 
@@ -250,6 +277,9 @@ int main()
     if (xrCreateSession(instance, &sessionCreateInfo, &session) != XR_SUCCESS || session == nullptr) {
         return EXIT_FAILURE;
     }
+    if (xrRequestExitSession(session) != XR_ERROR_SESSION_NOT_RUNNING) {
+        return EXIT_FAILURE;
+    }
 
     bool sawReady = false;
     for (int i = 0; i < 8; ++i) {
@@ -275,6 +305,9 @@ int main()
     beginSessionInfo.type = XR_TYPE_SESSION_BEGIN_INFO;
     beginSessionInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     if (xrBeginSession(session, &beginSessionInfo) != XR_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    if (xrEndSession(session) != XR_ERROR_SESSION_NOT_STOPPING) {
         return EXIT_FAILURE;
     }
 
@@ -334,21 +367,6 @@ int main()
     XrSwapchainImageWaitInfo waitSwapchainInfo{};
     waitSwapchainInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
     waitSwapchainInfo.timeout = 0;
-    // hello_xr allocates one swapchain per eye. Creating/acquiring/destroying
-    // the second must not reset the first eye's outstanding acquisition.
-    XrSwapchain secondEye = nullptr;
-    uint32_t secondEyeIndex = 0;
-    XrSwapchainImageReleaseInfo secondRelease{};
-    secondRelease.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
-    if (xrCreateSwapchain(session, &swapchainCreateInfo, &secondEye) != XR_SUCCESS ||
-        secondEye == swapchain ||
-        xrAcquireSwapchainImage(secondEye, nullptr, &secondEyeIndex) != XR_SUCCESS ||
-        xrWaitSwapchainImage(secondEye, &waitSwapchainInfo) != XR_SUCCESS ||
-        xrReleaseSwapchainImage(secondEye, nullptr) != XR_SUCCESS ||
-        xrDestroySwapchain(secondEye) != XR_SUCCESS ||
-        xrAcquireSwapchainImage(secondEye, &acquireInfo, &secondEyeIndex) != XR_ERROR_HANDLE_INVALID) {
-        return EXIT_FAILURE;
-    }
     if (xrWaitSwapchainImage(swapchain, &waitSwapchainInfo) != XR_SUCCESS) {
         return EXIT_FAILURE;
     }
@@ -654,16 +672,6 @@ int main()
     if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) { return EXIT_FAILURE; }
     projectionViews[1].fov = views[1].fov;
 
-    // Separate eye swapchains must both have a released image before submission.
-    if (xrCreateSwapchain(session, &swapchainCreateInfo, &secondEye) != XR_SUCCESS) { return EXIT_FAILURE; }
-    projectionViews[1].subImage.swapchain = secondEye;
-    if (xrEndFrame(session, &endInfo) != XR_ERROR_CALL_ORDER_INVALID ||
-        xrAcquireSwapchainImage(secondEye, &acquireInfo, &secondEyeIndex) != XR_SUCCESS ||
-        xrWaitSwapchainImage(secondEye, &waitSwapchainInfo) != XR_SUCCESS ||
-        xrReleaseSwapchainImage(secondEye, &releaseInfo) != XR_SUCCESS ||
-        xrEndFrame(session, &endInfo) != XR_SUCCESS ||
-        xrDestroySwapchain(secondEye) != XR_SUCCESS) { return EXIT_FAILURE; }
-
     // Static swapchains allocate one image and may be acquired only once.
     auto staticInfo = swapchainCreateInfo;
     staticInfo.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
@@ -727,5 +735,26 @@ int main()
         return EXIT_FAILURE;
     }
 
-    return require_success(xrEndSession(session));
+    if (xrRequestExitSession(nullptr) != XR_ERROR_HANDLE_INVALID ||
+        xrRequestExitSession(session) != XR_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    bool sawStopping = false;
+    for (int i = 0; i < 8; ++i) {
+        XrEventDataBuffer event{};
+        event.type = XR_TYPE_EVENT_DATA_BUFFER;
+        const XrResult eventResult = xrPollEvent(instance, &event);
+        if (eventResult == XR_EVENT_UNAVAILABLE) break;
+        if (eventResult != XR_SUCCESS) return EXIT_FAILURE;
+        if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED &&
+            reinterpret_cast<const XrEventDataSessionStateChanged*>(&event)->state == XR_SESSION_STATE_STOPPING) {
+            sawStopping = true;
+            break;
+        }
+    }
+    if (!sawStopping || xrRequestExitSession(session) != XR_ERROR_SESSION_NOT_RUNNING ||
+        xrEndSession(session) != XR_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }

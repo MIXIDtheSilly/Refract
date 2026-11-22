@@ -9,6 +9,7 @@
 namespace rn {
 
 int g_verbose = 1;
+bool g_trace_platform = false;
 
 static std::mutex g_log_mutex;
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds the ARM64 guest side: HLE stub libraries and the refract_app launcher,
+# Builds ARM64 guest compatibility libraries and the refract_app launcher,
 # into build-native/guest/{lib64,bin}.
 set -e
 SDK=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
@@ -27,6 +27,8 @@ for src in "$HERE"/gen/*.S; do
   $CC -shared -nostdlib -fPIC -Wl,-soname,"$name" -Wl,--hash-style=both -Wl,-z,max-page-size=4096 $extra \
       -o "$OUT/lib64/$name" "$src"
 done
+$CC -shared -nostdlib -fPIC -O2 -Wl,-soname,libossdk.oculus.so -Wl,--hash-style=both -Wl,-z,max-page-size=4096 \
+    -o "$OUT/lib64/libossdk.oculus.so" "$HERE/ossdk_stub.c"
 $CC -O2 -g -fPIE -pie -o "$OUT/bin/refract_app" "$HERE/refract_app.c" \
     -L"$OUT/lib64" -lrefract_host -lrefract_jni -ldl
 ls "$OUT/lib64" | tr '\n' ' '; echo

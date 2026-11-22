@@ -162,14 +162,37 @@ void SetupSystemProperties(const std::wstring& sysroot, const std::wstring& data
     props.emplace("debug.refract.direct_host", "0");
     props.emplace("debug.refract.platform.verbose", "0");
     LoadPlatformSettings(props);
-    props.emplace("ro.build.version.sdk", "32");
-    props.emplace("ro.build.version.release", "12");
+    props.emplace("ro.build.version.sdk", "34");
+    props.emplace("ro.build.version.release", "14");
+    props.emplace("ro.build.id", "UP1A.231005.007.A1");
+    props.emplace("ro.build.display.id", "UP1A.231005.007.A1");
+    props.emplace("ro.build.version.incremental", "52433670048800520");
+    props.emplace("ro.build.type", "user");
+    props.emplace("ro.build.tags", "release-keys");
     props.emplace("ro.product.manufacturer", "Oculus");
     props.emplace("ro.product.model", "Quest 3");
     props.emplace("ro.product.brand", "oculus");
-    props.emplace("ro.product.device", "hollywood");
-    props.emplace("ro.product.name", "hollywood");
-    props.emplace("ro.hardware", "hollywood");
+    props.emplace("ro.product.device", "eureka");
+    props.emplace("ro.product.name", "eureka");
+    props.emplace("ro.product.board", "eureka");
+    props.emplace("ro.hardware", "eureka");
+    props.emplace("ro.soc.manufacturer", "Qualcomm");
+    props.emplace("ro.soc.model", "SXR2230P");
+    for (const char* partition : {"system", "vendor"}) {
+        const std::string prefix = std::string("ro.product.") + partition + ".";
+        props.emplace(prefix + "brand", "oculus");
+        props.emplace(prefix + "device", "eureka");
+        props.emplace(prefix + "manufacturer", "Oculus");
+        props.emplace(prefix + "model", "Quest 3");
+        props.emplace(prefix + "name", "eureka");
+    }
+    props.emplace("ro.product.product.brand", "oculus");
+    props.emplace("ro.product.product.device", "eureka");
+    props.emplace("ro.product.product.manufacturer", "Oculus");
+    props.emplace("ro.product.product.name", "eureka");
+    // Meta's runtime recognizes the headset codename and otherwise selects its emulator device profile.
+    props.emplace("ro.product.product.model", "Eureka");
+    props.emplace("ro.kernel.qemu", "0");
     for (const wchar_t* f : {L"system/build.prop", L"system_ext/etc/build.prop", L"product/etc/build.prop",
                              L"vendor/build.prop", L"vendor/vendor_dlkm/etc/build.prop", L"odm/etc/build.prop",
                              L"system/system_dlkm/etc/build.prop", L"vendor/odm_dlkm/etc/build.prop"})

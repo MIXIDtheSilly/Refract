@@ -55,6 +55,7 @@ void Usage() {
             "  --env K=V            add a guest environment variable\n"
             "  --cpus N             CPUs reported to the guest (default: host count, max 8)\n"
             "  --trace LIB!SYM      log calls to a guest function (or LIB+0xOFFSET; trailing ~ = entry only)\n"
+            "  --trace-platform     log platform-related JNI calls without tracing every syscall\n"
             "  -v N                 verbosity (0-3)\n");
 }
 
@@ -170,6 +171,8 @@ int wmain(int argc, wchar_t** wargv) {
             extra_env.push_back(next());
         } else if (a == "--trace") {
             AddTrace(next());
+        } else if (a == "--trace-platform") {
+            g_trace_platform = true;
         } else if (a == "--cpus") {
             cpus = atoi(next().c_str());
         } else if (a == "-v") {
@@ -282,6 +285,8 @@ int wmain(int argc, wchar_t** wargv) {
         guest_libs = (exe_dir / L"guest" / L"lib64").wstring();
     for (const auto& entry : std::filesystem::directory_iterator(guest_libs, ec)) {
         const std::string name = Narrow(entry.path().filename().wstring());
+        if (name == "libossdk.oculus.so")
+            fs.Mount("/system_ext/lib64/" + name, entry.path().wstring(), false);
         fs.Mount("/system/lib64/" + name, entry.path().wstring(), false);
         RN_TRACE("stub library %s", name.c_str());
     }

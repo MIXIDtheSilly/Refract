@@ -331,7 +331,8 @@ export class Runtime {
       ...(validUserId(this.settings.userId) ? { UserId: this.settings.userId } : {}), ...(mode === 'pc' && validEyeSize(this.settings.pcEyeSize) ? { EyeSize: this.settings.pcEyeSize } : {}),
       ...(mode !== 'pc' && validRenderScale(this.settings.vrRenderScale) ? { RenderScale: this.settings.vrRenderScale } : {}),
       ...(mode !== 'pc' && this.settings.steamVrEyeSwapchains === true ? { SteamVrEyeSwapchains: true } : {}),
-      ...(mode !== 'pc' && this.settings.captureStereoFrames === true ? { CaptureStereoFrames: true } : {}) })
+      ...(mode !== 'pc' && this.settings.captureStereoFrames === true ? { CaptureStereoFrames: true } : {}),
+      ...(this.settings.tracePlatform === true ? { TracePlatform: true } : {}) })
       : powershellArgs(path.join(this.root, 'tools/run_windows_game.ps1'), { Avd: this.settings.avd, Port: this.port,
       Sdk: this.settings.sdk, MemoryMB: this.settings.memoryMB, Package: game.package, Activity: game.activity, GameName: game.name,
       ...(game.owned ? { Owned: true } : {}), ...(mode === 'pc' ? { PcViewer: true } : {}),

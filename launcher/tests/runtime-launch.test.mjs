@@ -168,10 +168,10 @@ test('Refract Native plays through run_native_game.ps1', { skip: process.platfor
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'tools'));
   await fs.writeFile(path.join(root, 'tools/run_native_game.ps1'), `
-param($Package, $GameName, $Sysroot, $ObbDir, [switch]$Owned, [switch]$PcViewer, [switch]$SteamVrEyeSwapchains, [switch]$CaptureStereoFrames, $UserId, $EyeSize, $RenderScale)
-Write-Host "NATIVE $Package|$GameName|$Owned|$PcViewer|$SteamVrEyeSwapchains|$CaptureStereoFrames|$UserId|$EyeSize|$RenderScale"`);
-  const runtime = new Runtime(root, { backend: 'native', userId: '123', pcEyeSize: 1280, steamVrEyeSwapchains: true, captureStereoFrames: true });
-  for (const [mode, expected] of [['pc', 'True|True|False|False|123|1280|'], ['vr', 'True|False|True|True|123||']]) {
+param($Package, $GameName, $Sysroot, $ObbDir, [switch]$Owned, [switch]$PcViewer, [switch]$SteamVrEyeSwapchains, [switch]$CaptureStereoFrames, [switch]$TracePlatform, $UserId, $EyeSize, $RenderScale)
+Write-Host "NATIVE $Package|$GameName|$Owned|$PcViewer|$SteamVrEyeSwapchains|$CaptureStereoFrames|$TracePlatform|$UserId|$EyeSize|$RenderScale"`);
+  const runtime = new Runtime(root, { backend: 'native', userId: '123', pcEyeSize: 1280, steamVrEyeSwapchains: true, captureStereoFrames: true, tracePlatform: true });
+  for (const [mode, expected] of [['pc', 'True|True|False|False|True|123|1280|'], ['vr', 'True|False|True|True|True|123||']]) {
     const tail = await new Promise(resolve => runtime.launch({ id: 'g', package: 'com.example.game', name: 'Game', owned: true }, (code, text) => resolve(`${code}:${text}`), mode));
     assert.match(tail, new RegExp(`^0:[\\\\s\\\\S]*NATIVE com\\\\.example\\\\.game\\\\|Game\\\\|${expected.replaceAll('|', '\\\\|')}`));
   }

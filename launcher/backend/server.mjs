@@ -330,7 +330,7 @@ const methods = {
   },
   settings: async values => {
     const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'downloadDir', 'cores', 'showWindow', 'audio', 'hostMic', 'keepEmulator', 'userId',
-      'pcEyeSize', 'vrRenderScale', 'steamVrEyeSwapchains', 'captureStereoFrames', 'backend', 'setupDone'];
+      'pcEyeSize', 'vrRenderScale', 'steamVrEyeSwapchains', 'captureStereoFrames', 'tracePlatform', 'backend', 'setupDone'];
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
     if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
     const settings = { ...state.data.settings };
@@ -342,6 +342,7 @@ const methods = {
       ['showWindow', 'hostMic', 'keepEmulator'].some(key => typeof settings[key] !== 'boolean')) throw new Error('Check the emulator CPU cores (1 to 6) and audio settings.');
     if (typeof settings.steamVrEyeSwapchains !== 'boolean') throw new Error('Check the SteamVR separate eye swapchains setting.');
     if (typeof settings.captureStereoFrames !== 'boolean') throw new Error('Check the stereo diagnostic capture setting.');
+    if (typeof settings.tracePlatform !== 'boolean') throw new Error('Check the platform tracing setting.');
     settings.userId = String(settings.userId ?? '').trim();
     if (!validUserId(settings.userId)) throw new Error('The user ID must be a whole number from 1 to 9223372036854775807.');
     if (!validEyeSize(settings.pcEyeSize) || !validRenderScale(settings.vrRenderScale))
@@ -483,7 +484,7 @@ const loaded = (async () => {
   // Digitalis (the ARM64 translator Refract needs) is built for Android 16, so the default AVD is API 36.
   state.data.settings = { avd: 'refract-google-api36', port: 5580, memoryMB: 8192, downloadDir: path.join(os.homedir(), 'Downloads', 'Refract'),
     cores: 6, showWindow: false, audio: 'dsound', hostMic: true, keepEmulator: false, pcEyeSize: 1600, vrRenderScale: 100,
-    steamVrEyeSwapchains: false, captureStereoFrames: false,
+    steamVrEyeSwapchains: false, captureStereoFrames: false, tracePlatform: false,
     // First run shows the setup wizard, which asks which runtime to use (Settings > Runtime changes it later);
     // new Windows installs start on Refract Native, the recommended one.
     backend: linux ? 'emulator' : 'native', setupDone: false, ...state.data.settings };

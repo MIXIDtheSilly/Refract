@@ -74,11 +74,13 @@ export function SettingsPage({ state, run, pending, notify, connect, setPage }) 
       </section>
       {state.platform !== 'linux' && <section className="panel">
         <h2>Debug</h2>
-        <p>Experimental projection diagnostics. Changes apply the next time a VR game starts.</p>
+        <p>Optional diagnostics for VR and Refract Native. Changes apply the next time a game starts.</p>
         {toggle('steamVrEyeSwapchains', 'SteamVR separate eye swapchains',
           'Experimental compatibility option for duplicated eye images.')}
         {toggle('captureStereoFrames', 'Capture stereo diagnostic frames',
           'Saves up to four pairs of eye images in build-windows-game. Game content may be visible; turn this off after capturing.')}
+        {draft.backend === 'native' && toggle('tracePlatform', 'Verbose platform tracing',
+          'Refract Native only. Logs platform-related JNI calls, OpenXR calls, and platform SDK messages; the game log can grow quickly, so turn this off after capturing.')}
       </section>}
       {draft.backend !== 'native' && <section className="panel">
         <div className="panel-row">
