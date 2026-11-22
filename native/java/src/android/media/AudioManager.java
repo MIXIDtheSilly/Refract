@@ -17,8 +17,11 @@ public class AudioManager {
     public static final int GET_DEVICES_INPUTS = 1, GET_DEVICES_OUTPUTS = 2, GET_DEVICES_ALL = 3;
 
     private final int[] volumes = {10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10};
+    private final Spatializer spatializer = new Spatializer();
 
     public AudioManager() {}
+
+    public Spatializer getSpatializer() { return spatializer; }
 
     public String getProperty(String key) {
         if (PROPERTY_OUTPUT_SAMPLE_RATE.equals(key)) return Integer.toString(HostAudio.mixRate());
