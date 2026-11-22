@@ -1,5 +1,9 @@
 add_test(NAME refract_host_bridge_starts COMMAND refract-host-bridge)
 
+add_executable(refract_controller_bindings_smoke controller_bindings_smoke.cpp)
+target_include_directories(refract_controller_bindings_smoke PRIVATE ${PROJECT_SOURCE_DIR}/host-bridge)
+add_test(NAME refract_controller_bindings COMMAND refract_controller_bindings_smoke)
+
 add_executable(refract_menu_shortcut_smoke menu_shortcut_smoke.cpp)
 target_link_libraries(refract_menu_shortcut_smoke PRIVATE refract_protocol)
 add_test(NAME refract_menu_shortcut COMMAND refract_menu_shortcut_smoke)

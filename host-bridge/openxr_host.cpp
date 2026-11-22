@@ -1,4 +1,5 @@
 #include "openxr_host.h"
+#include "controller_bindings.h"
 #include "menu_shortcut.h"
 #include "preview_window.h"
 #include "perf_stats.h"
@@ -3140,6 +3141,7 @@ private:
 
     enum InputAction { Trigger, Squeeze, Stick, Primary, Secondary, Menu, StickPress,
                        PrimaryContact, SecondaryContact, TriggerContact, StickContact, ThumbrestContact, InputCount };
+    static_assert(InputCount == refract::host::kControllerInputCount);
 
     void initialize_hand_tracking() {
         if (!handTrackingEnabled_ || !load_func("xrCreateHandTrackerEXT", &createHandTracker_) ||
@@ -3235,9 +3237,12 @@ private:
             }
         }
 
-        suggest_pose_bindings("/interaction_profiles/oculus/touch_controller", "/input/grip/pose");
-        suggest_pose_bindings("/interaction_profiles/valve/index_controller", "/input/grip/pose");
-        suggest_pose_bindings("/interaction_profiles/htc/vive_controller", "/input/grip/pose");
+        suggest_pose_bindings("/interaction_profiles/oculus/touch_controller", "/input/grip/pose",
+            refract::host::ControllerProfile::Touch);
+        suggest_pose_bindings("/interaction_profiles/valve/index_controller", "/input/grip/pose",
+            refract::host::ControllerProfile::ValveIndex);
+        suggest_pose_bindings("/interaction_profiles/htc/vive_controller", "/input/grip/pose",
+            refract::host::ControllerProfile::Vive);
 
         XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
         attachInfo.countActionSets = 1;
@@ -3301,7 +3306,10 @@ public:
     }
 
 private:
-    void suggest_pose_bindings(const char* interactionProfilePath, const char* poseInputSuffix)
+    void suggest_pose_bindings(
+        const char* interactionProfilePath,
+        const char* poseInputSuffix,
+        refract::host::ControllerProfile controllerProfile)
     {
         if (handPoseAction_ == XR_NULL_HANDLE) {
             return;
@@ -3333,26 +3341,13 @@ private:
                 string_to_path((std::string("/user/hand/") + hand + "/output/haptic").c_str(), &path))
                 bindings.push_back({hapticAction_, path});
         }
-        const bool touch = std::strstr(interactionProfilePath, "oculus") != nullptr;
-        const bool vive = std::strstr(interactionProfilePath, "vive") != nullptr;
         for (size_t hand = 0; hand < 2; ++hand) {
-            const char* primary = touch && hand == 0 ? "x" : "a";
-            const char* secondary = touch && hand == 0 ? "y" : "b";
-            std::array<std::string, InputCount> components{
-                "trigger/value", vive ? "squeeze/click" : "squeeze/value",
-                vive ? "trackpad" : "thumbstick",
-                vive ? "" : std::string(primary) + "/click",
-                vive ? "" : std::string(secondary) + "/click",
-                vive || (touch && hand == 0) ? "menu/click" : "",
-                vive ? "trackpad/click" : "thumbstick/click",
-                vive ? "" : std::string(primary) + "/touch",
-                vive ? "" : std::string(secondary) + "/touch",
-                vive ? "" : "trigger/touch",
-                vive ? "trackpad/touch" : "thumbstick/touch",
-                touch ? "thumbrest/touch" : ""};
+            const auto components = refract::host::controller_input_components(controllerProfile, hand);
             for (size_t i = 0; i < InputCount; ++i) {
                 if (components[i].empty()) continue;
-                const std::string path = std::string(hand == 0 ? "/user/hand/left/input/" : "/user/hand/right/input/") + components[i];
+                const std::string path =
+                    std::string(hand == 0 ? "/user/hand/left/input/" : "/user/hand/right/input/") +
+                    std::string(components[i]);
                 XrPath binding = XR_NULL_PATH;
                 if (string_to_path(path.c_str(), &binding)) bindings.push_back({inputActions_[i], binding});
             }

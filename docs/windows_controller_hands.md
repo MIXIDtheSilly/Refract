@@ -1,5 +1,25 @@
 # Windows controller poses and hands
 
+## Valve Index / Knuckles input mapping
+
+The host automatically uses SteamVR's Valve Index interaction profile when
+Index controllers are active and maps its controls to the Quest Touch inputs
+expected by Android games:
+
+| Index controller | Quest Touch input |
+| --- | --- |
+| Left X / Y | Left X / Y |
+| Right A / B | Right A / B |
+| Trigger | Trigger (analog) |
+| Grip squeeze | Grip (analog) |
+| Thumbstick and click | Thumbstick and click |
+| Thumbstick, trigger, face-button and thumbrest touch | Matching Touch inputs |
+| Controller vibration | Haptics |
+
+SteamVR reserves the Index system button, so it is not exposed as an in-game
+menu button. Use the both-thumbsticks-clicked shortcut below for the game's
+left menu action.
+
 ## Game menu shortcut
 
 Hold both thumbsticks clicked for half a second to press the game's left-hand
