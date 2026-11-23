@@ -15,13 +15,16 @@ export async function refreshPath() {
 }
 
 // Build outputs a game session uses, with the script that makes each.
-function components(root, sdk) {
+function components(root, sdk, jdk) {
   return [
     { label: 'Host bridge', file: 'build-windows-nvidia/host-bridge/refract-host-bridge.exe', build: ['cmd.exe', ['/d', '/c', path.join(root, 'build_host.cmd')]] },
-    { label: 'PC viewer', file: 'viewer/build/refract_viewer.exe', build: ['cmd.exe', ['/d', '/c', path.join(root, 'viewer/build.bat')]] },
-    { label: 'GPU sharing layer', file: 'build-windows-gpu-layer/Release/refract_gpu_layer.json', build: ['powershell.exe', powershellArgs(path.join(root, 'tools/windows_gpu_layer/build.ps1'), {})] },
-    ...guestPackages.map(p => ({ label: p.label, file: p.apk, build: ['powershell.exe', powershellArgs(path.join(root, p.package === 'com.oculus.horizon' ? 'platform-sdk/build_apk.ps1' : 'android-runtime-apk/build_apk.ps1'),
-      p.package === 'com.oculus.horizon' ? { Sdk: sdk } : { Sdk: sdk, Abi: 'arm64-v8a' })] })),
+    { label: 'PC viewer', file: 'viewer/build/refract_viewer.exe', build: ['cmd.exe', ['/d', '/c', path.join(root, 'viewer/build.bat')], { env: { ANDROID_SDK_ROOT: sdk } }] },
+    { label: 'GPU sharing layer', file: 'build-windows-gpu-layer/Release/refract_gpu_layer.dll', build: ['powershell.exe', powershellArgs(path.join(root, 'tools/windows_gpu_layer/build.ps1'), {})] },
+    ...guestPackages.map(p => {
+      const parameters = p.package === 'com.oculus.horizon' ? { Sdk: sdk } : { Sdk: sdk, Abi: 'arm64-v8a' };
+      if (jdk) parameters.Jdk = jdk;
+      return { label: p.label, file: p.apk, build: ['powershell.exe', powershellArgs(path.join(root, p.package === 'com.oculus.horizon' ? 'platform-sdk/build_apk.ps1' : 'android-runtime-apk/build_apk.ps1'), parameters)] };
+    }),
     { label: 'ARM translator (Digitalis)', file: 'prebuilts/digitalis/system' },
   ];
 }
@@ -116,11 +119,18 @@ const nativeJdks = root => [path.join(root, 'jdk/bin/javac.exe'), process.env.JA
   'C:/Program Files/Java/jdk-27/bin/javac.exe'].filter(Boolean);
 const nativeDex2jars = root => [path.join(root, 'tools/dex2jar/d2j-dex2jar.bat'), path.join(root, '../external/dex2jar/d2j-dex2jar.bat')];
 const anyExists = async files => (await Promise.all(files.map(exists))).some(Boolean);
+async function nativeJdk(root) {
+  for (const javac of nativeJdks(root)) if (await exists(javac)) return path.dirname(path.dirname(javac));
+  throw new Error('JDK 27 was not found. Open Settings > Setup.');
+}
 async function nativeChecks(root, sdk) {
   const parts = [
-    ['Native runner', nativeExe, { action: 'native', label: 'Build Refract Native', note: 'Needs Visual Studio with C++ and CMake. Takes several minutes.' }],
-    ['PC viewer', 'viewer/build/refract_viewer.exe', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++. Takes a few minutes.' }],
-    ['GPU sharing layer', 'build-windows-gpu-layer/Release/refract_gpu_layer.json', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++. Takes a few minutes.' }],
+    ['Native runner', nativeExe, { action: 'native', label: 'Build Refract Native', note: 'Needs Visual Studio with C++, CMake, JDK 27 and native source dependencies. Takes several minutes.' }],
+    ['ARM64 guest launcher', 'build-native/guest/bin/refract_app', { action: 'native', label: 'Build Refract Native', note: 'Needs Git Bash and Android NDK 27.3.13750724.' }],
+    ['Quest OS SDK shim', 'build-native/guest/lib64/libossdk.oculus.so', { action: 'native', label: 'Build Refract Native', note: 'Needs Git Bash and Android NDK 27.3.13750724.' }],
+    ['Android Java shim', 'build-native/java/refract-android.jar', { action: 'native', label: 'Build Refract Native', note: 'Needs Android platform 34, the Android system files and dex2jar.' }],
+    ['PC viewer', 'viewer/build/refract_viewer.exe', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++ and the Android SDK/NDK build packages. Takes a few minutes.' }],
+    ['GPU sharing layer', 'build-windows-gpu-layer/Release/refract_gpu_layer.dll', { action: 'build', label: 'Build missing parts', note: 'Needs Visual Studio with C++ and the Android NDK. Takes a few minutes.' }],
     ['Refract runtime (ARM64)', 'build-android-runtime-windows-arm64-v8a/systemdriver/package/lib/arm64-v8a/libopenxr_runtime.so', { action: 'nativeRuntime', label: 'Build runtime', note: 'Needs the Android NDK.' }],
     ['Platform stand-in (ARM64)', 'build-platform-sdk/package/lib/arm64-v8a/librefract_ovrplatform.so', { action: 'nativeRuntime', label: 'Build runtime', note: 'Needs the Android NDK.' }],
   ];
@@ -128,18 +138,22 @@ async function nativeChecks(root, sdk) {
   for (const [label, file, fix] of parts) if (!await exists(path.join(root, file))) missing.push({ label, fix });
   const built = missing.length
     ? { ok: false, detail: `Not built yet: ${missing.map(m => m.label).join(', ')}.`, fix: missing[0].fix }
-    : { ok: true, detail: 'Native runner, PC viewer, GPU sharing layer and Refract runtime are built.' };
+    : { ok: true, detail: 'Native runner, ARM64 guest launcher, Quest OS SDK shim, Android Java shim, PC viewer, GPU sharing layer and Refract runtime are built.' };
   const sysroot = nativeSysroot(root);
   const firmware = await exists(path.join(sysroot, 'system'));
   const tools = [];
   if (!await anyExists(nativeJdks(root))) tools.push('JDK 27');
   if (!await anyExists(nativeDex2jars(root))) tools.push('dex2jar');
-  if (!await exists(path.join(sdk, 'build-tools'))) tools.push('Android build-tools');
+  if (!await exists(path.join(sdk, 'build-tools/36.1.0/aapt2.exe'))) tools.push('Android build-tools 36.1.0');
+  if (!await exists(path.join(sdk, 'ndk/27.3.13750724/build/cmake/android.toolchain.cmake'))) tools.push('Android NDK 27.3.13750724');
+  if (!await exists(path.join(sdk, 'platforms/android-29/android.jar'))) tools.push('Android platform 29');
+  if (!await exists(path.join(sdk, 'platforms/android-34/android.jar'))) tools.push('Android platform 34');
+  if (!await exists(path.join(sdk, 'cmake/3.22.1/bin/cmake.exe'))) tools.push('CMake 3.22.1');
   return [{ id: 'native', title: 'Refract Native', ...built },
     { id: 'firmware', title: 'Android system files', ok: firmware, detail: firmware ? 'Android 14 ARM64 libraries are ready.' : 'Refract Native runs games on the Android system libraries from Google ARM64 system image.',
       ...(firmware ? {} : { fix: { action: 'sysroot', label: 'Download', note: 'Downloads about 700 MB from Google. Downloading accepts the Android SDK License Agreement (developer.android.com/studio/terms).' } }) },
     { id: 'nativetools', title: 'Game conversion tools', ok: !tools.length, detail: tools.length ? `Missing: ${tools.join(', ')}.` : 'JDK, dex2jar and Android build-tools found.',
-      ...(tools.includes('Android build-tools') ? { fix: { action: 'buildTools', label: 'Download', note: 'Downloads Android build tools (about 60 MB) from Google. Downloading accepts the Android SDK License Agreement (developer.android.com/studio/terms).' } } : {}) }];
+      ...(tools.includes('Android build-tools 36.1.0') || tools.includes('Android platform 34') ? { fix: { action: 'buildTools', label: 'Download', note: 'Downloads Android build tools 36.1.0 and platform 34 (about 120 MB) from Google. Downloading accepts the Android SDK License Agreement (developer.android.com/studio/terms).' } } : {}) }];
 }
 
 export async function checkSetup(root, settings) {
@@ -174,14 +188,17 @@ export async function fixSetup(root, settings, action, progress = () => {}) {
       return;
     }
     case 'native':
-      await run('cmd.exe', ['/d', '/c', path.join(root, 'native/build.cmd')], { ...long, cwd: root }); return;
+      await run('cmd.exe', ['/d', '/c', path.join(root, 'native/build.cmd')], { ...long, cwd: root,
+        env: { ANDROID_SDK_ROOT: settings.sdk },
+        onOutput: text => { const line = text.trim().split(/\r?\n/).pop(); if (line) progress(line.slice(0, 120)); } });
+      return;
     case 'nativeRuntime':
-      for (const [script, parameters] of [['android-runtime-apk/build_apk.ps1', { Sdk: settings.sdk, Abi: 'arm64-v8a' }], ['platform-sdk/build_apk.ps1', { Sdk: settings.sdk }]])
+      for (const [script, parameters] of [['android-runtime-apk/build_apk.ps1', { Sdk: settings.sdk, Jdk: await nativeJdk(root), Abi: 'arm64-v8a' }], ['platform-sdk/build_apk.ps1', { Sdk: settings.sdk, Jdk: await nativeJdk(root) }]])
         await run('powershell.exe', powershellArgs(path.join(root, script), parameters), { ...long, cwd: root });
       return;
     case 'build':
-      for (const item of components(root, settings.sdk)) {
-        if (item.build && !await exists(path.join(root, item.file))) await run(item.build[0], item.build[1], { ...long, cwd: root });
+      for (const item of components(root, settings.sdk, settings.backend === 'native' ? await nativeJdk(root) : undefined)) {
+        if (item.build && !await exists(path.join(root, item.file))) await run(item.build[0], item.build[1], { ...long, cwd: root, ...item.build[2] });
       }
       return;
     default: throw new Error('Unknown setup step.');

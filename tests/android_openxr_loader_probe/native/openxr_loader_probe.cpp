@@ -150,7 +150,7 @@ std::string run_probe(JNIEnv* env, jobject activity)
         "Refract",
         XR_MAX_ENGINE_NAME_SIZE - 1);
     createInfo.applicationInfo.engineVersion = 1;
-    createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+    createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 1, 51);
 
     XrInstance instance = XR_NULL_HANDLE;
     result = xrCreateInstance(&createInfo, &instance);
@@ -168,6 +168,7 @@ std::string run_probe(JNIEnv* env, jobject activity)
     PFN_xrCreateSession xrCreateSession = nullptr;
     PFN_xrBeginSession xrBeginSession = nullptr;
     PFN_xrEndSession xrEndSession = nullptr;
+    PFN_xrRequestExitSession xrRequestExitSession = nullptr;
     PFN_xrDestroySession xrDestroySession = nullptr;
     PFN_xrEnumerateSwapchainFormats xrEnumerateSwapchainFormats = nullptr;
     PFN_xrCreateSwapchain xrCreateSwapchain = nullptr;
@@ -195,6 +196,7 @@ std::string run_probe(JNIEnv* env, jobject activity)
         !load_instance_proc(instance, "xrCreateSession", &xrCreateSession, &error) ||
         !load_instance_proc(instance, "xrBeginSession", &xrBeginSession, &error) ||
         !load_instance_proc(instance, "xrEndSession", &xrEndSession, &error) ||
+        !load_instance_proc(instance, "xrRequestExitSession", &xrRequestExitSession, &error) ||
         !load_instance_proc(instance, "xrDestroySession", &xrDestroySession, &error) ||
         !load_instance_proc(instance, "xrEnumerateSwapchainFormats", &xrEnumerateSwapchainFormats, &error) ||
         !load_instance_proc(instance, "xrCreateSwapchain", &xrCreateSwapchain, &error) ||
@@ -479,6 +481,24 @@ std::string run_probe(JNIEnv* env, jobject activity)
     if (result != XR_SUCCESS) {
         return result_code("xrEndFrame", result);
     }
+
+    result = xrRequestExitSession(session);
+    if (result != XR_SUCCESS) {
+        return result_code("xrRequestExitSession", result);
+    }
+    bool sawStopping = false;
+    for (int i = 0; i < 8; ++i) {
+        XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
+        result = xrPollEvent(instance, &event);
+        if (result == XR_EVENT_UNAVAILABLE) break;
+        if (result != XR_SUCCESS) return result_code("xrPollEvent", result);
+        if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED &&
+            reinterpret_cast<const XrEventDataSessionStateChanged*>(&event)->state == XR_SESSION_STATE_STOPPING) {
+            sawStopping = true;
+            break;
+        }
+    }
+    if (!sawStopping) return result_code("xrRequestExitSession event", XR_ERROR_RUNTIME_FAILURE);
 
     result = xrEndSession(session);
     if (result != XR_SUCCESS) {

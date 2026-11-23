@@ -23,6 +23,8 @@ param(
     # headset's recommended eye size in VR; the host bridge reads it as REFRACT_RENDER_SCALE.
     [ValidateRange(512, 4096)][int]$EyeSize = 1600,
     [ValidateRange(25, 200)][int]$RenderScale = 100,
+    [switch]$SteamVrEyeSwapchains,
+    [switch]$CaptureStereoFrames,
     # build_host.cmd (Ninja) writes host-bridge\refract-host-bridge.exe; multi-config generators add Release\.
     [string]$HostExe
 )
@@ -222,14 +224,22 @@ try {
         $closeRequest = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, $closeEventName)
         $closeReady = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, "$closeEventName.ready")
         $previousCloseEvent = $env:REFRACT_CLOSE_EVENT
+        $previousSteamVrEyeSwapchains = $env:REFRACT_STEAMVR_EYE_SWAPCHAINS
+        $previousCapturePrefix = $env:REFRACT_CAPTURE_PREFIX
         try {
             $env:REFRACT_CLOSE_EVENT = $closeEventName
             # The headset's performance panel (hold Y + B) polls Android CPU and the game's threads over adb.
             $env:REFRACT_ADB = $adb; $env:REFRACT_SERIAL = $serial; $env:REFRACT_PACKAGE = $Package
             $env:REFRACT_RENDER_SCALE = $RenderScale
+            $env:REFRACT_STEAMVR_EYE_SWAPCHAINS = if ($SteamVrEyeSwapchains) { '1' } else { '0' }
+            if ($CaptureStereoFrames) { $env:REFRACT_CAPTURE_PREFIX = Join-Path $logs 'stereo' }
             $sessionProcess = Start-Process -FilePath $HostExe -ArgumentList @('--serve-openxr', '38490', '0', $titleArgument) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\host.log" -RedirectStandardError "$logs\host.err"
         } finally {
             $env:REFRACT_CLOSE_EVENT = $previousCloseEvent
+            if ($null -eq $previousSteamVrEyeSwapchains) { Remove-Item Env:REFRACT_STEAMVR_EYE_SWAPCHAINS -ErrorAction SilentlyContinue }
+            else { $env:REFRACT_STEAMVR_EYE_SWAPCHAINS = $previousSteamVrEyeSwapchains }
+            if ($null -eq $previousCapturePrefix) { Remove-Item Env:REFRACT_CAPTURE_PREFIX -ErrorAction SilentlyContinue }
+            else { $env:REFRACT_CAPTURE_PREFIX = $previousCapturePrefix }
             Remove-Item Env:REFRACT_ADB, Env:REFRACT_SERIAL, Env:REFRACT_PACKAGE, Env:REFRACT_RENDER_SCALE -ErrorAction SilentlyContinue
         }
         $null = $sessionProcess.Handle  # Keeps ExitCode readable after the process ends.

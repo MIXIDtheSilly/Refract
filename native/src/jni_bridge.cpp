@@ -278,7 +278,7 @@ void NoteName(jmethodID m, const char* name, const char* sig) {
     // UE4 looks its quit thunk up at startup; log where it is called from instead.
     if (m && (strstr(name, "ForceQuit") || !strcmp(name, "exit") || !strcmp(name, "halt") || !strcmp(name, "killProcess")))
         g_quit_mids.Add(m);
-    if (g_verbose < 3 || !m)
+    if ((g_verbose < 3 && !g_trace_platform) || !m)
         return;
     std::lock_guard lk(g_mid_names_mu);
     g_mid_names[m] = std::string(name) + sig;
@@ -287,6 +287,19 @@ std::string NameOf(jmethodID m) {
     std::lock_guard lk(g_mid_names_mu);
     auto it = g_mid_names.find(m);
     return it == g_mid_names.end() ? "?" : it->second;
+}
+
+bool IsPlatformTraceMethod(const std::string& method) {
+    static constexpr const char* names[] = {
+        "getPackageInfo", "getApplicationInfo", "getPackageManager", "hasSystemFeature",
+        "getSystemAvailableFeatures", "getPackageName", "getSystemService",
+        "getPackStates", "getPackLocation", "getPackStatus", "fetch",
+        "cancel", "showCellularDataConfirmation", "loadLibrary", "findLibrary"
+    };
+    for (const char* name : names)
+        if (method.find(name) != std::string::npos)
+            return true;
+    return false;
 }
 
 enum CallKind { kVirtual, kNonvirtual, kStatic };
@@ -309,8 +322,11 @@ void JniCallInner(GuestThread* t) {
         cls = reinterpret_cast<jclass>(rd.NextInt());
     }
     jmethodID mid = reinterpret_cast<jmethodID>(rd.NextInt());
-    if (g_verbose >= 3)
-        Log("JNI call %s tid %d", NameOf(mid).c_str(), t->tid);
+    if (g_verbose >= 3 || g_trace_platform) {
+        const std::string method = NameOf(mid);
+        if (g_verbose >= 3 || IsPlatformTraceMethod(method))
+            Log("JNI call %s tid %d", method.c_str(), t->tid);
+    }
     if (g_quit_mids.Has(mid)) {
         std::string name, sig;
         JavaMethodName(Env(), mid, &name, &sig);

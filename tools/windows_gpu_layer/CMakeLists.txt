@@ -37,4 +37,4 @@ file(GENERATE OUTPUT "$<TARGET_FILE_DIR:refract_gpu_layer>/refract_gpu_layer.jso
 add_executable(refract_gpu_receiver_probe receiver_probe.cpp)
 target_include_directories(refract_gpu_receiver_probe PRIVATE ../../protocol)
 target_compile_definitions(refract_gpu_receiver_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(refract_gpu_receiver_probe PRIVATE d3d11 dxgi)
+target_link_libraries(refract_gpu_receiver_probe PRIVATE d3d11 d3dcompiler dxgi)

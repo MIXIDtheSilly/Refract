@@ -9,12 +9,30 @@ add_executable(refract-host-bridge
   steamvr_backend.cpp
 )
 
+set(REFRACT_OPENXR_HEADERS "" CACHE PATH "Directory holding openxr/openxr.h")
+if(NOT REFRACT_OPENXR_HEADERS)
+  set(_refract_openxr_candidates
+    "${PROJECT_SOURCE_DIR}/third_party/openxr-loader-aar/extracted/prefab/modules/headers/include"
+    "${CMAKE_BINARY_DIR}/_deps/openxr-sdk/include"
+    "${PROJECT_SOURCE_DIR}/build-windows-nvidia/_deps/openxr-sdk/include"
+  )
+  foreach(_candidate IN LISTS _refract_openxr_candidates)
+    if(EXISTS "${_candidate}/openxr/openxr.h")
+      set(REFRACT_OPENXR_HEADERS "${_candidate}")
+      break()
+    endif()
+  endforeach()
+endif()
+if(NOT EXISTS "${REFRACT_OPENXR_HEADERS}/openxr/openxr.h")
+  message(FATAL_ERROR "OpenXR headers not found. Run build_host.cmd or set REFRACT_OPENXR_HEADERS.")
+endif()
+
 target_include_directories(refract-host-bridge
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/protocol
     ${PROJECT_SOURCE_DIR}/viewer  # android_stats.h, shared with the PC viewer's overlay.
-    ${PROJECT_SOURCE_DIR}/third_party/openxr-loader-aar/extracted/prefab/modules/headers/include
+    ${REFRACT_OPENXR_HEADERS}
 )
 
 target_link_libraries(refract-host-bridge

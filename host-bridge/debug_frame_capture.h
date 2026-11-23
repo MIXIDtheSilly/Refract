@@ -13,7 +13,7 @@
 // A frame may be captured slice by slice (scene eyes, then each panel); the
 // first slice of a new frame decides whether that frame is captured at all.
 inline void debug_capture_frame(ID3D11DeviceContext* context, ID3D11Texture2D* image,
-    UINT width, UINT height, uint64_t sequence, UINT slice = 0, const char* label = nullptr) {
+    UINT width, UINT height, uint64_t sequence, UINT slice = 0, const char* label = nullptr, const char* fileTag = nullptr) {
     static const std::string prefix = [] {const char* p=std::getenv("REFRACT_CAPTURE_PREFIX");return p?std::string(p):std::string();}();
     static unsigned captured=0;
     static uint64_t frame=UINT64_MAX;
@@ -39,7 +39,7 @@ inline void debug_capture_frame(ID3D11DeviceContext* context, ID3D11Texture2D* i
     context->CopySubresourceRegion(staging.Get(),0,0,0,0,image,D3D11CalcSubresource(0,slice,mips),&box);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped))) return;
-    const auto file=prefix+"-"+std::to_string(sequence)+"-s"+std::to_string(slice)+".ppm";
+    const auto file=prefix+"-"+std::to_string(sequence)+(fileTag?std::string("-")+fileTag:std::string())+"-s"+std::to_string(slice)+".ppm";
     std::ofstream output(file,std::ios::binary);
     output<<"P6\n"<<width<<" "<<height<<"\n255\n";
     std::string row(width*3,'\0');

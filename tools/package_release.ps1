@@ -64,8 +64,8 @@ Add 'build-android-runtime-windows-arm64-v8a\refract-openxr-runtime-debug.apk'
 Add 'build-android-runtime-windows-arm64-v8a\refract-systemdriver-debug.apk'
 Add 'build-platform-sdk\refract-platform-debug.apk'
 foreach ($item in 'system', 'NOTICE', 'README.md', 'MANIFEST.txt', 'SHA256SUMS') { Add "prebuilts\digitalis\$item" }
-# Refract Native: the runner and its guest launcher and Android framework shim, Refract's ARM64 runtime libraries,
-# and what native\tools\install_apk.py converts games with (the Java sources it compiles into each game).
+# Refract Native: the runner, guest launcher and compatibility libraries, Android framework shim, Refract's ARM64
+# runtime libraries, and what native\tools\install_apk.py converts games with (the Java sources it compiles into each game).
 Add 'build-native\refract_native.exe'
 Add 'build-native\guest'
 Add 'build-native\java\refract-android.jar'

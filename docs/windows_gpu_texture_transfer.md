@@ -53,8 +53,13 @@ loader rejects a relative path.
    the frame sequence. Only then can the guest overwrite the shared textures.
 5. A mutex publishes cached pixels together with their projection metadata.
    The cache itself has an NT shared handle, opened on the OpenXR binding device.
-   The host frame loop copies it into the current OpenXR swapchain image and
-   waits for a GPU event before releasing the mutex, allowing the receive
+   The host frame loop copies it into the current OpenXR swapchain image; when
+   SteamVR is the active runtime and the **SteamVR separate eye swapchains**
+   option is enabled in **Settings > Display**, it then copies each eye into a
+   separate single-layer swapchain for compositor submission
+   (`REFRACT_STEAMVR_EYE_SWAPCHAINS=1`). This setting is off by default; other
+   runtimes and the default SteamVR path continue using the stereo array
+   swapchain. The host frame loop waits for a GPU event before releasing the mutex, allowing the receive
    device to overwrite the cache safely. Both sides flush and check GPU
    completion; no pixel readback is involved. Retaining
    that cache keeps previously submitted pixels and their render poses together

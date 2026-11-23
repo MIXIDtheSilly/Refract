@@ -22,6 +22,7 @@ constexpr u64 PageUp(u64 v) { return (v + kPageSize - 1) & ~(kPageSize - 1); }
 
 // 0 = errors only, 1 = info, 2 = every syscall, 3 = very noisy.
 extern int g_verbose;
+extern bool g_trace_platform;
 
 void Log(const char* fmt, ...);
 [[noreturn]] void Fatal(const char* fmt, ...);

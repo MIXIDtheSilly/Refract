@@ -5,14 +5,26 @@ set -e
 HERE="$(cd "$(dirname "$0")" && pwd -W)"
 ROOT="$HERE/../.."
 OUT="$ROOT/build-native/java"
-JDK="${REFRACT_JDK:-/c/Program Files/Java/jdk-27}"
-ANDROID_JAR="${ANDROID_JAR:-$USERPROFILE/Android/Sdk/platforms/android-34/android.jar}"
-SYSROOT="${REFRACT_SYSROOT:-$ROOT/../dumps/horizon-dump/fs}"
+SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+if [ -z "$SDK" ]; then
+  SDK="${LOCALAPPDATA:-$USERPROFILE}/Android/Sdk"
+fi
+SDK="$(cygpath -m "$SDK")"
+JDK="$(cygpath -m "${REFRACT_JDK:-$ROOT/jdk}")"
+ANDROID_JAR="$(cygpath -m "${ANDROID_JAR:-$SDK/platforms/android-34/android.jar}")"
+SYSROOT="$(cygpath -m "${REFRACT_SYSROOT:-$ROOT/build-native/sysroot}")"
 D2J="${DEX2JAR:-$ROOT/../external/dex2jar/d2j-dex2jar.bat}"
+D2J="$(cygpath -m "$D2J")"
 JAVA="$JDK/bin/java.exe"
 JAVAC="$JDK/bin/javac.exe"
 TOOL="$HERE/tools/ShimBuilder.java"
 ASM="$HERE/tools/lib/asm-9.8.jar"
+for required in "$JAVA" "$JAVAC" "$ANDROID_JAR" "$D2J" "$SYSROOT/system/framework/framework.jar" "$SYSROOT/apex/com.android.art/javalib/core-libart.jar"; do
+  if [ ! -f "$required" ]; then
+    echo "Required Java shim build input not found: $required" >&2
+    exit 1
+  fi
+done
 mkdir -p "$OUT/firmware"
 
 if [ ! -f "$OUT/android-base.jar" ] || [ "$TOOL" -nt "$OUT/android-base.jar" ]; then

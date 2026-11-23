@@ -288,11 +288,9 @@ void Vfs::Classify(const std::string& p, Node* out) {
         }
 }
 
-// Firmware libraries that only talk to Horizon OS services over binder (absent here;
-// their clients wait forever). Apps treat them as optional, as on non-Quest devices.
+// Firmware libraries with Horizon-only dependencies stay hidden unless replaced by a shim.
 static bool HiddenFirmwareFile(const std::string& path) {
     static const char* const kHidden[] = {
-        "/system_ext/lib64/libossdk.oculus.so",  // OVRPlugin's OsSdkLoader
         "/system_ext/lib64/libOVRMrcLib.oculus.so",  // mixed reality capture; calls System.exit off-device
     };
     for (const char* h : kHidden)

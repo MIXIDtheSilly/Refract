@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => ({
   base: './',
   plugins: [react(), ...(mode === 'preview' ? [viteSingleFile()] : [])],
   clearScreen: false,
-  server: { port: 5173, strictPort: true },
+  server: { port: 5173, strictPort: true, watch: { ignored: ['**/src-tauri/target/**'] } },
   build: {
     outDir: mode === 'preview' ? 'dist-preview' : 'dist',
     emptyOutDir: true,

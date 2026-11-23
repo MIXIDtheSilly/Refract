@@ -540,7 +540,7 @@ select.field-input option { background: var(--panel); }
   .save-bar span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  *, *::before, *::after { transition-duration: 0.01ms !important; }
 }
 .welcome-card .orbit { width: 48px; height: 48px; border-radius: 50%; background: var(--on-white); color: var(--white); display: grid; place-items: center; }
 .welcome-card .orbit svg { width: 30px; }

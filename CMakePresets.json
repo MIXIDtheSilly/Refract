@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-native",
+      "displayName": "Refract Windows Native",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-cmake-tools",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "REFRACT_BUILD_ANDROID_RUNTIME": "ON",
+        "REFRACT_BUILD_HOST_BRIDGE": "ON",
+        "REFRACT_BUILD_TESTS": "ON",
+        "REFRACT_OPENXR_HEADERS": "${sourceDir}/build-windows-nvidia/_deps/openxr-sdk/include"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-native",
+      "configurePreset": "windows-native"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-native",
+      "configurePreset": "windows-native"
+    }
+  ]
+}

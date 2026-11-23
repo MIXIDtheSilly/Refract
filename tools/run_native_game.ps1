@@ -3,6 +3,7 @@
     -PcViewer: pose_input_server.py (keyboard, mouse, gamepad) + refract_viewer.exe window on this PC.
     Otherwise: the host bridge sends the game to the VR headset. Either way refract_native.exe runs the game that
     native/tools/install_apk.py prepared, and closing the viewer or bridge window ends the session.
+    -TracePlatform: logs platform-related JNI calls, OpenXR calls, and verbose platform SDK messages.
 #>
 param(
     [string]$GameName,
@@ -11,9 +12,12 @@ param(
     [string]$ObbDir,
     [switch]$Owned,
     [switch]$PcViewer,
+    [switch]$TracePlatform,
     [ValidatePattern('^[1-9][0-9]{0,18}$')][string]$UserId,
     [ValidateRange(512, 4096)][int]$EyeSize = 1600,
-    [ValidateRange(25, 200)][int]$RenderScale = 100
+    [ValidateRange(25, 200)][int]$RenderScale = 100,
+    [switch]$SteamVrEyeSwapchains,
+    [switch]$CaptureStereoFrames
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -24,17 +28,33 @@ $sessionExe = if ($PcViewer) { "$root\viewer\build\refract_viewer.exe" } else {
 }
 $appDir = Join-Path $env:LOCALAPPDATA "Refract\native\apps\$Package"
 if (!(Test-Path $exe)) { throw 'Refract Native is not built. Open Settings > Setup and build it.' }
+if (!(Test-Path "$root\build-native\guest\bin\refract_app")) { throw 'The ARM64 guest launcher is missing. Open Settings > Setup and build Refract Native.' }
+if (!(Test-Path "$root\build-native\java\refract-android.jar")) { throw 'The Android Java shim is missing. Open Settings > Setup and build Refract Native.' }
 if (!$sessionExe -or !(Test-Path $sessionExe)) { throw 'The PC viewer or host bridge is not built. Open Settings > Setup and build the Refract components.' }
 if (!(Test-Path "$appDir\app.properties")) { throw 'Install the game first.' }
 if (!(Test-Path "$Sysroot\system")) { throw "Android system files not found in $Sysroot. Open Settings > Setup and download them." }
 # The release package carries its own Java runtime; refract_native.exe otherwise looks for one in JAVA_HOME or Program Files\Java.
 if (!$env:REFRACT_JAVA_HOME -and (Test-Path "$root\jdk\bin\server\jvm.dll")) { $env:REFRACT_JAVA_HOME = "$root\jdk" }
-# Digitalis translates ARM64 faster than Dynarmic (refract_native's own default); REFRACT_CPU=dynarmic still picks it.
-if (!$env:REFRACT_CPU) { $env:REFRACT_CPU = 'digitalis' }
+# The runner defaults to Dynarmic; select Digitalis with REFRACT_CPU only for builds that include it.
 if ([string]::IsNullOrWhiteSpace($GameName)) { $GameName = $Package }
 # Games installed outside the launcher keep their OBB/asset files in Refract Native's own folder.
 $defaultObb = Join-Path $env:LOCALAPPDATA "Refract\native\obb\$Package"
 if (!$ObbDir -and (Test-Path $defaultObb)) { $ObbDir = $defaultObb }
+# Sideloaded Android bundles may keep the game archive beside the original APK; mount it in place to avoid copying it.
+if (!$ObbDir) {
+    $apkEntry = Get-Content -LiteralPath "$appDir\app.properties" | Where-Object { $_ -match '^apk=' } | Select-Object -First 1
+    if ($apkEntry) {
+        $apkPath = $apkEntry.Substring(4)
+        if (Test-Path -LiteralPath $apkPath -PathType Leaf) {
+            $apkDir = [System.IO.Path]::GetDirectoryName($apkPath)
+            $assetArchive = Get-ChildItem -LiteralPath $apkDir -Filter '*.hdog' -File | Select-Object -First 1
+            if ($assetArchive) {
+                $ObbDir = $apkDir
+                Write-Host "Mounting game asset archive $($assetArchive.Name)."
+            }
+        }
+    }
+}
 # Like run_windows_game.ps1: scripts\owned_games.txt lists the games the player owns.
 $ownedGamesFile = Join-Path $root 'scripts\owned_games.txt'
 if (!$Owned -and (Test-Path -LiteralPath $ownedGamesFile) -and
@@ -66,9 +86,19 @@ try {
         Start-Sleep -Milliseconds 800
         if ($session.HasExited) { throw 'The PC viewer could not start (log: build-windows-game\viewer.err).' }
     } else {
+        $previousSteamVrEyeSwapchains = $env:REFRACT_STEAMVR_EYE_SWAPCHAINS
+        $previousCapturePrefix = $env:REFRACT_CAPTURE_PREFIX
+        $env:REFRACT_STEAMVR_EYE_SWAPCHAINS = if ($SteamVrEyeSwapchains) { '1' } else { '0' }
         $env:REFRACT_RENDER_SCALE = $RenderScale
+        if ($CaptureStereoFrames) { $env:REFRACT_CAPTURE_PREFIX = Join-Path $logs 'stereo' }
         try { $session = Start-Process -FilePath $sessionExe -ArgumentList @('--serve-openxr', '38490', '0', $title) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\host.log" -RedirectStandardError "$logs\host.err" }
-        finally { Remove-Item Env:REFRACT_RENDER_SCALE -ErrorAction SilentlyContinue }
+        finally {
+            if ($null -eq $previousSteamVrEyeSwapchains) { Remove-Item Env:REFRACT_STEAMVR_EYE_SWAPCHAINS -ErrorAction SilentlyContinue }
+            else { $env:REFRACT_STEAMVR_EYE_SWAPCHAINS = $previousSteamVrEyeSwapchains }
+            if ($null -eq $previousCapturePrefix) { Remove-Item Env:REFRACT_CAPTURE_PREFIX -ErrorAction SilentlyContinue }
+            else { $env:REFRACT_CAPTURE_PREFIX = $previousCapturePrefix }
+            Remove-Item Env:REFRACT_RENDER_SCALE -ErrorAction SilentlyContinue
+        }
         $null = $session.Handle
         # Start the game only once the bridge has an OpenXR session (it then prints the tracking origin).
         for ($waited = 0; $waited -lt 15000 -and !$session.HasExited; $waited += 250) {
@@ -81,9 +111,15 @@ try {
         }
     }
 
-    $arguments = @('--sysroot', "`"$Sysroot`"", '--app', "`"$appDir`"")
+    $arguments = @()
+    $arguments += '--sysroot', "`"$Sysroot`"", '--app', "`"$appDir`""
     $arguments += '--prop', "debug.refract.platform.owned.$Package=$(if ($Owned) { 1 } else { 0 })"
     if ($UserId) { $arguments += '--prop', "debug.refract.platform.user_id=$UserId" }
+    if ($TracePlatform) {
+        $arguments += '--trace-platform'
+        $arguments += '--prop', 'debug.refract.log_calls=1'
+        $arguments += '--prop', 'debug.refract.platform.verbose=1'
+    }
     # As in run_windows_game.ps1: ASTC textures are stored as RGBA8, which overflows a 10 GB card in Batman: Arkham Shadow.
     if ($Package -eq 'com.camouflaj.manta') { $arguments += '--prop', 'debug.refract.texture_mip_limit=1' }
     # In VR the bridge sends one pose per headset frame and the game starts its frames on them, with the runtime's field of view.

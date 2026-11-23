@@ -9,6 +9,14 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.util.ArrayList;
 import java.util.List;
 import refract.Runtime;
@@ -23,26 +31,182 @@ public final class PackageManagerImpl extends PackageManager {
 
     private static android.content.pm.Signature[] signers;
 
-    /** The APK's signer certificates (v1 signature: META-INF/*.RSA|DSA|EC), as PackageParser reports them. */
+    private static final byte[] APK_SIG_BLOCK_MAGIC = {
+        'A', 'P', 'K', ' ', 'S', 'i', 'g', ' ', 'B', 'l', 'o', 'c', 'k', ' ', '4', '2'
+    };
+    private static final int APK_SIG_V2_ID = 0x7109871a;
+    private static final int APK_SIG_V3_ID = 0xf05368c0;
+    private static final int APK_SIG_V31_ID = 0x1b93ad61;
+
+    /** The APK's current signer certificates, as PackageParser reports them. */
     static synchronized android.content.pm.Signature[] signers() {
         if (signers != null) return signers;
         List<android.content.pm.Signature> out = new ArrayList<>();
-        try (java.util.zip.ZipFile z = new java.util.zip.ZipFile(System.getProperty("refract.apkHost"))) {
+        String apkPath = System.getProperty("refract.apkHost");
+        if (apkPath == null || apkPath.isEmpty()) {
+            Runtime.log(5, "refract", "APK signature: refract.apkHost is not set");
+            return signers = new android.content.pm.Signature[0];
+        }
+        File apk = new File(apkPath);
+        try (java.util.zip.ZipFile z = new java.util.zip.ZipFile(apk)) {
             for (var it = z.entries(); it.hasMoreElements(); ) {
                 java.util.zip.ZipEntry e = it.nextElement();
                 String n = e.getName().toUpperCase(java.util.Locale.ROOT);
                 if (!n.startsWith("META-INF/") || n.indexOf('/', 9) >= 0
                         || !(n.endsWith(".RSA") || n.endsWith(".DSA") || n.endsWith(".EC"))) continue;
                 try (java.io.InputStream in = z.getInputStream(e)) {
-                    var certs = java.security.cert.CertificateFactory.getInstance("X.509").generateCertificates(in);
+                    var certs = CertificateFactory.getInstance("X.509").generateCertificates(in);
                     if (!certs.isEmpty()) out.add(new android.content.pm.Signature(certs.iterator().next().getEncoded()));
                 }
             }
-        } catch (Exception ex) {
+        } catch (IOException | CertificateException ex) {
             Runtime.log(5, "refract", "APK signature: " + ex);
         }
-        if (out.isEmpty()) Runtime.log(5, "refract", "APK has no v1 signature; reporting no signers");
+        if (out.isEmpty()) {
+            try {
+                out.addAll(signingBlockSigners(apk));
+            } catch (IOException | CertificateException ex) {
+                Runtime.log(5, "refract", "APK signing block: " + ex);
+            }
+        }
+        if (out.isEmpty()) Runtime.log(5, "refract", "APK has no supported signature; reporting no signers");
         return signers = out.toArray(new android.content.pm.Signature[0]);
+    }
+
+    private static List<android.content.pm.Signature> signingBlockSigners(File apk)
+            throws IOException, CertificateException {
+        try (RandomAccessFile file = new RandomAccessFile(apk, "r")) {
+            long fileLength = file.length();
+            int tailLength = (int) Math.min(fileLength, 22 + 0xffffL);
+            byte[] tail = new byte[tailLength];
+            file.seek(fileLength - tailLength);
+            file.readFully(tail);
+
+            int eocd = -1;
+            for (int i = tail.length - 22; i >= 0; i--) {
+                if (readIntLE(tail, i) == 0x06054b50
+                        && i + 22 + readUnsignedShortLE(tail, i + 20) == tail.length) {
+                    eocd = i;
+                    break;
+                }
+            }
+            if (eocd < 0) throw new IOException("ZIP end of central directory not found");
+            long centralDirectoryOffset = Integer.toUnsignedLong(readIntLE(tail, eocd + 16));
+            if (centralDirectoryOffset == 0xffffffffL)
+                throw new IOException("ZIP64 central directory is not supported");
+            if (centralDirectoryOffset < 24 || centralDirectoryOffset > fileLength)
+                throw new IOException("Invalid ZIP central directory offset");
+
+            file.seek(centralDirectoryOffset - 24);
+            byte[] footer = new byte[24];
+            file.readFully(footer);
+            for (int i = 0; i < APK_SIG_BLOCK_MAGIC.length; i++) {
+                if (footer[i + 8] != APK_SIG_BLOCK_MAGIC[i]) return new ArrayList<>();
+            }
+            long blockSize = readLongLE(footer, 0);
+            long blockStart = centralDirectoryOffset - blockSize - 8;
+            if (blockSize < 24 || blockStart < 0)
+                throw new IOException("Invalid APK signing block size");
+            file.seek(blockStart);
+            if (readLongLE(file) != blockSize) throw new IOException("APK signing block size mismatch");
+
+            long pairOffset = blockStart + 8;
+            long pairsEnd = centralDirectoryOffset - 24;
+            int selectedPriority = 0;
+            List<android.content.pm.Signature> selected = new ArrayList<>();
+            while (pairOffset < pairsEnd) {
+                if (pairsEnd - pairOffset < 8) throw new IOException("Truncated APK signing block pair");
+                file.seek(pairOffset);
+                long pairLength = readLongLE(file);
+                if (pairLength < 4 || pairLength > pairsEnd - pairOffset - 8)
+                    throw new IOException("Invalid APK signing block pair length");
+                int id = readIntLE(file);
+                long valueLength = pairLength - 4;
+                int priority = signingSchemePriority(id);
+                if (priority > 0) {
+                    if (valueLength > Integer.MAX_VALUE)
+                        throw new IOException("APK signer data is too large");
+                    byte[] value = new byte[(int) valueLength];
+                    file.readFully(value);
+                    if (priority > selectedPriority) {
+                        selected = parseSigningSchemeSigners(value);
+                        selectedPriority = priority;
+                    }
+                }
+                pairOffset += 8 + pairLength;
+            }
+            return selected;
+        }
+    }
+
+    private static int signingSchemePriority(int id) {
+        if (id == APK_SIG_V31_ID) return 3;
+        if (id == APK_SIG_V3_ID) return 2;
+        if (id == APK_SIG_V2_ID) return 1;
+        return 0;
+    }
+
+    private static List<android.content.pm.Signature> parseSigningSchemeSigners(byte[] value)
+            throws IOException, CertificateException {
+        ByteBuffer block = ByteBuffer.wrap(value).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer signers = lengthPrefixedSlice(block);
+        if (block.hasRemaining()) throw new IOException("Trailing APK signer data");
+
+        List<android.content.pm.Signature> out = new ArrayList<>();
+        CertificateFactory certificates = CertificateFactory.getInstance("X.509");
+        while (signers.hasRemaining()) {
+            ByteBuffer signer = lengthPrefixedSlice(signers);
+            ByteBuffer signedData = lengthPrefixedSlice(signer);
+            lengthPrefixedSlice(signer);
+            lengthPrefixedSlice(signer);
+            if (signer.hasRemaining()) throw new IOException("Trailing APK signer fields");
+
+            lengthPrefixedSlice(signedData);
+            ByteBuffer certs = lengthPrefixedSlice(signedData);
+            if (!certs.hasRemaining()) throw new IOException("APK signer has no certificate");
+            ByteBuffer certData = lengthPrefixedSlice(certs);
+            byte[] encoded = new byte[certData.remaining()];
+            certData.get(encoded);
+            java.security.cert.Certificate certificate =
+                    certificates.generateCertificate(new ByteArrayInputStream(encoded));
+            out.add(new android.content.pm.Signature(certificate.getEncoded()));
+        }
+        return out;
+    }
+
+    private static ByteBuffer lengthPrefixedSlice(ByteBuffer source) throws IOException {
+        if (source.remaining() < 4) throw new IOException("Truncated length-prefixed APK signer field");
+        long length = Integer.toUnsignedLong(source.getInt());
+        if (length > source.remaining()) throw new IOException("Invalid APK signer field length");
+        ByteBuffer slice = source.slice().order(ByteOrder.LITTLE_ENDIAN);
+        slice.limit((int) length);
+        source.position(source.position() + (int) length);
+        return slice;
+    }
+
+    private static int readIntLE(byte[] data, int offset) {
+        return (data[offset] & 0xff) | ((data[offset + 1] & 0xff) << 8)
+                | ((data[offset + 2] & 0xff) << 16) | ((data[offset + 3] & 0xff) << 24);
+    }
+
+    private static int readUnsignedShortLE(byte[] data, int offset) {
+        return (data[offset] & 0xff) | ((data[offset + 1] & 0xff) << 8);
+    }
+
+    private static long readLongLE(byte[] data, int offset) {
+        return ByteBuffer.wrap(data, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getLong();
+    }
+
+    private static long readLongLE(RandomAccessFile file) throws IOException {
+        byte[] data = new byte[8];
+        file.readFully(data);
+        return readLongLE(data, 0);
+    }
+
+    private static int readIntLE(RandomAccessFile file) throws IOException {
+        byte[] data = new byte[4];
+        file.readFully(data);
+        return readIntLE(data, 0);
     }
 
     private PackageInfo packageInfo(int flags) {

@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 
 namespace refract::protocol {
 
 constexpr uint32_t kPoseFrameMagic = 0x54434652; // RFCT, little-endian.
-constexpr uint16_t kPoseFrameVersion = 6;
+constexpr uint16_t kPoseFrameVersion = 7;
 constexpr uint32_t kMaxEyeDimension = 8192;
 constexpr uint16_t kPoseFrameType = 1;
 
@@ -17,6 +20,11 @@ struct Pose {
     float qy = 0.0f;
     float qz = 0.0f;
     float qw = 1.0f;
+};
+
+struct LocatedView {
+    Pose pose;
+    float angle_left = 0, angle_right = 0, angle_up = 0, angle_down = 0;
 };
 
 enum ControllerButton : uint32_t {
@@ -79,6 +87,10 @@ struct PoseFrame {
     SpaceVelocity grip_velocity[2];
     SpaceVelocity aim_velocity[2];
     SpaceVelocity local_origin_velocity;
+    // v7: host-runtime eye views in the transmitted tracking world.
+    uint32_t view_count = 0;
+    LocatedView views[2];
+    uint32_t reserved_v7 = 0;
 };
 
 inline bool valid_render_extent(uint32_t width, uint32_t height) {
@@ -92,9 +104,28 @@ inline uint32_t display_period_or_default(const PoseFrame& frame) {
     return valid_display_period(frame.display_period_ns) ? frame.display_period_ns : 11'111'111;
 }
 
+inline bool valid_eye_views(const PoseFrame& frame) {
+    if (frame.version < 7 || frame.view_count != 2) return false;
+    for (const auto& view : frame.views) {
+        const auto& p = view.pose;
+        for (float value : {p.x, p.y, p.z, p.qx, p.qy, p.qz, p.qw,
+                            view.angle_left, view.angle_right, view.angle_up, view.angle_down}) {
+            if (!std::isfinite(value)) return false;
+        }
+        const float norm = p.qx*p.qx + p.qy*p.qy + p.qz*p.qz + p.qw*p.qw;
+        if (std::fabs(norm - 1.0f) > 0.01f ||
+            view.angle_left >= view.angle_right || view.angle_down >= view.angle_up ||
+            view.angle_left <= -1.5707963f || view.angle_right >= 1.5707963f ||
+            view.angle_down <= -1.5707963f || view.angle_up >= 1.5707963f) return false;
+    }
+    return true;
+}
+
 static_assert(sizeof(Pose) == 28);
 static_assert(sizeof(ControllerInput) == 24);
 static_assert(sizeof(SpaceVelocity) == 32);
-static_assert(sizeof(PoseFrame) == 2600);
+static_assert(offsetof(PoseFrame, view_count) == 2600);
+static_assert(sizeof(LocatedView) == 44);
+static_assert(sizeof(PoseFrame) == 2696);
 
 } // namespace refract::protocol

@@ -342,7 +342,7 @@ public class ShimBuilder {
                             if (cls.equals(p) || cls.startsWith(p + "$")) in_ = false;
                         if (!in_) continue;
                         jo.putNextEntry(new JarEntry(name));
-                        jo.write(in.getInputStream(e).readAllBytes());
+                        jo.write(fixInterfaceVersion(in.getInputStream(e).readAllBytes()));
                         jo.closeEntry();
                         n++;
                     }
@@ -418,10 +418,25 @@ public class ShimBuilder {
         return b;
     }
 
-    /** fixReal, plus stack maps for what must stay at version >= 50 (interfaces with default or static
-     *  methods), which dex2jar doesn't write. */
+    static byte[] fixInterfaceVersion(byte[] b) {
+        ClassModel cm = CF.parse(b);
+        if (!cm.flags().has(AccessFlag.INTERFACE)) return b;
+        int version = cm.majorVersion();
+        for (MethodModel m : cm.methods()) {
+            if (m.code().isPresent())
+                version = Math.max(version, m.flags().has(AccessFlag.PRIVATE) ? 53 : 52);
+        }
+        if (version == cm.majorVersion()) return b;
+        b = b.clone();
+        b[6] = (byte) (version >>> 8);
+        b[7] = (byte) version;
+        return b;
+    }
+
+    /** fixReal, plus Java 8+ versions and stack maps for interface methods with code. */
     static byte[] fixRealFramed(byte[] b, String name) {
         b = fixReal(b);
+        b = fixInterfaceVersion(b);
         ClassModel cm = CF.parse(b);
         if (cm.majorVersion() >= 50 && lacksStackMaps(cm)) {
             try {
